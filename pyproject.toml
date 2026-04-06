@@ -1,0 +1,13 @@
+[project]
+name = "thrds"
+version = "0.1.0"
+description = "Declarative thread sync for Slack and Discord"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
