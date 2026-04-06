@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from .core import Message, SyncOptions, SyncResult, Thread, sync
+from .core import EditRateLimited, Message, SyncOptions, SyncResult, Thread, sync
 
 DISCORD_API = "https://discord.com/api/v10"
 MESSAGE_LIMIT = 2000
@@ -11,7 +11,7 @@ MESSAGE_LIMIT = 2000
 
 class DiscordClient:
     def __init__(self, token: str, channel_id: str):
-        self.token = token
+        self.token = token if token.startswith("Bot ") else f"Bot {token}"
         self.channel_id = channel_id
         self._active_thread_id: str | None = None
 
@@ -36,6 +36,8 @@ class DiscordClient:
             return None
         resp = json.loads(result.stdout)
         if isinstance(resp, dict) and "code" in resp and "message" in resp:
+            if resp["code"] == 30046:
+                raise EditRateLimited(resp["message"])
             raise RuntimeError(f"Discord API error: {resp['message']} (code {resp['code']})")
         return resp
 
@@ -51,6 +53,7 @@ class DiscordClient:
         return [
             Message(id=m["id"], content=m.get("content", ""))
             for m in reversed(resp)
+            if m.get("type", 0) == 0
         ]
 
     def post(self, content: str, thread_id: str | None = None) -> Message:

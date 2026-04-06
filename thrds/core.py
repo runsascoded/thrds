@@ -8,6 +8,10 @@ if TYPE_CHECKING:
     from .protocol import ThreadClient
 
 
+class EditRateLimited(Exception):
+    """Raised when an edit is rate-limited (e.g. Discord code 30046)."""
+
+
 class ActionType(Enum):
     SKIP = "skip"
     EDIT = "edit"
@@ -82,6 +86,7 @@ def sync(
 
     # Phase 2: Edit overlapping messages
     overlap = min(M, N)
+    repost_from: int | None = None
     for i in range(overlap):
         if existing[i].content == desired.messages[i]:
             actions.append(Action(
@@ -102,8 +107,32 @@ def sync(
             if opts.dry_run:
                 message_ids.append(existing[i].id)
             else:
-                result_msg = client.edit(existing[i].id, desired.messages[i])
+                try:
+                    result_msg = client.edit(existing[i].id, desired.messages[i])
+                except EditRateLimited:
+                    # Fall back to delete+repost for this and all remaining messages
+                    repost_from = i
+                    break
                 message_ids.append(result_msg.id)
+
+    # Phase 2b: Delete+repost fallback (on edit rate limit)
+    if repost_from is not None:
+        # Delete remaining existing messages from end to repost_from
+        for j in range(overlap - 1, repost_from - 1, -1):
+            msg = existing[j]
+            actions.append(Action(type=ActionType.DELETE, index=j, message_id=msg.id))
+            client.delete(msg.id)
+        # Post replacements (and any new messages beyond overlap)
+        for j in range(repost_from, M):
+            action = Action(type=ActionType.POST, index=j, content=desired.messages[j])
+            actions.append(action)
+            result_msg = client.post(desired.messages[j], thread_id=thread_id)
+            message_ids.append(result_msg.id)
+        return SyncResult(
+            thread_id=thread_id or "",
+            message_ids=message_ids,
+            actions=actions,
+        )
 
     # Phase 3: Post new messages at the end
     if M > N:

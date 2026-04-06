@@ -1,4 +1,4 @@
-from thrds import Action, ActionType, Message, SyncOptions, Thread, sync
+from thrds import Action, ActionType, EditRateLimited, Message, SyncOptions, Thread, sync
 
 
 class MockClient:
@@ -140,3 +140,76 @@ def test_dry_run():
     # Verify no actual changes were made
     msgs = client.threads["t1"]
     assert [m.content for m in msgs] == ["OP"]
+
+
+class RateLimitedMockClient(MockClient):
+    """MockClient that raises EditRateLimited on the Nth edit call."""
+    def __init__(self, fail_after_n_edits: int, **kwargs):
+        super().__init__(**kwargs)
+        self._edit_count = 0
+        self._fail_after = fail_after_n_edits
+
+    def edit(self, message_id: str, content: str) -> Message:
+        self._edit_count += 1
+        if self._edit_count > self._fail_after:
+            raise EditRateLimited("rate limited")
+        return super().edit(message_id, content)
+
+
+def test_edit_rate_limit_fallback():
+    """When edit hits rate limit, remaining messages are deleted and reposted."""
+    client = RateLimitedMockClient(
+        fail_after_n_edits=1,
+        threads={"t1": [
+            Message(id="m1", content="Old OP"),
+            Message(id="m2", content="Old R1"),
+            Message(id="m3", content="Old R2"),
+        ]},
+    )
+    desired = Thread(messages=["New OP", "New R1", "New R2"])
+    result = sync(client, desired, thread_id="t1")
+    action_types = [a.type for a in result.actions]
+    # First edit succeeds, second triggers rate limit →
+    # delete m3, m2 (backwards), then post New R1, New R2
+    assert action_types == [
+        ActionType.EDIT,    # m1 → "New OP" (succeeds)
+        ActionType.EDIT,    # m2 → "New R1" (fails, triggers fallback)
+        ActionType.DELETE,  # m3
+        ActionType.DELETE,  # m2
+        ActionType.POST,    # "New R1"
+        ActionType.POST,    # "New R2"
+    ]
+    assert len(result.message_ids) == 3
+    # First ID is m1 (edited), other two are new
+    assert result.message_ids[0] == "m1"
+
+
+def test_edit_rate_limit_on_first_edit():
+    """Rate limit on the very first edit → delete all, repost all."""
+    client = RateLimitedMockClient(
+        fail_after_n_edits=0,
+        threads={"t1": [
+            Message(id="m1", content="Old OP"),
+            Message(id="m2", content="Old R1"),
+        ]},
+    )
+    desired = Thread(messages=["New OP", "New R1"])
+    result = sync(client, desired, thread_id="t1")
+    action_types = [a.type for a in result.actions]
+    assert action_types == [
+        ActionType.EDIT,    # m1 (fails)
+        ActionType.DELETE,  # m2
+        ActionType.DELETE,  # m1
+        ActionType.POST,    # "New OP"
+        ActionType.POST,    # "New R1"
+    ]
+    assert len(result.message_ids) == 2
+
+
+def test_bot_token_prefix():
+    """DiscordClient auto-prepends 'Bot ' to tokens."""
+    from thrds import DiscordClient
+    client_bare = DiscordClient(token="my-token", channel_id="123")
+    assert client_bare.token == "Bot my-token"
+    client_prefixed = DiscordClient(token="Bot my-token", channel_id="123")
+    assert client_prefixed.token == "Bot my-token"
