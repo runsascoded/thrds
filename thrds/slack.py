@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import urllib.request
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 
 from .core import Message, SyncOptions, SyncResult, Thread, sync
 
@@ -14,16 +15,21 @@ class SlackClient:
 
     def _request(
         self,
-        method: str,
+        endpoint: str,
         data: dict | None = None,
+        method: str = "POST",
     ) -> dict:
-        url = f"https://slack.com/api/{method}"
+        url = f"https://slack.com/api/{endpoint}"
         headers = {
             "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json; charset=utf-8",
         }
-        body = json.dumps(data).encode() if data else None
-        req = urllib.request.Request(url, data=body, headers=headers)
+        if method == "GET" and data:
+            url = f"{url}?{urlencode(data)}"
+            body = None
+        else:
+            headers["Content-Type"] = "application/json; charset=utf-8"
+            body = json.dumps(data).encode() if data else None
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req) as resp:
                 result = json.loads(resp.read())
@@ -37,7 +43,7 @@ class SlackClient:
         result = self._request("conversations.replies", {
             "channel": self.channel,
             "ts": thread_id,
-        })
+        }, method="GET")
         return [
             Message(id=m["ts"], content=m.get("text", ""))
             for m in result.get("messages", [])
