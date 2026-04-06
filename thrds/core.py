@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -53,6 +54,7 @@ class SyncOptions:
     suppress_embeds: bool = False
     dry_run: bool = False
     thread_name: str | None = None
+    pace: float = 0.0
 
 
 def sync(
@@ -65,6 +67,13 @@ def sync(
     opts = options or SyncOptions()
     actions: list[Action] = []
     message_ids: list[str] = []
+    mutated = False
+
+    def _pace():
+        nonlocal mutated
+        if mutated and opts.pace > 0:
+            time.sleep(opts.pace)
+        mutated = True
 
     # Get existing messages (if thread exists)
     if thread_id is not None:
@@ -82,6 +91,7 @@ def sync(
             action = Action(type=ActionType.DELETE, index=i, message_id=msg.id)
             actions.append(action)
             if not opts.dry_run:
+                _pace()
                 client.delete(msg.id)
 
     # Phase 2: Edit overlapping messages
@@ -108,6 +118,7 @@ def sync(
                 message_ids.append(existing[i].id)
             else:
                 try:
+                    _pace()
                     result_msg = client.edit(existing[i].id, desired.messages[i])
                 except EditRateLimited:
                     # Fall back to delete+repost for this and all remaining messages
@@ -121,11 +132,13 @@ def sync(
         for j in range(overlap - 1, repost_from - 1, -1):
             msg = existing[j]
             actions.append(Action(type=ActionType.DELETE, index=j, message_id=msg.id))
+            _pace()
             client.delete(msg.id)
         # Post replacements (and any new messages beyond overlap)
         for j in range(repost_from, M):
             action = Action(type=ActionType.POST, index=j, content=desired.messages[j])
             actions.append(action)
+            _pace()
             result_msg = client.post(desired.messages[j], thread_id=thread_id)
             message_ids.append(result_msg.id)
         return SyncResult(
@@ -149,6 +162,7 @@ def sync(
                 message_ids.append("<new>")
                 thread_id = "<new>"
             else:
+                _pace()
                 result_msg = client.post(desired.messages[0])
                 thread_id = result_msg.id
                 message_ids.append(result_msg.id)
@@ -164,6 +178,7 @@ def sync(
             if opts.dry_run:
                 message_ids.append("<new>")
             else:
+                _pace()
                 result_msg = client.post(desired.messages[i], thread_id=thread_id)
                 message_ids.append(result_msg.id)
 

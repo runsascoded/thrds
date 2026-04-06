@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.request
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -30,11 +31,18 @@ class SlackClient:
             headers["Content-Type"] = "application/json; charset=utf-8"
             body = json.dumps(data).encode() if data else None
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req) as resp:
-                result = json.loads(resp.read())
-        except HTTPError as e:
-            raise RuntimeError(f"Slack API error: {e.code} {e.read().decode()}") from e
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    result = json.loads(resp.read())
+                break
+            except HTTPError as e:
+                if e.code == 429 and attempt < max_retries:
+                    retry_after = int(e.headers.get("Retry-After", 1))
+                    time.sleep(retry_after)
+                    continue
+                raise RuntimeError(f"Slack API error: {e.code} {e.read().decode()}") from e
         if not result.get("ok"):
             raise RuntimeError(f"Slack API error: {result.get('error', result)}")
         return result
@@ -78,10 +86,11 @@ class SlackClient:
         thread: Thread,
         thread_ts: str | None = None,
         dry_run: bool = False,
+        pace: float = 0.4,
     ) -> SyncResult:
         return sync(
             client=self,
             desired=thread,
             thread_id=thread_ts,
-            options=SyncOptions(dry_run=dry_run),
+            options=SyncOptions(dry_run=dry_run, pace=pace),
         )
