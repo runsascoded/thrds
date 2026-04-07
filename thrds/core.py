@@ -52,6 +52,7 @@ class SyncResult:
 @dataclass
 class SyncOptions:
     suppress_embeds: bool = False
+    suppress_unfurls: bool = True
     dry_run: bool = False
     thread_name: str | None = None
     pace: float = 0.0

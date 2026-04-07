@@ -13,6 +13,7 @@ class SlackClient:
     def __init__(self, token: str, channel: str):
         self.token = token
         self.channel = channel
+        self._suppress_unfurls: bool = True
 
     def _request(
         self,
@@ -61,6 +62,8 @@ class SlackClient:
         data: dict = {
             "channel": self.channel,
             "text": content,
+            "unfurl_links": not self._suppress_unfurls,
+            "unfurl_media": not self._suppress_unfurls,
         }
         if thread_id is not None:
             data["thread_ts"] = thread_id
@@ -72,6 +75,8 @@ class SlackClient:
             "channel": self.channel,
             "ts": message_id,
             "text": content,
+            "unfurl_links": not self._suppress_unfurls,
+            "unfurl_media": not self._suppress_unfurls,
         })
         return Message(id=message_id, content=content)
 
@@ -87,10 +92,16 @@ class SlackClient:
         thread_ts: str | None = None,
         dry_run: bool = False,
         pace: float = 0.4,
+        suppress_unfurls: bool = True,
     ) -> SyncResult:
+        self._suppress_unfurls = suppress_unfurls
         return sync(
             client=self,
             desired=thread,
             thread_id=thread_ts,
-            options=SyncOptions(dry_run=dry_run, pace=pace),
+            options=SyncOptions(
+                dry_run=dry_run,
+                pace=pace,
+                suppress_unfurls=suppress_unfurls,
+            ),
         )
