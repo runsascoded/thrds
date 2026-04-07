@@ -2,6 +2,8 @@
 
 These test the client's protocol compliance without hitting the real API.
 """
+import pytest
+
 from thrds import ActionType, EditRateLimited, Message, Thread, sync
 
 
@@ -121,12 +123,13 @@ def test_bsky_char_limit():
 
 def test_bsky_import():
     """BskyClient is importable when atproto is installed."""
+    atproto = pytest.importorskip("atproto")
     from thrds import BskyClient
     assert BskyClient is not None
 
 
 def test_bsky_edit_raises():
     """BskyClient.edit() always raises EditRateLimited."""
+    atproto = pytest.importorskip("atproto")
     from thrds.bsky import BskyClient
-    # Can't instantiate without credentials, but we can test the class method exists
     assert hasattr(BskyClient, 'edit')
