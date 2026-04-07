@@ -16,3 +16,10 @@ __all__ = [
     "ThreadClient",
     "sync",
 ]
+
+# BskyClient requires atproto; import lazily
+try:
+    from .bsky import BskyClient
+    __all__.append("BskyClient")
+except ImportError:
+    pass

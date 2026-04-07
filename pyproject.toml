@@ -1,11 +1,15 @@
 [project]
 name = "thrds"
 version = "0.1.0"
-description = "Declarative thread sync for Slack and Discord"
+description = "Declarative thread sync for Slack, Discord, and Bluesky"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
+slack = []           # Zero deps (stdlib urllib)
+discord = []         # Zero deps (subprocess curl)
+bsky = ["atproto>=0.0.46"]
+all = ["atproto>=0.0.46"]
 test = ["pytest"]
 
 [build-system]
