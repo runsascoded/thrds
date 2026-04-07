@@ -14,6 +14,7 @@ class DiscordClient:
         self.token = token if token.startswith("Bot ") else f"Bot {token}"
         self.channel_id = channel_id
         self._active_thread_id: str | None = None
+        self._suppress_embeds: bool = False
 
     def _curl(
         self,
@@ -61,6 +62,8 @@ class DiscordClient:
             raise ValueError(f"Message exceeds Discord's {MESSAGE_LIMIT} char limit ({len(content)} chars)")
         channel = thread_id or self._channel
         data: dict = {"content": content}
+        if self._suppress_embeds:
+            data["flags"] = 4
         resp = self._curl("POST", f"/channels/{channel}/messages", data)
         return Message(id=resp["id"], content=content)
 
@@ -74,9 +77,10 @@ class DiscordClient:
     def edit(self, message_id: str, content: str) -> Message:
         if len(content) > MESSAGE_LIMIT:
             raise ValueError(f"Message exceeds Discord's {MESSAGE_LIMIT} char limit ({len(content)} chars)")
-        self._curl("PATCH", f"/channels/{self._channel}/messages/{message_id}", {
-            "content": content,
-        })
+        data: dict = {"content": content}
+        if self._suppress_embeds:
+            data["flags"] = 4
+        self._curl("PATCH", f"/channels/{self._channel}/messages/{message_id}", data)
         return Message(id=message_id, content=content)
 
     def delete(self, message_id: str) -> None:
@@ -91,6 +95,7 @@ class DiscordClient:
         thread_name: str | None = None,
     ) -> SyncResult:
         self._active_thread_id = thread_id
+        self._suppress_embeds = suppress_embeds
         try:
             return sync(
                 client=self,
@@ -104,3 +109,4 @@ class DiscordClient:
             )
         finally:
             self._active_thread_id = None
+            self._suppress_embeds = False
