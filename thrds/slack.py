@@ -14,6 +14,7 @@ class SlackClient:
         self.token = token
         self.channel = channel
         self._suppress_unfurls: bool = True
+        self._metadata_by_content: dict[str, dict] | None = None
 
     def _request(
         self,
@@ -48,6 +49,12 @@ class SlackClient:
             raise RuntimeError(f"Slack API error: {result.get('error', result)}")
         return result
 
+    def _metadata_for(self, content: str) -> dict | None:
+        """Look up metadata for a message by its content."""
+        if self._metadata_by_content is None:
+            return None
+        return self._metadata_by_content.get(content)
+
     def list_messages(self, thread_id: str) -> list[Message]:
         result = self._request("conversations.replies", {
             "channel": self.channel,
@@ -67,17 +74,24 @@ class SlackClient:
         }
         if thread_id is not None:
             data["thread_ts"] = thread_id
+        md = self._metadata_for(content)
+        if md is not None:
+            data["metadata"] = md
         result = self._request("chat.postMessage", data)
         return Message(id=result["ts"], content=content)
 
     def edit(self, message_id: str, content: str) -> Message:
-        self._request("chat.update", {
+        data: dict = {
             "channel": self.channel,
             "ts": message_id,
             "text": content,
             "unfurl_links": not self._suppress_unfurls,
             "unfurl_media": not self._suppress_unfurls,
-        })
+        }
+        md = self._metadata_for(content)
+        if md is not None:
+            data["metadata"] = md
+        self._request("chat.update", data)
         return Message(id=message_id, content=content)
 
     def permalink(self, message_ts: str) -> str:
@@ -101,15 +115,35 @@ class SlackClient:
         dry_run: bool = False,
         pace: float = 0.4,
         suppress_unfurls: bool = True,
+        metadata: dict[str, dict] | None = None,
     ) -> SyncResult:
+        """Sync a thread to the desired state.
+
+        Args:
+            metadata: Optional dict mapping message content → Slack metadata.
+                Each matching message gets the metadata dict passed on post/edit.
+
+                Example::
+
+                    metadata={
+                        crash_text: {
+                            "event_type": "new_crash",
+                            "event_payload": {"ACCID": "123"},
+                        },
+                    }
+        """
         self._suppress_unfurls = suppress_unfurls
-        return sync(
-            client=self,
-            desired=thread,
-            thread_id=thread_ts,
-            options=SyncOptions(
-                dry_run=dry_run,
-                pace=pace,
-                suppress_unfurls=suppress_unfurls,
-            ),
-        )
+        self._metadata_by_content = metadata
+        try:
+            return sync(
+                client=self,
+                desired=thread,
+                thread_id=thread_ts,
+                options=SyncOptions(
+                    dry_run=dry_run,
+                    pace=pace,
+                    suppress_unfurls=suppress_unfurls,
+                ),
+            )
+        finally:
+            self._metadata_by_content = None
