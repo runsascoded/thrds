@@ -114,6 +114,7 @@ class SlackClient:
         thread_ts: str | None = None,
         dry_run: bool = False,
         pace: float = 0.4,
+        jitter: float = 0.0,
         suppress_unfurls: bool = True,
         metadata: dict[str, dict] | None = None,
     ) -> SyncResult:
@@ -142,6 +143,7 @@ class SlackClient:
                 options=SyncOptions(
                     dry_run=dry_run,
                     pace=pace,
+                    jitter=jitter,
                     suppress_unfurls=suppress_unfurls,
                 ),
             )

@@ -93,6 +93,7 @@ class BskyClient:
         thread_id: str | None = None,
         dry_run: bool = False,
         pace: float = 0.5,
+        jitter: float = 0.0,
     ) -> SyncResult:
         """Sync a thread to the desired state.
 
@@ -106,5 +107,6 @@ class BskyClient:
             options=SyncOptions(
                 dry_run=dry_run,
                 pace=pace,
+                jitter=jitter,
             ),
         )

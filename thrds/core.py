@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -56,6 +57,7 @@ class SyncOptions:
     dry_run: bool = False
     thread_name: str | None = None
     pace: float = 0.0
+    jitter: float = 0.0
 
 
 def sync(
@@ -73,7 +75,8 @@ def sync(
     def _pace():
         nonlocal mutated
         if mutated and opts.pace > 0:
-            time.sleep(opts.pace)
+            delay = opts.pace + random.uniform(0, opts.jitter)
+            time.sleep(delay)
         mutated = True
 
     # Get existing messages (if thread exists)

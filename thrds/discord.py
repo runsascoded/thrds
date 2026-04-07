@@ -91,6 +91,8 @@ class DiscordClient:
         thread: Thread,
         thread_id: str | None = None,
         dry_run: bool = False,
+        pace: float = 0.0,
+        jitter: float = 0.0,
         suppress_embeds: bool = False,
         thread_name: str | None = None,
     ) -> SyncResult:
@@ -103,6 +105,8 @@ class DiscordClient:
                 thread_id=thread_id,
                 options=SyncOptions(
                     dry_run=dry_run,
+                    pace=pace,
+                    jitter=jitter,
                     suppress_embeds=suppress_embeds,
                     thread_name=thread_name,
                 ),
