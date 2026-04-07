@@ -1,10 +1,23 @@
 [project]
 name = "thrds"
-version = "0.1.1"
+version = "0.1.2"
 description = "Declarative thread sync for Slack, Discord, and Bluesky"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Communications :: Chat",
+]
+
+[project.urls]
+Homepage = "https://github.com/runsascoded/thrds"
+Repository = "https://github.com/runsascoded/thrds"
+Issues = "https://github.com/runsascoded/thrds/issues"
+PyPI = "https://pypi.org/project/thrds"
 
 [project.optional-dependencies]
 slack = []           # Zero deps (stdlib urllib)
