@@ -7,6 +7,9 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 from .core import Message, SyncOptions, SyncResult, Thread, sync
+from .linked import LinkedSyncResult, LinkedThread, build_detail_messages, build_summary_messages
+
+SLACK_MESSAGE_LIMIT = 4000
 
 
 class SlackClient:
@@ -149,3 +152,74 @@ class SlackClient:
             )
         finally:
             self._metadata_by_content = None
+
+    def _detail_link_placeholder(self) -> str:
+        """Placeholder link with max possible length for space reservation.
+
+        Slack permalinks are ~120 chars; use 130 as safe upper bound.
+        """
+        return f"(<{'x' * 120}|details>)"
+
+    def sync_linked(
+        self,
+        linked: LinkedThread,
+        thread_ts: str | None = None,
+        dry_run: bool = False,
+        pace: float = 0.4,
+        jitter: float = 0.0,
+        suppress_unfurls: bool = True,
+    ) -> LinkedSyncResult:
+        """Sync a linked summary thread."""
+        placeholder = self._detail_link_placeholder()
+
+        # Phase 1: Build detail + summary messages with placeholder links
+        detail_msgs, section_starts = build_detail_messages(linked.sections, SLACK_MESSAGE_LIMIT)
+        placeholder_links = [placeholder] * len(linked.sections)
+        summary_msgs = build_summary_messages(linked, placeholder_links, SLACK_MESSAGE_LIMIT)
+
+        n_summary = len(summary_msgs)
+        all_msgs = summary_msgs + detail_msgs
+
+        # Phase 2: Sync all messages
+        result = self.sync(
+            Thread(messages=all_msgs),
+            thread_ts=thread_ts,
+            dry_run=dry_run,
+            pace=pace,
+            jitter=jitter,
+            suppress_unfurls=suppress_unfurls,
+        )
+
+        if dry_run:
+            return LinkedSyncResult(
+                thread_id=result.thread_id,
+                summary_ids=result.message_ids[:n_summary],
+                detail_ids=result.message_ids[n_summary:],
+                section_detail_ids={},
+            )
+
+        tid = result.thread_id
+        detail_ids = result.message_ids[n_summary:]
+        summary_ids = result.message_ids[:n_summary]
+
+        # Phase 3: Resolve real permalinks and build links
+        section_detail_map: dict[str, str] = {}
+        real_links: list[str] = []
+        for i, section in enumerate(linked.sections):
+            detail_idx = section_starts[i]
+            detail_msg_id = detail_ids[detail_idx]
+            section_detail_map[section.title] = detail_msg_id
+            plink = self.permalink(detail_msg_id)
+            real_links.append(f"(<{plink}|details>)")
+
+        # Phase 4: Rebuild summaries with real links and edit
+        final_summaries = build_summary_messages(linked, real_links, SLACK_MESSAGE_LIMIT)
+        for msg_id, content in zip(summary_ids, final_summaries):
+            self.edit(msg_id, content)
+
+        return LinkedSyncResult(
+            thread_id=tid,
+            summary_ids=summary_ids,
+            detail_ids=detail_ids,
+            section_detail_ids=section_detail_map,
+        )
