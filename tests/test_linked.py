@@ -83,6 +83,24 @@ def test_build_summary_with_suffix():
     assert "_footer_" in msgs[0]
 
 
+def test_build_summary_empty_prefix():
+    """Empty summary_prefix should not produce a leading newline or empty message."""
+    linked = LinkedThread(
+        summary_prefix="",
+        sections=[
+            Section(title="A", summary="stuff", body=""),
+            Section(title="B", summary="things", body=""),
+        ],
+    )
+    links = ["(link-a)", "(link-b)"]
+    msgs = build_summary_messages(linked, links, 200)
+    assert len(msgs) == 1
+    # Should not start with a newline
+    assert not msgs[0].startswith("\n")
+    assert "**A**" in msgs[0]
+    assert "**B**" in msgs[0]
+
+
 def test_linked_thread_end_to_end():
     """Integration test using MockClient to verify the full sync_linked flow."""
     from thrds import Message

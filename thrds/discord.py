@@ -182,9 +182,16 @@ class DiscordClient:
             real_links.append(self._detail_link(detail_msg_id, tid))
 
         # Phase 4: Rebuild summaries with real links and edit
-        final_summaries = build_summary_messages(linked, real_links, MESSAGE_LIMIT)
-        for i, (msg_id, content) in enumerate(zip(summary_ids, final_summaries)):
-            self.edit(msg_id, content)
+        # Set _active_thread_id so edits target the thread, not the parent channel
+        self._active_thread_id = tid
+        self._suppress_embeds = suppress_embeds
+        try:
+            final_summaries = build_summary_messages(linked, real_links, MESSAGE_LIMIT)
+            for msg_id, content in zip(summary_ids, final_summaries):
+                self.edit(msg_id, content)
+        finally:
+            self._active_thread_id = None
+            self._suppress_embeds = False
 
         return LinkedSyncResult(
             thread_id=tid,

@@ -100,9 +100,13 @@ def build_summary_messages(
     current = linked.summary_prefix
 
     for bullet in bullets:
-        candidate = f"{current}\n{bullet}"
+        if current:
+            candidate = f"{current}\n{bullet}"
+        else:
+            candidate = bullet
         if len(candidate) > limit:
-            messages.append(current)
+            if current:
+                messages.append(current)
             current = bullet
         else:
             current = candidate
