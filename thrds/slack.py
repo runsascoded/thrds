@@ -80,6 +80,14 @@ class SlackClient:
         })
         return Message(id=message_id, content=content)
 
+    def permalink(self, message_ts: str) -> str:
+        """Get a permalink URL for a Slack message."""
+        result = self._request("chat.getPermalink", {
+            "channel": self.channel,
+            "message_ts": message_ts,
+        }, method="GET")
+        return result["permalink"]
+
     def delete(self, message_id: str) -> None:
         self._request("chat.delete", {
             "channel": self.channel,
