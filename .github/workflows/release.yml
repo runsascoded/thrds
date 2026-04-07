@@ -1,0 +1,70 @@
+name: Build and Release
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: astral-sh/setup-uv@v7
+    - run: uv python install ${{ matrix.python-version }}
+    - run: uv sync --python ${{ matrix.python-version }} --extra test
+    - run: uv run pytest tests/ -v
+
+  publish-testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') && contains(github.ref, 'rc')
+    permissions:
+      id-token: write
+    steps:
+    - uses: actions/checkout@v4
+    - uses: astral-sh/setup-uv@v7
+    - run: uv python install 3.12
+    - name: Build package
+      run: uvx --from build pyproject-build --outdir dist
+    - name: Publish to TestPyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref, 'rc')
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+    - uses: actions/checkout@v4
+    - name: Fetch tag annotation
+      run: git fetch origin tag ${{ github.ref_name }} --force
+    - uses: astral-sh/setup-uv@v7
+    - run: uv python install 3.12
+    - name: Build package
+      run: uvx --from build pyproject-build --outdir dist
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+    - name: Get tag message
+      id: tag
+      run: |
+        TAG_MSG=$(git tag -l --format='%(contents:body)' ${{ github.ref_name }})
+        echo "message<<EOF" >> $GITHUB_OUTPUT
+        echo "$TAG_MSG" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: dist/*
+        body: |
+          ${{ steps.tag.outputs.message }}
+        generate_release_notes: true
