@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 import urllib.request
 from urllib.error import HTTPError
@@ -206,6 +207,8 @@ class SlackClient:
         section_detail_map: dict[str, str] = {}
         real_links: list[str] = []
         for i, section in enumerate(linked.sections):
+            if i > 0 and pace > 0:
+                time.sleep(pace + random.uniform(0, jitter))
             detail_idx = section_starts[i]
             detail_msg_id = detail_ids[detail_idx]
             section_detail_map[section.title] = detail_msg_id
@@ -214,7 +217,9 @@ class SlackClient:
 
         # Phase 4: Rebuild summaries with real links and edit
         final_summaries = build_summary_messages(linked, real_links, SLACK_MESSAGE_LIMIT)
-        for msg_id, content in zip(summary_ids, final_summaries):
+        for i, (msg_id, content) in enumerate(zip(summary_ids, final_summaries)):
+            if i > 0 and pace > 0:
+                time.sleep(pace + random.uniform(0, jitter))
             self.edit(msg_id, content)
 
         return LinkedSyncResult(

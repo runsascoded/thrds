@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import random
 import subprocess
+import time
 
 from .core import EditRateLimited, Message, SyncOptions, SyncResult, Thread, sync
 from .linked import LinkedSyncResult, LinkedThread, build_detail_messages, build_summary_messages
@@ -187,7 +189,9 @@ class DiscordClient:
         self._suppress_embeds = suppress_embeds
         try:
             final_summaries = build_summary_messages(linked, real_links, MESSAGE_LIMIT)
-            for msg_id, content in zip(summary_ids, final_summaries):
+            for i, (msg_id, content) in enumerate(zip(summary_ids, final_summaries)):
+                if i > 0 and pace > 0:
+                    time.sleep(pace + random.uniform(0, jitter))
                 self.edit(msg_id, content)
         finally:
             self._active_thread_id = None
