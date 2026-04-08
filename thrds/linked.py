@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 
 @dataclass
@@ -80,20 +81,26 @@ def build_detail_messages(
     return messages, section_starts
 
 
+def _default_bullet(section: Section, url: str) -> str:
+    """Default bullet format (Discord/Markdown): bold linked title."""
+    return f"- [**{section.title}**]({url}) — {section.summary}"
+
+
 def build_summary_messages(
     linked: LinkedThread,
-    section_links: list[str],
+    section_urls: list[str],
     limit: int,
+    bullet_fn: Callable[[Section, str], str] = _default_bullet,
 ) -> list[str]:
     """Build summary messages with section bullets and links.
 
     Greedy-packs bullets into messages respecting the char limit.
-    section_links[i] is the link string for section i (placeholder or real).
+    section_urls[i] is the link URL for section i (placeholder or real).
+    bullet_fn(section, url) returns the formatted bullet line.
     """
     bullets: list[str] = []
     for i, section in enumerate(linked.sections):
-        link = section_links[i]
-        bullet = f"- **{section.title}** — {section.summary} {link}"
+        bullet = bullet_fn(section, section_urls[i])
         bullets.append(bullet)
 
     messages: list[str] = []

@@ -119,15 +119,15 @@ class DiscordClient:
             self._active_thread_id = None
             self._suppress_embeds = False
 
-    def _detail_link(self, message_id: str, thread_id: str) -> str:
-        """Build a Discord message link."""
-        return f"([details](https://discord.com/channels/{self.guild_id}/{thread_id}/{message_id}))"
+    def _detail_url(self, message_id: str, thread_id: str) -> str:
+        """Build a Discord message URL."""
+        return f"https://discord.com/channels/{self.guild_id}/{thread_id}/{message_id}"
 
-    def _detail_link_placeholder(self) -> str:
-        """Placeholder link with max possible length for space reservation."""
+    def _detail_url_placeholder(self) -> str:
+        """Placeholder URL with max possible length for space reservation."""
         # Discord snowflake IDs are up to 20 digits
         fake_id = "0" * 20
-        return f"([details](https://discord.com/channels/{self.guild_id}/{fake_id}/{fake_id}))"
+        return f"https://discord.com/channels/{self.guild_id}/{fake_id}/{fake_id}"
 
     def sync_linked(
         self,
@@ -142,12 +142,12 @@ class DiscordClient:
         if not self.guild_id:
             raise ValueError("`guild_id` required for `sync_linked` (needed for message links)")
 
-        placeholder = self._detail_link_placeholder()
+        placeholder = self._detail_url_placeholder()
 
         # Phase 1: Build detail + summary messages with placeholder links
         detail_msgs, section_starts = build_detail_messages(linked.sections, MESSAGE_LIMIT)
-        placeholder_links = [placeholder] * len(linked.sections)
-        summary_msgs = build_summary_messages(linked, placeholder_links, MESSAGE_LIMIT)
+        placeholder_urls = [placeholder] * len(linked.sections)
+        summary_msgs = build_summary_messages(linked, placeholder_urls, MESSAGE_LIMIT)
 
         n_summary = len(summary_msgs)
         all_msgs = summary_msgs + detail_msgs
@@ -181,7 +181,7 @@ class DiscordClient:
             detail_idx = section_starts[i]
             detail_msg_id = detail_ids[detail_idx]
             section_detail_map[section.title] = detail_msg_id
-            real_links.append(self._detail_link(detail_msg_id, tid))
+            real_links.append(self._detail_url(detail_msg_id, tid))
 
         # Phase 4: Rebuild summaries with real links and edit
         # Set _active_thread_id so edits target the thread, not the parent channel

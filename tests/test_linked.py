@@ -47,12 +47,11 @@ def test_build_summary_messages_single():
             Section(title="B", summary="things", body=""),
         ],
     )
-    links = ["(link-a)", "(link-b)"]
-    msgs = build_summary_messages(linked, links, 200)
+    urls = ["http://link-a", "http://link-b"]
+    msgs = build_summary_messages(linked, urls, 200)
     assert len(msgs) == 1
-    assert "**A**" in msgs[0]
-    assert "**B**" in msgs[0]
-    assert "(link-a)" in msgs[0]
+    assert "[**A**](http://link-a)" in msgs[0]
+    assert "[**B**](http://link-b)" in msgs[0]
 
 
 def test_build_summary_messages_split():
@@ -63,12 +62,12 @@ def test_build_summary_messages_split():
             Section(title="B", summary="things", body=""),
         ],
     )
-    links = ["(link-a)", "(link-b)"]
+    urls = ["http://link-a", "http://link-b"]
     # Very small limit forces split
-    msgs = build_summary_messages(linked, links, 50)
+    msgs = build_summary_messages(linked, urls, 60)
     assert len(msgs) == 2
-    assert "**A**" in msgs[0]
-    assert "**B**" in msgs[1]
+    assert "[**A**]" in msgs[0]
+    assert "[**B**]" in msgs[1]
 
 
 def test_build_summary_with_suffix():
@@ -77,8 +76,8 @@ def test_build_summary_with_suffix():
         sections=[Section(title="A", summary="stuff", body="")],
         summary_suffix="_footer_",
     )
-    links = ["(link)"]
-    msgs = build_summary_messages(linked, links, 200)
+    urls = ["http://link"]
+    msgs = build_summary_messages(linked, urls, 200)
     assert len(msgs) == 1
     assert "_footer_" in msgs[0]
 
@@ -92,13 +91,31 @@ def test_build_summary_empty_prefix():
             Section(title="B", summary="things", body=""),
         ],
     )
-    links = ["(link-a)", "(link-b)"]
-    msgs = build_summary_messages(linked, links, 200)
+    urls = ["http://link-a", "http://link-b"]
+    msgs = build_summary_messages(linked, urls, 200)
     assert len(msgs) == 1
-    # Should not start with a newline
     assert not msgs[0].startswith("\n")
-    assert "**A**" in msgs[0]
-    assert "**B**" in msgs[0]
+    assert "[**A**](http://link-a)" in msgs[0]
+    assert "[**B**](http://link-b)" in msgs[0]
+
+
+def test_build_summary_custom_bullet_fn():
+    """Custom bullet_fn (e.g. Slack mrkdwn format)."""
+    def slack_bullet(section, url):
+        return f"- <{url}|*{section.title}*> — {section.summary}"
+
+    linked = LinkedThread(
+        summary_prefix="# Digest",
+        sections=[
+            Section(title="A", summary="stuff", body=""),
+            Section(title="B", summary="things", body=""),
+        ],
+    )
+    urls = ["http://link-a", "http://link-b"]
+    msgs = build_summary_messages(linked, urls, 200, bullet_fn=slack_bullet)
+    assert len(msgs) == 1
+    assert "<http://link-a|*A*>" in msgs[0]
+    assert "<http://link-b|*B*>" in msgs[0]
 
 
 def test_linked_thread_end_to_end():
@@ -147,9 +164,9 @@ def test_linked_thread_end_to_end():
 
     # Simulate the sync_linked flow manually (platform-agnostic)
     detail_msgs, section_starts = build_detail_messages(linked.sections, 2000)
-    placeholder = "[placeholder-link-xxxxx]"
-    placeholder_links = [placeholder] * len(linked.sections)
-    summary_msgs = build_summary_messages(linked, placeholder_links, 2000)
+    placeholder = "http://placeholder-url-xxxxx"
+    placeholder_urls = [placeholder] * len(linked.sections)
+    summary_msgs = build_summary_messages(linked, placeholder_urls, 2000)
 
     n_summary = len(summary_msgs)
     all_msgs = summary_msgs + detail_msgs
@@ -164,16 +181,16 @@ def test_linked_thread_end_to_end():
     assert client.messages[detail_ids[0]] == "Detail about A"
     assert client.messages[detail_ids[1]] == "Detail about B"
 
-    # Build real links and edit summaries
-    real_links = [f"(link-to-{detail_ids[section_starts[i]]})" for i in range(len(linked.sections))]
-    final_summaries = build_summary_messages(linked, real_links, 2000)
+    # Build real URLs and edit summaries
+    real_urls = [f"http://link-to-{detail_ids[section_starts[i]]}" for i in range(len(linked.sections))]
+    final_summaries = build_summary_messages(linked, real_urls, 2000)
 
     for msg_id, content in zip(summary_ids, final_summaries):
         client.edit(msg_id, content)
 
-    # Verify summary was edited with real links
+    # Verify summary was edited with real URLs
     assert len(client.edits) == n_summary
     for msg_id in summary_ids:
         content = client.messages[msg_id]
         assert "placeholder" not in content
-        assert "link-to-" in content
+        assert "http://link-to-" in content
