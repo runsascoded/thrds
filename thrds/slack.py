@@ -19,6 +19,7 @@ class SlackClient:
         self.channel = channel
         self._suppress_unfurls: bool = True
         self._metadata_by_content: dict[str, dict] | None = None
+        self._skip_op: bool = False
 
     def _request(
         self,
@@ -64,10 +65,14 @@ class SlackClient:
             "channel": self.channel,
             "ts": thread_id,
         }, method="GET")
-        return [
+        messages = [
             Message(id=m["ts"], content=m.get("text", ""))
             for m in result.get("messages", [])
         ]
+        # In sync_linked mode, skip the OP (thread parent) — it's managed separately
+        if self._skip_op and messages:
+            messages = messages[1:]
+        return messages
 
     def post(self, content: str, thread_id: str | None = None) -> Message:
         data: dict = {
@@ -175,30 +180,60 @@ class SlackClient:
         jitter: float = 0.0,
         suppress_unfurls: bool = True,
     ) -> LinkedSyncResult:
-        """Sync a linked summary thread."""
+        """Sync a linked summary thread.
+
+        In Slack, the thread parent (OP) is the first message in
+        conversations.replies. This method manages the OP separately
+        (setting it to summary_prefix) and syncs bullets + details
+        as thread replies starting at index 1.
+        """
         placeholder = self._detail_url_placeholder()
+
+        # Build summary bullets WITHOUT the prefix (prefix goes to OP)
+        linked_replies = LinkedThread(
+            summary_prefix="",
+            sections=linked.sections,
+            summary_suffix=linked.summary_suffix,
+        )
 
         # Phase 1: Build detail + summary messages with placeholder links
         detail_msgs, section_starts = build_detail_messages(linked.sections, SLACK_MESSAGE_LIMIT)
         placeholder_urls = [placeholder] * len(linked.sections)
-        summary_msgs = build_summary_messages(linked, placeholder_urls, SLACK_MESSAGE_LIMIT, bullet_fn=self._bullet)
+        summary_msgs = build_summary_messages(linked_replies, placeholder_urls, SLACK_MESSAGE_LIMIT, bullet_fn=self._bullet)
 
         n_summary = len(summary_msgs)
-        all_msgs = summary_msgs + detail_msgs
+        all_reply_msgs = summary_msgs + detail_msgs
 
-        # Phase 2: Sync all messages
-        result = self.sync(
-            Thread(messages=all_msgs),
-            thread_ts=thread_ts,
-            dry_run=dry_run,
-            pace=pace,
-            jitter=jitter,
-            suppress_unfurls=suppress_unfurls,
-        )
+        # Phase 2: Handle the OP separately, then sync replies
+        if thread_ts is None:
+            # New thread: post OP with summary_prefix
+            if not dry_run:
+                op_content = linked.summary_prefix or " "
+                op = self.post(op_content)
+                thread_ts = op.id
+            else:
+                thread_ts = "<new>"
+        elif linked.summary_prefix and not dry_run:
+            # Existing thread: edit OP with summary_prefix
+            self.edit(thread_ts, linked.summary_prefix)
+
+        # Sync reply messages (skip OP in list_messages)
+        self._skip_op = True
+        try:
+            result = self.sync(
+                Thread(messages=all_reply_msgs),
+                thread_ts=thread_ts,
+                dry_run=dry_run,
+                pace=pace,
+                jitter=jitter,
+                suppress_unfurls=suppress_unfurls,
+            )
+        finally:
+            self._skip_op = False
 
         if dry_run:
             return LinkedSyncResult(
-                thread_id=result.thread_id,
+                thread_id=thread_ts,
                 summary_ids=result.message_ids[:n_summary],
                 detail_ids=result.message_ids[n_summary:],
                 section_detail_ids={},
@@ -220,7 +255,7 @@ class SlackClient:
             real_links.append(self.permalink(detail_msg_id))
 
         # Phase 4: Rebuild summaries with real links and edit
-        final_summaries = build_summary_messages(linked, real_links, SLACK_MESSAGE_LIMIT, bullet_fn=self._bullet)
+        final_summaries = build_summary_messages(linked_replies, real_links, SLACK_MESSAGE_LIMIT, bullet_fn=self._bullet)
         for i, (msg_id, content) in enumerate(zip(summary_ids, final_summaries)):
             if i > 0 and pace > 0:
                 time.sleep(pace + random.uniform(0, jitter))
