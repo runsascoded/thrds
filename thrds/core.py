@@ -27,6 +27,32 @@ class Action:
     index: int
     message_id: str | None = None
     content: str | None = None
+    prior_content: str | None = None
+
+    def format(self, color: bool = True) -> str:
+        """Render a human-readable preview line for this action.
+
+        EDIT and DELETE show the prior content (``-``); POST and EDIT
+        show the new content (``+``); SKIP just notes the index.
+        Multi-line content gets the prefix on every line.
+        """
+        RED, GREEN, RESET = ("\033[31m", "\033[32m", "\033[0m") if color else ("", "", "")
+        header = f"{self.type.value.upper()} [{self.index}]"
+
+        def prefix_lines(s: str, char: str, col: str) -> str:
+            return "\n".join(f"  {col}{char}{line}{RESET}" for line in s.split("\n"))
+
+        if self.type is ActionType.POST:
+            return f"{header}\n{prefix_lines(self.content or '', '+', GREEN)}"
+        if self.type is ActionType.EDIT:
+            prior = prefix_lines(self.prior_content or "", "-", RED)
+            new = prefix_lines(self.content or "", "+", GREEN)
+            return f"{header}\n{prior}\n{new}"
+        if self.type is ActionType.DELETE:
+            return f"{header}\n{prefix_lines(self.prior_content or '', '-', RED)}"
+        if self.type is ActionType.SKIP:
+            return f"{header} (unchanged)"
+        raise ValueError(f"Unknown action type: {self.type}")
 
 
 @dataclass
@@ -48,6 +74,17 @@ class SyncResult:
     thread_id: str
     message_ids: list[str]
     actions: list[Action] = field(default_factory=list)
+
+    def format_preview(self, color: bool = True, prefix: str = "") -> str:
+        """Render a colored multi-line preview of all actions.
+
+        ``prefix`` is prepended to each line (e.g. a per-thread identifier).
+        """
+        lines: list[str] = []
+        for action in self.actions:
+            for line in action.format(color=color).split("\n"):
+                lines.append(prefix + line)
+        return "\n".join(lines)
 
 
 @dataclass
@@ -92,7 +129,12 @@ def sync(
     if M < N:
         for i in range(N - 1, M - 1, -1):
             msg = existing[i]
-            action = Action(type=ActionType.DELETE, index=i, message_id=msg.id)
+            action = Action(
+                type=ActionType.DELETE,
+                index=i,
+                message_id=msg.id,
+                prior_content=msg.content,
+            )
             actions.append(action)
             if not opts.dry_run:
                 _pace()
@@ -116,6 +158,7 @@ def sync(
                 index=i,
                 message_id=existing[i].id,
                 content=desired.messages[i],
+                prior_content=existing[i].content,
             )
             actions.append(action)
             if opts.dry_run:
@@ -135,7 +178,12 @@ def sync(
         # Delete remaining existing messages from end to repost_from
         for j in range(overlap - 1, repost_from - 1, -1):
             msg = existing[j]
-            actions.append(Action(type=ActionType.DELETE, index=j, message_id=msg.id))
+            actions.append(Action(
+                type=ActionType.DELETE,
+                index=j,
+                message_id=msg.id,
+                prior_content=msg.content,
+            ))
             _pace()
             client.delete(msg.id)
         # Post replacements (and any new messages beyond overlap)

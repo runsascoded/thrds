@@ -213,3 +213,78 @@ def test_bot_token_prefix():
     assert client_bare.token == "Bot my-token"
     client_prefixed = DiscordClient(token="Bot my-token", channel_id="123")
     assert client_prefixed.token == "Bot my-token"
+
+
+def test_action_prior_content_populated():
+    """sync() populates prior_content on EDIT and DELETE actions."""
+    client = MockClient({
+        "t1": [
+            Message(id="m0", content="OP"),
+            Message(id="m1", content="old reply"),
+            Message(id="m2", content="to delete"),
+        ],
+    })
+    desired = Thread(messages=["OP", "new reply"])
+    result = sync(client, desired, thread_id="t1")
+
+    edit_action = next(a for a in result.actions if a.type is ActionType.EDIT)
+    assert edit_action.prior_content == "old reply"
+    assert edit_action.content == "new reply"
+
+    delete_action = next(a for a in result.actions if a.type is ActionType.DELETE)
+    assert delete_action.prior_content == "to delete"
+
+    skip_action = next(a for a in result.actions if a.type is ActionType.SKIP)
+    assert skip_action.prior_content is None
+
+
+def test_action_format_no_color():
+    """Action.format(color=False) produces plain unified-diff output."""
+    post = Action(type=ActionType.POST, index=0, content="hello")
+    assert post.format(color=False) == "POST [0]\n  +hello"
+
+    edit = Action(type=ActionType.EDIT, index=1, message_id="x", content="new", prior_content="old")
+    assert edit.format(color=False) == "EDIT [1]\n  -old\n  +new"
+
+    delete = Action(type=ActionType.DELETE, index=2, message_id="y", prior_content="gone")
+    assert delete.format(color=False) == "DELETE [2]\n  -gone"
+
+    skip = Action(type=ActionType.SKIP, index=3, message_id="z", content="same")
+    assert skip.format(color=False) == "SKIP [3] (unchanged)"
+
+
+def test_action_format_multiline():
+    """Multi-line content gets the +/- prefix on every line."""
+    edit = Action(
+        type=ActionType.EDIT,
+        index=0,
+        message_id="x",
+        content="line 1\nline 2",
+        prior_content="old 1\nold 2",
+    )
+    assert edit.format(color=False) == "EDIT [0]\n  -old 1\n  -old 2\n  +line 1\n  +line 2"
+
+
+def test_action_format_color():
+    """Action.format(color=True) wraps content in ANSI codes."""
+    RED, GREEN, RESET = "\033[31m", "\033[32m", "\033[0m"
+    edit = Action(type=ActionType.EDIT, index=0, message_id="x", content="new", prior_content="old")
+    assert edit.format(color=True) == f"EDIT [0]\n  {RED}-old{RESET}\n  {GREEN}+new{RESET}"
+
+
+def test_sync_result_format_preview():
+    """SyncResult.format_preview aggregates all actions with optional prefix."""
+    client = MockClient({
+        "t1": [
+            Message(id="m0", content="OP"),
+            Message(id="m1", content="old"),
+        ],
+    })
+    desired = Thread(messages=["OP", "new"])
+    result = sync(client, desired, thread_id="t1")
+
+    preview = result.format_preview(color=False)
+    assert preview == "SKIP [0] (unchanged)\nEDIT [1]\n  -old\n  +new"
+
+    prefixed = result.format_preview(color=False, prefix="t1: ")
+    assert prefixed == "t1: SKIP [0] (unchanged)\nt1: EDIT [1]\nt1:   -old\nt1:   +new"
