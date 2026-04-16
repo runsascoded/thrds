@@ -20,6 +20,19 @@ class SlackClient:
         self._suppress_unfurls: bool = True
         self._metadata_by_content: dict[str, dict] | None = None
         self._skip_op: bool = False
+        self._bot_user_id: str | None = None
+
+    @property
+    def bot_user_id(self) -> str:
+        """Lazily resolve and cache the authenticated bot's user id.
+
+        Used to tag messages as `editable` — bots can only `chat.update` /
+        `chat.delete` their own messages.
+        """
+        if self._bot_user_id is None:
+            result = self._request("auth.test", method="POST")
+            self._bot_user_id = result["user_id"]
+        return self._bot_user_id
 
     def _request(
         self,
@@ -65,8 +78,13 @@ class SlackClient:
             "channel": self.channel,
             "ts": thread_id,
         }, method="GET")
+        bot_uid = self.bot_user_id
         messages = [
-            Message(id=m["ts"], content=m.get("text", ""))
+            Message(
+                id=m["ts"],
+                content=m.get("text", ""),
+                editable=(m.get("user") == bot_uid),
+            )
             for m in result.get("messages", [])
         ]
         # In sync_linked mode, skip the OP (thread parent) — it's managed separately

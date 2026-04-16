@@ -63,9 +63,16 @@ class Thread:
 
 @dataclass
 class Message:
-    """An existing message in a thread."""
+    """An existing message in a thread.
+
+    ``editable=False`` marks messages the sync client cannot edit or delete
+    (typically because they were authored by another user/bot). Such
+    messages are preserved in place — never included in the `sync()`
+    reconcile, never counted against the desired message slots.
+    """
     id: str
     content: str
+    editable: bool = True
 
 
 @dataclass
@@ -116,11 +123,15 @@ def sync(
             time.sleep(delay)
         mutated = True
 
-    # Get existing messages (if thread exists)
+    # Get existing messages (if thread exists). Foreign (non-editable)
+    # messages — e.g. a human interjecting in a bot-managed thread — are
+    # filtered out of the reconcile. They stay in place: never edited,
+    # never deleted, and not counted against the desired message slots.
     if thread_id is not None:
-        existing = client.list_messages(thread_id)
+        all_existing = client.list_messages(thread_id)
     else:
-        existing = []
+        all_existing = []
+    existing = [m for m in all_existing if m.editable]
 
     M = len(desired.messages)
     N = len(existing)
