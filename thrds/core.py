@@ -14,6 +14,19 @@ class EditRateLimited(Exception):
     """Raised when an edit is rate-limited (e.g. Discord code 30046)."""
 
 
+class OrphanedRepliesError(Exception):
+    """Raised when attempting to delete a message that has thread replies."""
+
+    def __init__(self, message_id: str, reply_count: int):
+        self.message_id = message_id
+        self.reply_count = reply_count
+        super().__init__(
+            f"Refusing to delete message {message_id}: "
+            f"it has {reply_count} thread replies that would be orphaned. "
+            f"Pass orphans_ok=True to delete anyway."
+        )
+
+
 class ActionType(Enum):
     SKIP = "skip"
     EDIT = "edit"

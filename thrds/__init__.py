@@ -1,4 +1,4 @@
-from .core import Action, ActionType, EditRateLimited, Message, SyncOptions, SyncResult, Thread, sync
+from .core import Action, ActionType, EditRateLimited, Message, OrphanedRepliesError, SyncOptions, SyncResult, Thread, sync
 from .discord import DiscordClient
 from .linked import LinkedSyncResult, LinkedThread, Section
 from .protocol import ThreadClient
@@ -12,6 +12,7 @@ __all__ = [
     "LinkedSyncResult",
     "LinkedThread",
     "Message",
+    "OrphanedRepliesError",
     "Section",
     "SlackClient",
     "SyncOptions",

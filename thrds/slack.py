@@ -7,7 +7,7 @@ import urllib.request
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 
-from .core import Message, SyncOptions, SyncResult, Thread, sync
+from .core import Message, OrphanedRepliesError, SyncOptions, SyncResult, Thread, sync
 from .linked import LinkedSyncResult, LinkedThread, Section, build_detail_messages, build_summary_messages
 
 SLACK_MESSAGE_LIMIT = 4000
@@ -129,7 +129,15 @@ class SlackClient:
         }, method="GET")
         return result["permalink"]
 
-    def delete(self, message_id: str) -> None:
+    def delete(self, message_id: str, orphans_ok: bool = False) -> None:
+        if not orphans_ok:
+            result = self._request("conversations.replies", {
+                "channel": self.channel,
+                "ts": message_id,
+            }, method="GET")
+            replies = result.get("messages", [])
+            if len(replies) > 1:
+                raise OrphanedRepliesError(message_id, len(replies) - 1)
         self._request("chat.delete", {
             "channel": self.channel,
             "ts": message_id,
