@@ -1,6 +1,6 @@
 [project]
 name = "thrds"
-version = "0.2.0"
+version = "0.3.0"
 description = "Declarative thread sync for Slack, Discord, and Bluesky"
 readme = "README.md"
 license = "MIT"
