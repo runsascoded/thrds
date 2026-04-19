@@ -50,13 +50,47 @@ result = bsky.sync(thread)
 
 Bluesky doesn't support editing posts — the sync algorithm automatically falls back to delete+repost when content changes.
 
-### Dry run
+### Linked summary threads
+
+Post summary bullets that link to detail messages in the same thread:
+
+```python
+from thrds import LinkedThread, Section
+
+linked = LinkedThread(
+    summary_prefix="# Daily Digest",
+    sections=[
+        Section(title="Topic A", summary="Brief summary", body="Full detail text..."),
+        Section(title="Topic B", summary="Another summary", body="More details..."),
+    ],
+)
+
+# Discord: summary bullets use [**Title**](url) markdown links
+result = discord.sync_linked(linked, thread_id="...", guild_id="...")
+
+# Slack: summary bullets use <url|*Title*> mrkdwn links
+result = slack.sync_linked(linked, thread_ts="...")
+```
+
+Two-phase sync: posts all messages with placeholder links, then edits summaries with real links once message IDs are known.
+
+### Dry run / diff preview
 
 ```python
 result = slack.sync(thread, thread_ts="...", dry_run=True)
-for action in result.actions:
-    print(action.type, action.index, action.content)
+print(result.format_preview(color=True, prefix="thread: "))
 ```
+
+```
+thread: SKIP [0] (unchanged)
+thread: EDIT [1]
+thread:   -old message text
+thread:   +new message text
+thread: POST [2]
+thread:   +entirely new message
+```
+
+Each `Action` carries `prior_content` (for EDIT/DELETE) alongside `content`, enabling colored unified-diff output via `action.format()`.
 
 ## Sync algorithm
 
@@ -66,13 +100,17 @@ Given desired messages `M` and existing thread messages `N`:
 2. **Edit** overlapping messages where content changed (skip unchanged)
 3. **Post** new messages at the end
 
-This ensures minimal API calls, preserved ordering, and no orphaned thread parents.
+Foreign (non-editable) messages — e.g. human replies in a bot thread — are automatically skipped. The sync only operates on the bot's own messages, leaving everyone else's untouched.
 
 ## Features
 
-- **Rate limit handling**: Slack 429 retry with `Retry-After`, configurable pacing between API calls
+- **Foreign message preservation**: Non-bot messages in threads are skipped during sync (no more `cant_update_message` errors)
+- **Rate limit handling**: Slack 429 retry with `Retry-After`, configurable `pace` and `jitter` between API calls
 - **Edit rate limit fallback**: Discord's 30046 error (edit limit on old messages) triggers automatic delete+repost
-- **Unfurl suppression**: Slack link previews suppressed by default
+- **Linked summary threads**: `sync_linked()` for summary-with-links threads on Discord and Slack
+- **Diff preview**: `Action.format()` and `SyncResult.format_preview()` for colored diff output
+- **Orphan guard**: Slack `delete()` checks for thread replies before deleting (raises `OrphanedRepliesError`)
+- **Unfurl/embed suppression**: Slack link previews and Discord embeds suppressed via options
 - **Discord system message filtering**: Thread starter messages filtered from `list_messages`
 - **Bot token prefix**: Discord `Bot ` prefix auto-prepended
 - **Metadata support**: Slack message metadata passthrough
@@ -80,7 +118,7 @@ This ensures minimal API calls, preserved ordering, and no orphaned thread paren
 ## Used by
 
 - [hudcostreets/nj-crashes] — Slack crash-notification threads (`SlackClient.sync()`)
-- [Open-Athena/marin-discord] — Discord summary threads (`DiscordClient.sync()`)
+- [Open-Athena/marin-discord] — Discord summary threads (`DiscordClient.sync_linked()`)
 
 ## API
 
@@ -94,12 +132,25 @@ class SyncResult:
     actions: list[Action]   # What was done: Edit, Post, Delete, Skip
 ```
 
+### `Action`
+
+```python
+@dataclass
+class Action:
+    type: ActionType        # SKIP, EDIT, POST, DELETE
+    index: int
+    message_id: str | None
+    content: str | None         # Desired text (POST, EDIT, SKIP)
+    prior_content: str | None   # Previous text (EDIT, DELETE)
+```
+
 ### `SyncOptions`
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `dry_run` | `False` | Print actions without executing |
 | `pace` | `0.0` | Seconds between mutating API calls |
+| `jitter` | `0.0` | Random additional delay (0 to `jitter`) added to `pace` |
 | `suppress_embeds` | `False` | Discord: suppress link previews |
 | `suppress_unfurls` | `True` | Slack: suppress link previews |
 
