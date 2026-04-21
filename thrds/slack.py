@@ -14,9 +14,17 @@ SLACK_MESSAGE_LIMIT = 4000
 
 
 class SlackClient:
-    def __init__(self, token: str, channel: str):
+    def __init__(
+        self,
+        token: str,
+        channel: str,
+        username: str | None = None,
+        icon_emoji: str | None = None,
+    ):
         self.token = token
         self.channel = channel
+        self.username = username
+        self.icon_emoji = icon_emoji
         self._suppress_unfurls: bool = True
         self._metadata_by_content: dict[str, dict] | None = None
         self._skip_op: bool = False
@@ -99,6 +107,10 @@ class SlackClient:
             "unfurl_links": not self._suppress_unfurls,
             "unfurl_media": not self._suppress_unfurls,
         }
+        if self.username is not None:
+            data["username"] = self.username
+        if self.icon_emoji is not None:
+            data["icon_emoji"] = self.icon_emoji
         if thread_id is not None:
             data["thread_ts"] = thread_id
         md = self._metadata_for(content)
