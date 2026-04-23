@@ -28,19 +28,26 @@ class SlackClient:
         self._suppress_unfurls: bool = True
         self._metadata_by_content: dict[str, dict] | None = None
         self._skip_op: bool = False
-        self._bot_user_id: str | None = None
+        self._bot_ids: tuple[str, str | None] | None = None
+
+    @property
+    def bot_ids(self) -> tuple[str, str | None]:
+        """Lazily resolve and cache the authenticated bot's (user_id, bot_id).
+
+        Both are needed to tag messages as `editable`: Slack returns `user`
+        on human messages (match via user_id) but `bot_id` with `user: null`
+        on bot_message events, so our own posts would be marked non-editable
+        if we only checked `user`.
+        """
+        if self._bot_ids is None:
+            result = self._request("auth.test", method="POST")
+            self._bot_ids = (result["user_id"], result.get("bot_id"))
+        return self._bot_ids
 
     @property
     def bot_user_id(self) -> str:
-        """Lazily resolve and cache the authenticated bot's user id.
-
-        Used to tag messages as `editable` — bots can only `chat.update` /
-        `chat.delete` their own messages.
-        """
-        if self._bot_user_id is None:
-            result = self._request("auth.test", method="POST")
-            self._bot_user_id = result["user_id"]
-        return self._bot_user_id
+        """Back-compat alias. Prefer `bot_ids` for bot/user_id both."""
+        return self.bot_ids[0]
 
     def _request(
         self,
@@ -86,12 +93,18 @@ class SlackClient:
             "channel": self.channel,
             "ts": thread_id,
         }, method="GET")
-        bot_uid = self.bot_user_id
+        user_id, bot_id = self.bot_ids
         messages = [
             Message(
                 id=m["ts"],
                 content=m.get("text", ""),
-                editable=(m.get("user") == bot_uid),
+                # Slack bot_messages come back with `user: null` and `bot_id`
+                # set; human messages carry `user`. Match either so our own
+                # bot's posts are correctly marked editable.
+                editable=(
+                    m.get("user") == user_id
+                    or (bot_id is not None and m.get("bot_id") == bot_id)
+                ),
             )
             for m in result.get("messages", [])
         ]
