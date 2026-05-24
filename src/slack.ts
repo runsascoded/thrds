@@ -7,8 +7,23 @@ import {
   type Thread,
   type ThreadClient,
 } from "./core";
+import {
+  buildDetailMessages,
+  buildSummaryMessages,
+  type BulletFn,
+  type LinkedSyncResult,
+  type LinkedThread,
+  type Section,
+} from "./linked";
 
 export const SLACK_MESSAGE_LIMIT = 4000;
+
+/** Slack mrkdwn bullet: linked bold title via `<url|*title*>`. */
+const slackBullet: BulletFn = (section, url) =>
+  `- <${url}|*${section.title}*> — ${section.summary}`;
+
+/** Placeholder URL with safe upper bound on Slack permalink length (~120). */
+const DETAIL_URL_PLACEHOLDER = "x".repeat(130);
 
 export interface SlackClientOptions {
   token: string;
@@ -49,6 +64,7 @@ export class SlackClient implements ThreadClient {
   private readonly fetchImpl: typeof fetch;
   private _botIds: { userId: string; botId?: string } | null = null;
   private suppressUnfurls = true;
+  private skipOp = false;
 
   constructor(options: SlackClientOptions) {
     this.token = options.token;
@@ -135,12 +151,16 @@ export class SlackClient implements ThreadClient {
       user?: string | null;
       bot_id?: string;
     }>;
-    return raw.map((m) => ({
+    let messages = raw.map((m) => ({
       id: m.ts,
       content: m.text ?? "",
       editable:
         m.user === userId || (botId !== undefined && m.bot_id === botId),
     }));
+    if (this.skipOp && messages.length > 0) {
+      messages = messages.slice(1);
+    }
+    return messages;
   }
 
   async post(content: string, threadId?: string): Promise<Message> {
@@ -210,5 +230,125 @@ export class SlackClient implements ThreadClient {
     } finally {
       this.suppressUnfurls = prior;
     }
+  }
+
+  /**
+   * Sync a linked summary thread.
+   *
+   * In Slack the thread parent (OP) is the first message in
+   * `conversations.replies`. This method manages the OP separately
+   * (setting it to `summaryPrefix`) and syncs bullets + details as thread
+   * replies. Two phases: post all messages with placeholder URLs first
+   * (to obtain real message ids), then edit summaries with real
+   * permalinks.
+   */
+  async syncLinked(
+    linked: LinkedThread,
+    options: {
+      threadTs?: string;
+      dryRun?: boolean;
+      pace?: number;
+      jitter?: number;
+      suppressUnfurls?: boolean;
+    } = {},
+  ): Promise<LinkedSyncResult> {
+    const {
+      threadTs: providedThreadTs,
+      dryRun = false,
+      pace = 0.4,
+      jitter = 0,
+      suppressUnfurls = true,
+    } = options;
+
+    // Summary bullets sit in the reply slots; the prefix goes to the OP.
+    const linkedReplies: LinkedThread = {
+      summaryPrefix: "",
+      sections: linked.sections,
+      summarySuffix: linked.summarySuffix,
+    };
+
+    const [detailMsgs, sectionStarts] = buildDetailMessages(
+      linked.sections,
+      SLACK_MESSAGE_LIMIT,
+    );
+    const placeholderUrls = linked.sections.map(() => DETAIL_URL_PLACEHOLDER);
+    const summaryMsgs = buildSummaryMessages(
+      linkedReplies,
+      placeholderUrls,
+      SLACK_MESSAGE_LIMIT,
+      slackBullet,
+    );
+    const nSummary = summaryMsgs.length;
+    const allReplyMsgs = [...summaryMsgs, ...detailMsgs];
+
+    let threadTs = providedThreadTs;
+    if (threadTs === undefined) {
+      if (!dryRun) {
+        const opContent = linked.summaryPrefix || " ";
+        const op = await this.post(opContent);
+        threadTs = op.id;
+      } else {
+        threadTs = "<new>";
+      }
+    } else if (linked.summaryPrefix && !dryRun) {
+      await this.edit(threadTs, linked.summaryPrefix);
+    }
+
+    this.skipOp = true;
+    let result: SyncResult;
+    try {
+      result = await this.sync(
+        { messages: allReplyMsgs },
+        { threadTs, dryRun, pace, jitter, suppressUnfurls },
+      );
+    } finally {
+      this.skipOp = false;
+    }
+
+    if (dryRun) {
+      return {
+        threadId: threadTs,
+        summaryIds: result.messageIds.slice(0, nSummary),
+        detailIds: result.messageIds.slice(nSummary),
+        sectionDetailIds: {},
+      };
+    }
+
+    const detailIds = result.messageIds.slice(nSummary);
+    const summaryIds = result.messageIds.slice(0, nSummary);
+
+    // Phase 3: resolve real permalinks for the section-start details
+    const sectionDetailIds: Record<string, string> = {};
+    const realLinks: string[] = [];
+    for (let i = 0; i < linked.sections.length; i++) {
+      if (i > 0 && pace > 0) {
+        await sleep((pace + Math.random() * jitter) * 1000);
+      }
+      const detailIdx = sectionStarts[i]!;
+      const detailMsgId = detailIds[detailIdx]!;
+      sectionDetailIds[linked.sections[i]!.title] = detailMsgId;
+      realLinks.push(await this.permalink(detailMsgId));
+    }
+
+    // Phase 4: rebuild summaries with real URLs and edit
+    const finalSummaries = buildSummaryMessages(
+      linkedReplies,
+      realLinks,
+      SLACK_MESSAGE_LIMIT,
+      slackBullet,
+    );
+    for (let i = 0; i < summaryIds.length; i++) {
+      if (i > 0 && pace > 0) {
+        await sleep((pace + Math.random() * jitter) * 1000);
+      }
+      await this.edit(summaryIds[i]!, finalSummaries[i]!);
+    }
+
+    return {
+      threadId: result.threadId,
+      summaryIds,
+      detailIds,
+      sectionDetailIds,
+    };
   }
 }

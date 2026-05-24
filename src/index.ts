@@ -16,3 +16,16 @@ export type {
   SlackSyncOptions,
 } from "./slack";
 export { SLACK_MESSAGE_LIMIT, SlackClient } from "./slack";
+
+export type {
+  BulletFn,
+  LinkedSyncResult,
+  LinkedThread,
+  Section,
+} from "./linked";
+export {
+  buildDetailMessages,
+  buildSummaryMessages,
+  defaultBullet,
+  splitBody,
+} from "./linked";

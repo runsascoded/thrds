@@ -7,7 +7,7 @@ Declarative thread sync for Slack, Discord, and Bluesky — TS impl.
 
 ## Status
 
-**Pre-release** — `core` (diff/edit/post/delete algorithm) and `SlackClient` are ported and tested. `linked` (summary threads) is forthcoming.
+**Pre-release** — `core` (diff/edit/post/delete algorithm), `SlackClient`, and `LinkedThread` / `syncLinked` are ported and tested (39 tests). Not yet published to npm.
 
 ## Install
 
@@ -51,6 +51,27 @@ const result = await sync(client, { messages: ["OP", "Reply"] });
 // result.messageIds: string[]
 // result.threadId: string
 ```
+
+### Linked summary threads
+
+Post summary bullets that link to detail messages in the same Slack thread:
+
+```ts
+import { SlackClient } from "thrds";
+import type { LinkedThread } from "thrds";
+
+const slack = new SlackClient({ token: "xoxb-...", channel: "C0..." });
+const linked: LinkedThread = {
+  summaryPrefix: "# Daily Digest",
+  sections: [
+    { title: "Topic A", summary: "Brief summary", body: "Full detail text..." },
+    { title: "Topic B", summary: "Another summary", body: "More details..." },
+  ],
+};
+const result = await slack.syncLinked(linked, { threadTs: /* optional */ });
+```
+
+Two-phase sync: posts all messages with placeholder links, then edits summaries with real permalinks once message ids are known.
 
 ## Sync algorithm
 
