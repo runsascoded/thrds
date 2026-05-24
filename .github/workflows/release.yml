@@ -1,0 +1,65 @@
+name: Build and Release
+
+on:
+  pull_request:
+    branches: [ts]
+  push:
+    branches: [ts]
+    tags: ["ts-v*.*.*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["18", "20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/ts-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      # Uses npm trusted publishing (OIDC) via the `id-token: write`
+      # permission — no NPM_TOKEN secret needed once the trusted publisher
+      # is configured on npmjs.com for this package + workflow.
+      - run: pnpm publish --provenance --access public --no-git-checks
+      - name: Get tag message
+        id: tag
+        run: |
+          git fetch origin tag ${{ github.ref_name }} --force
+          TAG_MSG=$(git tag -l --format='%(contents:body)' ${{ github.ref_name }})
+          {
+            echo "message<<EOF"
+            echo "$TAG_MSG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            ${{ steps.tag.outputs.message }}
+          generate_release_notes: true
