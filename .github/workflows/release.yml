@@ -1,10 +1,10 @@
 name: Build and Release
 on:
   pull_request:
-    branches: [main]
+    branches: [py]
   push:
-    branches: [main]
-    tags: ["v*.*.*"]
+    branches: [py]
+    tags: ["py-v*.*.*"]
   workflow_dispatch:
 
 jobs:
