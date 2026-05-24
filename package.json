@@ -1,0 +1,52 @@
+{
+  "name": "thrds",
+  "version": "0.1.0-pre",
+  "description": "Declarative thread sync for Slack, Discord, and Bluesky",
+  "license": "MIT",
+  "author": "Ryan Williams",
+  "homepage": "https://github.com/runsascoded/thrds",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/runsascoded/thrds.git"
+  },
+  "bugs": {
+    "url": "https://github.com/runsascoded/thrds/issues"
+  },
+  "keywords": [
+    "slack",
+    "thread",
+    "sync",
+    "declarative",
+    "diff"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm test && pnpm build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.5.0",
+    "vitest": "^1.6.0"
+  },
+  "packageManager": "pnpm@9.0.0"
+}
