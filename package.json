@@ -1,6 +1,6 @@
 {
   "name": "@rdub/thrds",
-  "version": "0.1.1",
+  "version": "0.1.1-dist.0a0b7d8",
   "description": "Declarative thread sync for Slack, Discord, and Bluesky",
   "license": "MIT",
   "author": "Ryan Williams",
@@ -20,34 +20,16 @@
     "diff"
   ],
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./index.js",
+  "types": "./index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./index.d.ts",
+      "import": "./index.js"
     }
-  },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
-  "scripts": {
-    "build": "tsup",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
-    "prepublishOnly": "pnpm test && pnpm build"
   },
   "engines": {
     "node": ">=18"
-  },
-  "devDependencies": {
-    "@types/node": "^20.11.0",
-    "tsup": "^8.5.1",
-    "typescript": "^5.5.0",
-    "vitest": "^1.6.0"
   },
   "packageManager": "pnpm@9.0.0"
 }
