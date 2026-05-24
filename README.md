@@ -4,7 +4,7 @@ Declarative thread sync for Slack, Discord, and Bluesky.
 
 Given a desired thread state (list of message contents), diffs against existing messages and applies minimal edits/posts/deletes to converge.
 
-> A TypeScript port (Slack subset) lives on the [`ts` branch][ts-branch]. Both impls share `tests/fixtures/sync.json` as the cross-language contract for the diff/edit/post/delete algorithm.
+> A TypeScript port (Slack subset) lives on the [`ts` branch][ts-branch], published on npm as [`@rdub/thrds`][npm]. Both impls share `tests/fixtures/sync.json` as the cross-language contract for the diff/edit/post/delete algorithm.
 
 ## Install
 
@@ -159,3 +159,4 @@ class Action:
 [hudcostreets/nj-crashes]: https://github.com/hudcostreets/nj-crashes
 [Open-Athena/marin-discord]: https://github.com/Open-Athena/marin-discord
 [ts-branch]: https://github.com/runsascoded/thrds/tree/ts
+[npm]: https://www.npmjs.com/package/@rdub/thrds
