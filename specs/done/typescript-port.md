@@ -1,11 +1,35 @@
 # Spec: TypeScript port of `thrds`
 
-> Status: **draft** (2026-05-24, from `~/c/hccs/ctbk` session)
+> Status: **done** (2026-05-24)
 >
 > Origin: ctbk's Cloudflare Worker (`gbfs/api/src/alerts.ts`) needs the
 > firing-OP-then-resolved-reply pattern that `SlackClient.sync()` provides.
 > The CFW is TS, `thrds` is Python — so port the Slack subset to TS,
 > publish to npm, adopt cross-runtime.
+
+## Resolution
+
+The repo restructure ended up using **branches** rather than the
+`python/` + `ts/` subdirs originally proposed: `py` is the default
+branch (renamed from `main`) and `ts` is an orphan branch. Tag prefixes
+`py-vX.Y.Z` and `ts-vX.Y.Z` route to per-branch release workflows.
+
+Shared `tests/fixtures/sync.json` (12 algorithm cases) is duplicated
+across branches and kept in sync via `git checkout <other> --
+tests/fixtures/`. Each impl's tree stays self-contained (pytest from
+`tests/fixtures/`, vitest from `tests/fixtures/`) without crossing
+package boundaries.
+
+v0.1 TS shipped: `core` (sync algorithm + foreign-message preservation +
+EditRateLimited fallback), `SlackClient` (list/post/edit/delete/sync +
+429 retry + orphan guard + bot_id/user_id editable detection +
+username/iconEmoji passthrough + permalink), and `linked`
+(LinkedThread + Section + SlackClient.syncLinked two-phase placeholder
+→ permalink edit-back). 39 vitest cases pass; matrix CI on Node 18/20/22.
+
+npm publish via OIDC trusted publishing (no NPM_TOKEN secret) once the
+inaugural release is done from local and the trusted publisher is
+configured on npmjs.com.
 
 ## Why
 
