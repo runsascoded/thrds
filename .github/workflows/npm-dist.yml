@@ -1,0 +1,17 @@
+name: Build dist branch
+
+on:
+  push:
+    branches: [ts]
+  workflow_dispatch:
+
+jobs:
+  dist:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: runsascoded/npm-dist/gh@main
+        with:
+          source_ref: ts
+          dist_branch: ts-dist
