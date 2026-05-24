@@ -12,15 +12,17 @@ Declarative thread sync for Slack, Discord, and Bluesky — TS impl.
 ## Install
 
 ```bash
-pnpm add thrds       # not yet published
+pnpm add @rdub/thrds
 ```
+
+Published as `@rdub/thrds` rather than `thrds` because npm blocks the unscoped name as "too similar" to the `three` package. The Python package on PyPI remains [`thrds`][pypi].
 
 ## Usage
 
 ### Slack
 
 ```ts
-import { SlackClient } from "thrds";
+import { SlackClient } from "@rdub/thrds";
 
 const slack = new SlackClient({
   token: "xoxb-...",
@@ -42,8 +44,8 @@ await slack.sync(
 ### Generic
 
 ```ts
-import { sync } from "thrds";
-import type { Thread, ThreadClient } from "thrds";
+import { sync } from "@rdub/thrds";
+import type { Thread, ThreadClient } from "@rdub/thrds";
 
 const client: ThreadClient = /* your client */;
 const result = await sync(client, { messages: ["OP", "Reply"] });
@@ -57,8 +59,8 @@ const result = await sync(client, { messages: ["OP", "Reply"] });
 Post summary bullets that link to detail messages in the same Slack thread:
 
 ```ts
-import { SlackClient } from "thrds";
-import type { LinkedThread } from "thrds";
+import { SlackClient } from "@rdub/thrds";
+import type { LinkedThread } from "@rdub/thrds";
 
 const slack = new SlackClient({ token: "xoxb-...", channel: "C0..." });
 const linked: LinkedThread = {

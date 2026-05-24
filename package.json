@@ -1,5 +1,5 @@
 {
-  "name": "thrds",
+  "name": "@rdub/thrds",
   "version": "0.1.0",
   "description": "Declarative thread sync for Slack, Discord, and Bluesky",
   "license": "MIT",
