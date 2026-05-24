@@ -1,0 +1,198 @@
+{
+  "$schema": "https://thrds.dev/schemas/sync-fixtures.json",
+  "description": "Cross-language fixtures for the core sync diff/edit/post/delete algorithm. Consumed by both Python pytest and TypeScript vitest. Each case describes an existing thread, a desired Thread, and the expected sequence of Actions sync() produces. POST actions intentionally omit message_id (new ids are assigned by the client at runtime); EDIT/DELETE/SKIP assert against ids from `existing`.",
+  "cases": [
+    {
+      "name": "create_new_thread",
+      "thread_id": null,
+      "existing": [],
+      "desired": ["OP", "Reply 1", "Reply 2"],
+      "expected_actions": [
+        {"type": "POST", "index": 0, "content": "OP"},
+        {"type": "POST", "index": 1, "content": "Reply 1"},
+        {"type": "POST", "index": 2, "content": "Reply 2"}
+      ],
+      "expected_final_contents": ["OP", "Reply 1", "Reply 2"]
+    },
+    {
+      "name": "no_changes",
+      "thread_id": "t1",
+      "existing": [
+        {"id": "m1", "content": "OP"},
+        {"id": "m2", "content": "Reply"}
+      ],
+      "desired": ["OP", "Reply"],
+      "expected_actions": [
+        {"type": "SKIP", "index": 0, "message_id": "m1", "content": "OP"},
+        {"type": "SKIP", "index": 1, "message_id": "m2", "content": "Reply"}
+      ],
+      "expected_message_ids": ["m1", "m2"],
+      "expected_final_contents": ["OP", "Reply"]
+    },
+    {
+      "name": "edit_existing",
+      "thread_id": "t1",
+      "existing": [
+        {"id": "m1", "content": "Old OP"},
+        {"id": "m2", "content": "Old Reply"}
+      ],
+      "desired": ["New OP", "New Reply"],
+      "expected_actions": [
+        {"type": "EDIT", "index": 0, "message_id": "m1", "content": "New OP", "prior_content": "Old OP"},
+        {"type": "EDIT", "index": 1, "message_id": "m2", "content": "New Reply", "prior_content": "Old Reply"}
+      ],
+      "expected_message_ids": ["m1", "m2"],
+      "expected_final_contents": ["New OP", "New Reply"]
+    },
+    {
+      "name": "append_new_replies",
+      "thread_id": "t1",
+      "existing": [
+        {"id": "m1", "content": "OP"}
+      ],
+      "desired": ["OP", "Reply 1", "Reply 2"],
+      "expected_actions": [
+        {"type": "SKIP", "index": 0, "message_id": "m1", "content": "OP"},
+        {"type": "POST", "index": 1, "content": "Reply 1"},
+        {"type": "POST", "index": 2, "content": "Reply 2"}
+      ],
+      "expected_final_contents": ["OP", "Reply 1", "Reply 2"]
+    },
+    {
+      "name": "delete_extras",
+      "thread_id": "t1",
+      "existing": [
+        {"id": "m1", "content": "OP"},
+        {"id": "m2", "content": "Reply 1"},
+        {"id": "m3", "content": "Reply 2"}
+      ],
+      "desired": ["OP"],
+      "expected_actions": [
+        {"type": "DELETE", "index": 2, "message_id": "m3", "prior_content": "Reply 2"},
+        {"type": "DELETE", "index": 1, "message_id": "m2", "prior_content": "Reply 1"},
+        {"type": "SKIP", "index": 0, "message_id": "m1", "content": "OP"}
+      ],
+      "expected_message_ids": ["m1"],
+      "expected_final_contents": ["OP"]
+    },
+    {
+      "name": "delete_all",
+      "thread_id": "t1",
+      "existing": [
+        {"id": "m1", "content": "OP"},
+        {"id": "m2", "content": "Reply"}
+      ],
+      "desired": [],
+      "expected_actions": [
+        {"type": "DELETE", "index": 1, "message_id": "m2", "prior_content": "Reply"},
+        {"type": "DELETE", "index": 0, "message_id": "m1", "prior_content": "OP"}
+      ],
+      "expected_message_ids": [],
+      "expected_final_contents": []
+    },
+    {
+      "name": "mixed_edit_and_append",
+      "thread_id": "t1",
+      "existing": [
+        {"id": "m1", "content": "Old OP"}
+      ],
+      "desired": ["New OP", "New Reply"],
+      "expected_actions": [
+        {"type": "EDIT", "index": 0, "message_id": "m1", "content": "New OP", "prior_content": "Old OP"},
+        {"type": "POST", "index": 1, "content": "New Reply"}
+      ],
+      "expected_final_contents": ["New OP", "New Reply"]
+    },
+    {
+      "name": "foreign_human_edits_bot_slots_only",
+      "description": "Thread [bot, bot, human, bot], desired [bot', bot', bot']: edit all three bot messages by id, leave human untouched.",
+      "thread_id": "t1",
+      "existing": [
+        {"id": "b1", "content": "bot-0-old", "editable": true},
+        {"id": "b2", "content": "bot-1-old", "editable": true},
+        {"id": "h1", "content": "human-link", "editable": false},
+        {"id": "b3", "content": "bot-2-old", "editable": true}
+      ],
+      "desired": ["bot-0-new", "bot-1-new", "bot-2-new"],
+      "expected_actions": [
+        {"type": "EDIT", "index": 0, "message_id": "b1", "content": "bot-0-new", "prior_content": "bot-0-old"},
+        {"type": "EDIT", "index": 1, "message_id": "b2", "content": "bot-1-new", "prior_content": "bot-1-old"},
+        {"type": "EDIT", "index": 2, "message_id": "b3", "content": "bot-2-new", "prior_content": "bot-2-old"}
+      ],
+      "expected_final": [
+        {"id": "b1", "content": "bot-0-new", "editable": true},
+        {"id": "b2", "content": "bot-1-new", "editable": true},
+        {"id": "h1", "content": "human-link", "editable": false},
+        {"id": "b3", "content": "bot-2-new", "editable": true}
+      ]
+    },
+    {
+      "name": "foreign_shrink_preserves_human",
+      "description": "Thread [bot, bot, human, bot], desired [bot']: edit slot 0, delete editable extras (b3, b2 in reverse), human intact.",
+      "thread_id": "t1",
+      "existing": [
+        {"id": "b1", "content": "bot-0-old", "editable": true},
+        {"id": "b2", "content": "bot-1-old", "editable": true},
+        {"id": "h1", "content": "human-link", "editable": false},
+        {"id": "b3", "content": "bot-2-old", "editable": true}
+      ],
+      "desired": ["bot-0-new"],
+      "expected_actions": [
+        {"type": "DELETE", "index": 2, "message_id": "b3", "prior_content": "bot-2-old"},
+        {"type": "DELETE", "index": 1, "message_id": "b2", "prior_content": "bot-1-old"},
+        {"type": "EDIT", "index": 0, "message_id": "b1", "content": "bot-0-new", "prior_content": "bot-0-old"}
+      ],
+      "expected_final": [
+        {"id": "b1", "content": "bot-0-new", "editable": true},
+        {"id": "h1", "content": "human-link", "editable": false}
+      ]
+    },
+    {
+      "name": "foreign_grow_appends_after_human",
+      "description": "Thread [bot, human], desired [bot, bot2]: skip bot (nop), post bot2 at thread end (after the human).",
+      "thread_id": "t1",
+      "existing": [
+        {"id": "b1", "content": "bot-0", "editable": true},
+        {"id": "h1", "content": "human-link", "editable": false}
+      ],
+      "desired": ["bot-0", "bot-1"],
+      "expected_actions": [
+        {"type": "SKIP", "index": 0, "message_id": "b1", "content": "bot-0"},
+        {"type": "POST", "index": 1, "content": "bot-1"}
+      ],
+      "expected_final_contents": ["bot-0", "human-link", "bot-1"]
+    },
+    {
+      "name": "foreign_human_at_start_edits_bot",
+      "description": "Thread [human, bot, human], desired [bot']: edit the one bot message; both humans untouched.",
+      "thread_id": "t1",
+      "existing": [
+        {"id": "h1", "content": "human-0", "editable": false},
+        {"id": "b1", "content": "bot-0-old", "editable": true},
+        {"id": "h2", "content": "human-2", "editable": false}
+      ],
+      "desired": ["bot-0-new"],
+      "expected_actions": [
+        {"type": "EDIT", "index": 0, "message_id": "b1", "content": "bot-0-new", "prior_content": "bot-0-old"}
+      ],
+      "expected_final": [
+        {"id": "h1", "content": "human-0", "editable": false},
+        {"id": "b1", "content": "bot-0-new", "editable": true},
+        {"id": "h2", "content": "human-2", "editable": false}
+      ]
+    },
+    {
+      "name": "foreign_all_human_posts_new_bot",
+      "description": "Thread [human], desired [bot]: no editable slots; post bot as new message at thread end.",
+      "thread_id": "t1",
+      "existing": [
+        {"id": "h1", "content": "human-only", "editable": false}
+      ],
+      "desired": ["bot-0"],
+      "expected_actions": [
+        {"type": "POST", "index": 0, "content": "bot-0"}
+      ],
+      "expected_final_contents": ["human-only", "bot-0"]
+    }
+  ]
+}
