@@ -7,7 +7,7 @@ Declarative thread sync for Slack, Discord, and Bluesky — TS impl.
 
 ## Status
 
-**Pre-release** — `core` (diff/edit/post/delete algorithm) is ported and tested. `slack`, `linked` ports are forthcoming.
+**Pre-release** — `core` (diff/edit/post/delete algorithm) and `SlackClient` are ported and tested. `linked` (summary threads) is forthcoming.
 
 ## Install
 
@@ -17,14 +17,36 @@ pnpm add thrds       # not yet published
 
 ## Usage
 
+### Slack
+
+```ts
+import { SlackClient } from "thrds";
+
+const slack = new SlackClient({
+  token: "xoxb-...",
+  channel: "C0AQC2VKEJF",
+  username: "my-bot",
+  iconEmoji: ":robot_face:",
+});
+
+// Create new thread
+const result = await slack.sync({ messages: ["OP", "Reply 1", "Reply 2"] });
+
+// Update existing thread (edits changed messages, appends new, deletes extras)
+await slack.sync(
+  { messages: ["OP", "Reply 1", "Reply 2"] },
+  { threadTs: "1775516040.743629" },
+);
+```
+
+### Generic
+
 ```ts
 import { sync } from "thrds";
 import type { Thread, ThreadClient } from "thrds";
 
-const client: ThreadClient = /* Slack/Discord/etc. impl */;
-const thread: Thread = { messages: ["OP", "Reply 1", "Reply 2"] };
-
-const result = await sync(client, thread, /* threadId */ undefined);
+const client: ThreadClient = /* your client */;
+const result = await sync(client, { messages: ["OP", "Reply"] });
 // result.actions: Action[]  (POST / EDIT / DELETE / SKIP per slot)
 // result.messageIds: string[]
 // result.threadId: string
