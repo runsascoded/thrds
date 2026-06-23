@@ -156,6 +156,18 @@ def scan_local_threads() -> dict:
     return groups
 
 
+def committed_resolved(filename: str) -> bool | None:
+    """The `resolved` value of a head file as committed at HEAD (None if absent)."""
+    text = proc.text('git', 'show', f'HEAD:{filename}', err_ok=True, log=None)
+    if not text:
+        return None
+    for line in text.splitlines():
+        m = _FRONTMATTER_RE.match(line.strip())
+        if m and m.group(1) == 'resolved':
+            return m.group(2).strip().lower() == 'true'
+    return None
+
+
 def head_path(head_id: str, groups: dict | None = None) -> Path | None:
     """Path to the head (seq 00) file for a thread, or None."""
     groups = groups if groups is not None else scan_local_threads()
@@ -517,16 +529,26 @@ def diff(
         local_resolved = bool(head_fields.get('resolved'))
         remote_thread = threads_by_node.get(node_id) if node_id else None
         remote_resolved = remote_thread['isResolved'] if remote_thread else None
-        # Always print a per-thread status line (resolved state + sync), so an
-        # in-sync thread or a redundant local toggle reads as recognized rather
-        # than silently absent.
+        head_committed = committed_resolved(hp.name) if hp else None
+        # Always print a per-thread status line. Distinguish three cases so a
+        # local resolve edit is never silently absent:
+        #   - pending push   (local != remote): push will resolve/unresolve
+        #   - local-only edit (local == remote but != committed HEAD): you
+        #     toggled it, but GitHub already agrees — nothing to push
+        #   - in sync        (local == remote == committed)
         status = 'resolved' if local_resolved else 'open'
+        prefix = f"Thread {head_id} ({location}) [{status}]"
+        url = link(head_url, use_color)
         if remote_resolved is not None and local_resolved != remote_resolved:
             action = 'resolve' if local_resolved else 'unresolve'
-            err(f"{YELLOW}Thread {head_id} ({location}) [{status}] → would {action} on push "
-                f"(remote={'resolved' if remote_resolved else 'open'}){RESET} {link(head_url, use_color)}")
+            err(f"{YELLOW}{prefix} → would {action} on push "
+                f"(remote={'resolved' if remote_resolved else 'open'}){RESET} {url}")
+        elif head_committed is not None and local_resolved != head_committed:
+            was = 'resolved' if head_committed else 'open'
+            note = "matches GitHub, nothing to push" if remote_resolved is not None else "not yet pushed"
+            err(f"{GREEN}{prefix} → locally changed from {was} ({note}){RESET} {url}")
         else:
-            err(f"{CYAN}Thread {head_id} ({location}) [{status}]{RESET} {link(head_url, use_color)}")
+            err(f"{CYAN}{prefix}{RESET} {url}")
 
         for _seq, author, path in g['synced']:
             fields, body = parse_comment_file(path)

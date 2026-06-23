@@ -294,6 +294,27 @@ class TestDiffStatusLines:
         ]
 
 
+    def test_local_only_resolve_edit_is_flagged(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        make_head('100', resolved=False, node_id='PRRT_A', path='a.py', line=3, body='head body')
+        proc.run('git', 'add', reviews.synced_filename('100', 0, 'Copilot'), log=None)
+        proc.run('git', 'commit', '-q', '-m', 'init', log=None)
+        # Toggle the working copy to resolved (uncommitted); GitHub is already resolved.
+        reviews.set_thread_resolved('100', True)
+        remote = [_rest(100, None, 'Copilot', 'head body', path='a.py', line=3)]
+        _mock_api(monkeypatch, remote, [_thread('PRRT_A', True, [100])])
+
+        out = []
+        monkeypatch.setattr(reviews, 'err', lambda *a: out.append(' '.join(str(x) for x in a)))
+        reviews.diff('o', 'r', '5', use_color=False, current_user='ryan-williams')
+        lines = [l for l in out if l.startswith('Thread')]
+        assert lines == [
+            'Thread 100 (a.py:3) [resolved] → locally changed from open '
+            '(matches GitHub, nothing to push) https://github.com/o/r/pull/5#discussion_r100',
+        ]
+
+
 class TestBaseline:
     def test_write_and_read(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
