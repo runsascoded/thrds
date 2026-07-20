@@ -68,7 +68,23 @@ def parse_comment_file(path: Path) -> tuple[dict, str]:
     Returns (fields, body). `fields` values are typed: int fields → int,
     bool fields → bool, everything else → str.
     """
-    lines = path.read_text().splitlines(keepends=True)
+    return _parse_comment_text(path.read_text())
+
+
+def parse_comment_file_at_head(filename: str) -> tuple[dict, str] | None:
+    """Parse a review comment file as committed at HEAD; None if absent.
+
+    Use this from `push_reviews` so the sync mirrors committed state — WT
+    changes are ignored unless explicitly committed (Contract A).
+    """
+    text = proc.text('git', 'show', f'HEAD:{filename}', err_ok=True, log=None)
+    if not text:
+        return None
+    return _parse_comment_text(text)
+
+
+def _parse_comment_text(text: str) -> tuple[dict, str]:
+    lines = text.splitlines(keepends=True)
     raw = {}
     body_start = 0
     for i, line in enumerate(lines):
@@ -356,6 +372,12 @@ def _post_reply(owner: str, repo: str, number: str, head_id: str, body: str) -> 
         unlink(body_file)
 
 
+def _wt_dirty(filename: str) -> bool:
+    """True iff `filename` is tracked and has uncommitted WT modifications."""
+    out = proc.line('git', 'status', '--porcelain', '--', filename, err_ok=True, log=None)
+    return bool(out) and not out.startswith('?? ')
+
+
 def push(
     owner: str,
     repo: str,
@@ -385,12 +407,20 @@ def push(
     for head_id in sorted(groups):
         g = groups[head_id]
         hp = head_path(head_id, groups)
-        head_fields = parse_comment_file(hp)[0] if hp else {}
+        # All comparisons read from HEAD: push mirrors *committed* state to the
+        # remote, never WT. User must commit edits / resolve flips before push.
+        head_at_head = parse_comment_file_at_head(hp.name) if hp else None
+        head_fields = head_at_head[0] if head_at_head else {}
         node_id = head_fields.get('thread_node_id')
         baseline = read_baseline(head_id)
+        # Safety: if the head file has uncommitted WT changes, skip resolve
+        # mutations on this thread. Otherwise an unsynced `resolved:` flip in
+        # WT would cause push to apply HEAD's (stale) state and silently
+        # *reverse* the user's intent on GitHub.
+        head_wt_dirty = hp is not None and _wt_dirty(hp.name)
 
         # 1. Resolve / unresolve
-        if node_id:
+        if node_id and not head_wt_dirty:
             local_resolved = bool(head_fields.get('resolved'))
             remote_thread = threads_by_node.get(node_id)
             remote_resolved = remote_thread['isResolved'] if remote_thread else None
@@ -412,9 +442,19 @@ def push(
                         err(f"Unresolved thread {head_id}")
                     resolves += 1
 
-        # 2. Comment edits
+        # 2. Comment edits (read from HEAD; WT edits without a commit are ignored)
         for _seq, author, path in g['synced']:
-            fields, body = parse_comment_file(path)
+            # Same safety as the resolve gate above: if the file has uncommitted
+            # WT changes, skip it. Otherwise a `$EDITOR` edit that wasn't
+            # committed would cause push to send HEAD's (stale) body to GitHub,
+            # silently reverting a remote edit made out of band. The pre-push
+            # warning surfaces the dirty file to the user separately.
+            if _wt_dirty(path.name):
+                continue
+            parsed = parse_comment_file_at_head(path.name)
+            if parsed is None:
+                continue  # untracked WT-only file; nothing to push
+            fields, body = parsed
             cid = fields.get('id')
             if cid is None or cid not in remote_by_id:
                 err(f"Warning: {path} has no/unknown remote id; skipping")
@@ -433,12 +473,15 @@ def push(
                 err(f"Updated review comment {cid}")
             edits_pushed += 1
 
-        # 3. Draft replies
+        # 3. Draft replies (read from HEAD; uncommitted drafts stay unposted —
+        # this lets users selectively publish by committing only the drafts
+        # they're ready to send.)
         next_seq = (max((s for s, _a, _p in g['synced']), default=-1)) + 1
         for draft in sorted(g['drafts']):
-            body = draft.read_text()
-            if not body.strip():
-                err(f"Warning: skipping empty reply draft {draft}")
+            body = proc.text('git', 'show', f'HEAD:{draft.name}', err_ok=True, log=None)
+            if body is None or not body.strip():
+                # WT-only or empty → skip silently; pre-push warning surfaces
+                # the dirty-WT case to the user separately.
                 continue
             if dry_run:
                 err(f"[DRY-RUN] Would post reply from {draft} to thread {head_id}")
@@ -464,8 +507,9 @@ def push(
             replies_posted += 1
             next_seq += 1
 
-        # Refresh baseline to the state we just pushed.
-        if not dry_run and node_id:
+        # Refresh baseline to the state we just pushed (== HEAD). Skip if the
+        # head file is dirty (we deliberately didn't sync resolve for it).
+        if not dry_run and node_id and not head_wt_dirty:
             write_baseline(head_id, bool(head_fields.get('resolved')))
 
     if renames and not dry_run:

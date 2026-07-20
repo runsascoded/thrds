@@ -334,6 +334,17 @@ def _git_init(tmp_path):
     proc.run('git', 'config', 'user.name', 't', log=None)
 
 
+def _commit(*paths: str, msg: str = 'wip') -> None:
+    """Stage the given paths and commit.
+
+    Under the Contract A push contract, `push` reads from HEAD only; tests that
+    write files and then exercise push need to commit first to mirror real
+    user workflow (edit → commit → push).
+    """
+    proc.run('git', 'add', *paths, log=None)
+    proc.run('git', 'commit', '-q', '-m', msg, log=None)
+
+
 def _mock_api(monkeypatch, comments, threads):
     """Stub every GH-touching api function reviews.py imported. Returns a
     `calls` dict that records mutating-call args."""
@@ -397,7 +408,7 @@ class TestPullOrchestration:
 
 class TestPushOrchestration:
     def _seed_thread(self, head_body='head body', resolved=False, node_id='PRRT_A'):
-        """Write a local head + reply pair (as pull would)."""
+        """Write a local head + reply pair and commit (as pull would)."""
         head_fields = {
             'author': 'Copilot', 'id': '100', 'created_at': '2025-01-01T00:00:00Z',
             'path': 'a.py', 'line': 8, 'side': 'RIGHT', 'commit_id': 'sha',
@@ -408,15 +419,17 @@ class TestPushOrchestration:
         reply_fields = {'author': 'ryan-williams', 'id': '101',
                         'created_at': '2025-01-01T00:00:00Z', 'in_reply_to': '100'}
         reviews.write_comment_file(Path('z-100-01-ryan-williams.md'), reply_fields, 'reply body')
+        _commit('z-100-00-Copilot.md', 'z-100-01-ryan-williams.md', msg='seed thread')
 
     def test_push_edits_own_comment(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         _git_init(tmp_path)
         self._seed_thread()
-        # Locally edit the reply.
+        # Locally edit the reply, then commit (push reads from HEAD).
         f = Path('z-100-01-ryan-williams.md')
         flds, _ = reviews.parse_comment_file(f)
         reviews.write_comment_file(f, flds, 'reply body EDITED\n')
+        _commit('z-100-01-ryan-williams.md', msg='edit reply')
 
         remote = [_rest(100, None, 'Copilot', 'head body'),
                   _rest(101, 100, 'ryan-williams', 'reply body')]
@@ -430,10 +443,11 @@ class TestPushOrchestration:
         monkeypatch.chdir(tmp_path)
         _git_init(tmp_path)
         self._seed_thread(head_body='head body')
-        # Edit the head comment (authored by Copilot, not us).
+        # Edit the head comment (authored by Copilot, not us), then commit.
         f = Path('z-100-00-Copilot.md')
         flds, _ = reviews.parse_comment_file(f)
         reviews.write_comment_file(f, flds, 'head body HACKED\n')
+        _commit('z-100-00-Copilot.md', msg='edit head')
 
         remote = [_rest(100, None, 'Copilot', 'head body'),
                   _rest(101, 100, 'ryan-williams', 'reply body')]
@@ -450,6 +464,7 @@ class TestPushOrchestration:
         _git_init(tmp_path)
         self._seed_thread()
         Path('z-100-new.md').write_text('Acknowledged, thanks!\n')
+        _commit('z-100-new.md', msg='add draft')
 
         remote = [_rest(100, None, 'Copilot', 'head body'),
                   _rest(101, 100, 'ryan-williams', 'reply body')]
@@ -482,6 +497,51 @@ class TestPushOrchestration:
         reviews.push('o', 'r', '5', current_user='ryan-williams')
         assert calls['resolve'] == ['PRRT_A']
         assert calls['unresolve'] == []
+
+    def test_push_skips_resolve_when_head_file_dirty(self, tmp_path, monkeypatch):
+        """If the head file has uncommitted WT changes, push must NOT apply
+        resolve/unresolve from HEAD — HEAD's state may be stale relative to the
+        user's intent in WT, and acting on it could silently reverse a desired
+        resolve on GitHub."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        self._seed_thread(resolved=False)  # HEAD committed as unresolved
+        reviews.write_baseline('100', False)
+        # User toggled the head file to resolved=true in WT but didn't commit.
+        f = Path('z-100-00-Copilot.md')
+        flds, body = reviews.parse_comment_file(f)
+        flds['resolved'] = True
+        reviews.write_comment_file(f, flds, body)
+        # Remote already moved to resolved=true (e.g., from a prior push).
+        remote = [_rest(100, None, 'Copilot', 'head body'),
+                  _rest(101, 100, 'ryan-williams', 'reply body')]
+        calls = _mock_api(monkeypatch, remote, [_thread('PRRT_A', True, [100, 101])])
+        reviews.push('o', 'r', '5', current_user='ryan-williams')
+        # No mutation in either direction — safety prevents the dangerous
+        # "HEAD says false, remote says true → unresolve" path.
+        assert calls['resolve'] == [] and calls['unresolve'] == []
+        # Baseline unchanged (no sync happened for this thread).
+        assert reviews.read_baseline('100') == {'resolved': False}
+
+    def test_push_skips_edit_when_synced_file_dirty(self, tmp_path, monkeypatch):
+        """Symmetric to the resolve gate: if a synced comment file has
+        uncommitted WT changes, push must NOT PATCH its HEAD body onto GitHub.
+        HEAD may be stale relative to the user's WT intent (and to a remote edit
+        made out of band), so acting on it could silently revert either."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        self._seed_thread()
+        # User edits the reply in WT but has NOT committed it.
+        f = Path('z-100-01-ryan-williams.md')
+        flds, _ = reviews.parse_comment_file(f)
+        reviews.write_comment_file(f, flds, 'reply body WIP\n')
+        # Remote body differs from HEAD (someone edited it out of band).
+        remote = [_rest(100, None, 'Copilot', 'head body'),
+                  _rest(101, 100, 'ryan-williams', 'reply body REMOTE')]
+        calls = _mock_api(monkeypatch, remote, [_thread('PRRT_A', False, [100, 101])])
+        reviews.push('o', 'r', '5', current_user='ryan-williams')
+        # No PATCH: the dirty WT file is skipped rather than pushing stale HEAD.
+        assert calls['patch'] == []
 
     def test_push_resolve_noop_when_already_matches(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

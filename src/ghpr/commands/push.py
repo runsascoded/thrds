@@ -20,6 +20,44 @@ from ..patterns import extract_title_from_first_line
 from ..render import render_comment_diff, render_unified_diff
 
 
+_GHPR_FILE_GLOBS = ['DESCRIPTION.md', '*#*.md', '[0-9]*.md', 'new*.md', 'z-*.md']
+
+
+def _warn_uncommitted_ghpr_files() -> None:
+    """Warn if any ghpr-managed file has uncommitted WT changes.
+
+    `ghpr push` syncs the *committed* state of every file (description, top-level
+    comments, drafts, review threads) to GitHub + gist. WT changes that aren't
+    committed are silently ignored — surface them here so the user can decide to
+    commit and re-run instead of being surprised by post-push drift.
+    """
+    try:
+        lines = proc.lines('git', 'status', '--porcelain', log=None)
+    except Exception:
+        return  # not a git repo / git missing — out of scope
+    dirty = []
+    for line in lines:
+        if len(line) < 4:
+            continue
+        status, name = line[:2], line[3:]
+        # Skip untracked files (`??`) — drafts (z-*-new.md) are expected
+        # untracked until they're committed-or-posted.
+        if status.strip() == '??':
+            continue
+        # Strip rename arrows for accurate matching
+        if ' -> ' in name:
+            name = name.split(' -> ', 1)[1]
+        for pat in _GHPR_FILE_GLOBS:
+            if Path(name).match(pat):
+                dirty.append(name)
+                break
+    if dirty:
+        err(f"⚠ {len(dirty)} file(s) with uncommitted changes will be ignored "
+            f"(push syncs HEAD; commit + re-run to include):")
+        for name in dirty:
+            err(f"    {name}")
+
+
 def push(
     gist: bool,
     dry_run: bool,
@@ -36,6 +74,8 @@ def push(
     # Get item info from current directory
     owner, repo, number = get_pr_info_from_path()
     item_type = None
+
+    _warn_uncommitted_ghpr_files()
 
     if not all([owner, repo, number]):
         # Try git config
@@ -508,13 +548,10 @@ def sync_to_gist(
 
         # Check if remote exists and push to it
         if add_remote:
-            # Commit the description only when it actually changed; committing
-            # unconditionally dumps git's "nothing to commit / Untracked files"
-            # status block into push output (cosmetic noise).
-            proc.run('git', 'add', local_filename, log=None)
-            if not proc.check('git', 'diff', '--cached', '--quiet', log=None):
-                proc.run('git', 'commit', '-q', '-m', f'Update PR description for {owner}/{repo}#{pr_number}', log=None)
-
+            # Push HEAD to the gist mirror; uncommitted WT changes are
+            # intentionally not auto-committed (Contract A: user commits,
+            # ghpr push syncs HEAD to GitHub and the gist). A pre-push
+            # warning surfaces dirty-WT cases to the user separately.
             try:
                 proc.run('git', 'push', gist_remote, 'main', '--force', log=None)
                 err(f"Pushed to gist remote '{gist_remote}'")
