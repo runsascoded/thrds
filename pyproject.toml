@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ghpr-py"
-version = "0.1.9"
+version = "0.2.0"
 description = "GitHub PR/Issue management: clone, edit, and push PR/issue descriptions and comments, with gist mirroring"
 readme = "README.md"
 requires-python = ">=3.10"
