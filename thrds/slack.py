@@ -114,6 +114,10 @@ class SlackClient:
         return messages
 
     def post(self, content: str, thread_id: str | None = None) -> Message:
+        if len(content) > SLACK_MESSAGE_LIMIT:
+            raise ValueError(
+                f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
+            )
         data: dict = {
             "channel": self.channel,
             "text": content,
@@ -133,6 +137,10 @@ class SlackClient:
         return Message(id=result["ts"], content=content)
 
     def edit(self, message_id: str, content: str) -> Message:
+        if len(content) > SLACK_MESSAGE_LIMIT:
+            raise ValueError(
+                f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
+            )
         data: dict = {
             "channel": self.channel,
             "ts": message_id,
@@ -216,11 +224,14 @@ class SlackClient:
         return f"- <{url}|*{section.title}*> — {section.summary}"
 
     def _detail_url_placeholder(self) -> str:
-        """Placeholder URL with max possible length for space reservation.
+        """Placeholder URL sized to bound real Slack permalink lengths.
 
-        Slack permalinks are ~120 chars; use 130 as safe upper bound.
+        Real permalinks (workspace + channel + thread + cid params) typically
+        run ~110-140 chars; 180 is a safe upper bound so phase-4 real-URL
+        packing produces at most the phase-1 message count. Any residual
+        mismatch is caught by the ``strict=True`` zip in phase 4.
         """
-        return "x" * 130
+        return "x" * 180
 
     def sync_linked(
         self,
@@ -307,7 +318,13 @@ class SlackClient:
 
         # Phase 4: Rebuild summaries with real links and edit
         final_summaries = build_summary_messages(linked_replies, real_links, SLACK_MESSAGE_LIMIT, bullet_fn=self._bullet)
-        for i, (msg_id, content) in enumerate(zip(summary_ids, final_summaries)):
+        if len(final_summaries) != len(summary_ids):
+            raise RuntimeError(
+                f"sync_linked phase-4 repack yielded {len(final_summaries)} summary messages, "
+                f"phase-1 posted {len(summary_ids)}; bump `_detail_url_placeholder` "
+                "to bound the real-permalink length."
+            )
+        for i, (msg_id, content) in enumerate(zip(summary_ids, final_summaries, strict=True)):
             if i > 0 and pace > 0:
                 time.sleep(pace + random.uniform(0, jitter))
             self.edit(msg_id, content)

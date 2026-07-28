@@ -30,6 +30,38 @@ class LinkedSyncResult:
     section_detail_ids: dict[str, str]  # section title → first detail message ID
 
 
+_CONT_PREFIX = "… "
+_CONT_SUFFIX = " …"
+
+
+def _hard_split(text: str, limit: int) -> list[str]:
+    """Split `text` into chunks ≤ `limit`, with ellipsis continuation markers.
+
+    Prefers word-boundary splits; falls back to a hard character split when
+    no space sits far enough into the chunk to leave meaningful content.
+    Every returned chunk has ``len(chunk) <= limit`` by construction.
+    """
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        prefix = "" if not parts else _CONT_PREFIX
+        room = limit - len(prefix) - len(_CONT_SUFFIX)
+        # Word boundary is only useful if it leaves > half the chunk used,
+        # else the chunk is mostly wasted (e.g. bullet marker with no
+        # summary content). Fall back to hard char split otherwise.
+        cut = remaining.rfind(" ", room * 3 // 4, room + 1)
+        if cut <= 0:
+            cut = room
+        parts.append(f"{prefix}{remaining[:cut].rstrip()}{_CONT_SUFFIX}")
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        prefix = "" if not parts else _CONT_PREFIX
+        parts.append(f"{prefix}{remaining}")
+    return parts
+
+
 def split_body(body: str, limit: int) -> list[str]:
     """Split a body into messages, breaking on paragraph boundaries."""
     if len(body) <= limit:
@@ -51,7 +83,13 @@ def split_body(body: str, limit: int) -> list[str]:
                     if len(candidate) > limit:
                         if current:
                             messages.append(current)
-                        current = line
+                            current = ""
+                        if len(line) > limit:
+                            chunks = _hard_split(line, limit)
+                            messages.extend(chunks[:-1])
+                            current = chunks[-1]
+                        else:
+                            current = line
                     else:
                         current = candidate
             else:
@@ -98,25 +136,28 @@ def build_summary_messages(
     section_urls[i] is the link URL for section i (placeholder or real).
     bullet_fn(section, url) returns the formatted bullet line.
     """
-    bullets: list[str] = []
+    # Pre-split any bullet that alone would exceed the limit — otherwise the
+    # greedy packer emits an over-limit message, which fails at post/edit.
+    bullets: list[list[str]] = []
     for i, section in enumerate(linked.sections):
         bullet = bullet_fn(section, section_urls[i])
-        bullets.append(bullet)
+        bullets.append(_hard_split(bullet, limit))
 
     messages: list[str] = []
     current = linked.summary_prefix
 
-    for bullet in bullets:
-        if current:
-            candidate = f"{current}\n{bullet}"
-        else:
-            candidate = bullet
-        if len(candidate) > limit:
+    for chunks in bullets:
+        for chunk in chunks:
             if current:
-                messages.append(current)
-            current = bullet
-        else:
-            current = candidate
+                candidate = f"{current}\n{chunk}"
+            else:
+                candidate = chunk
+            if len(candidate) > limit:
+                if current:
+                    messages.append(current)
+                current = chunk
+            else:
+                current = candidate
 
     if linked.summary_suffix:
         candidate = f"{current}\n{linked.summary_suffix}"

@@ -20,31 +20,109 @@ class DiscordClient:
         self._active_thread_id: str | None = None
         self._suppress_embeds: bool = False
 
+    _MAX_ATTEMPTS = 4
+    _BACKOFF_BASE = 1.0
+    _BACKOFF_CAP = 15.0
+    _BODY_SNIPPET = 500
+
+    def _backoff(self, attempt: int) -> float:
+        return min(self._BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 1.0), self._BACKOFF_CAP)
+
     def _curl(
         self,
         method: str,
         path: str,
         data: dict | None = None,
-    ) -> dict | None:
+    ) -> dict | list | None:
         url = f"{DISCORD_API}{path}"
-        cmd = [
-            "curl", "-s",
-            "-X", method,
-            "-H", f"Authorization: {self.token}",
-            "-H", "Content-Type: application/json",
-        ]
-        if data is not None:
-            cmd += ["-d", json.dumps(data)]
-        cmd.append(url)
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        if not result.stdout.strip():
-            return None
-        resp = json.loads(result.stdout)
-        if isinstance(resp, dict) and "code" in resp and "message" in resp:
-            if resp["code"] == 30046:
-                raise EditRateLimited(resp["message"])
-            raise RuntimeError(f"Discord API error: {resp['message']} (code {resp['code']})")
-        return resp
+        last_err = ""
+        for attempt in range(self._MAX_ATTEMPTS):
+            cmd = [
+                "curl", "-s",
+                "-w", "\n%{http_code}",
+                "-X", method,
+                "-H", f"Authorization: {self.token}",
+                "-H", "Content-Type: application/json",
+            ]
+            if data is not None:
+                cmd += ["-d", json.dumps(data)]
+            cmd.append(url)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+            if result.returncode != 0:
+                last_err = f"curl exit {result.returncode}: {result.stderr.strip()[:self._BODY_SNIPPET]}"
+                if attempt + 1 < self._MAX_ATTEMPTS:
+                    time.sleep(self._backoff(attempt))
+                    continue
+                raise RuntimeError(f"Discord {method} {path}: {last_err}")
+
+            body, _, status_str = result.stdout.rpartition("\n")
+            try:
+                status = int(status_str.strip())
+            except ValueError:
+                last_err = f"unparseable status line from curl: {result.stdout[:self._BODY_SNIPPET]!r}"
+                if attempt + 1 < self._MAX_ATTEMPTS:
+                    time.sleep(self._backoff(attempt))
+                    continue
+                raise RuntimeError(f"Discord {method} {path}: {last_err}")
+
+            body = body.strip()
+
+            if status == 204:
+                return None
+
+            if 500 <= status < 600:
+                last_err = f"HTTP {status}: {body[:self._BODY_SNIPPET]}"
+                if attempt + 1 < self._MAX_ATTEMPTS:
+                    time.sleep(self._backoff(attempt))
+                    continue
+                raise RuntimeError(f"Discord {method} {path}: {last_err}")
+
+            try:
+                resp = json.loads(body) if body else None
+            except json.JSONDecodeError:
+                last_err = f"HTTP {status}, non-JSON body: {body[:self._BODY_SNIPPET]}"
+                if attempt + 1 < self._MAX_ATTEMPTS:
+                    time.sleep(self._backoff(attempt))
+                    continue
+                raise RuntimeError(f"Discord {method} {path}: {last_err}")
+
+            # Structured Discord error dict — handle before generic 4xx so
+            # `EditRateLimited` (code 30046, HTTP 429) is preserved and other
+            # 4xx errors surface Discord's message.
+            if isinstance(resp, dict) and "code" in resp and "message" in resp:
+                if resp["code"] == 30046:
+                    raise EditRateLimited(resp["message"])
+                if status == 429:
+                    retry_after = resp.get("retry_after")
+                    delay = float(retry_after) if isinstance(retry_after, (int, float)) else self._backoff(attempt)
+                    last_err = f"HTTP 429: {body[:self._BODY_SNIPPET]}"
+                    if attempt + 1 < self._MAX_ATTEMPTS:
+                        time.sleep(min(delay, self._BACKOFF_CAP))
+                        continue
+                    raise RuntimeError(f"Discord {method} {path}: rate-limited after {attempt+1} attempts: {last_err}")
+                raise RuntimeError(f"Discord API error: {resp['message']} (code {resp['code']})")
+
+            if status == 429:
+                last_err = f"HTTP 429: {body[:self._BODY_SNIPPET]}"
+                if attempt + 1 < self._MAX_ATTEMPTS:
+                    time.sleep(self._backoff(attempt))
+                    continue
+                raise RuntimeError(f"Discord {method} {path}: rate-limited after {attempt+1} attempts: {last_err}")
+
+            if 200 <= status < 300 and resp is None:
+                last_err = f"HTTP {status}, empty body (expected entity)"
+                if attempt + 1 < self._MAX_ATTEMPTS:
+                    time.sleep(self._backoff(attempt))
+                    continue
+                raise RuntimeError(f"Discord {method} {path}: {last_err}")
+
+            if 400 <= status < 500:
+                raise RuntimeError(f"Discord {method} {path}: HTTP {status}: {body[:self._BODY_SNIPPET]}")
+
+            return resp
+
+        raise RuntimeError(f"Discord {method} {path}: retries exhausted: {last_err}")
 
     @property
     def _channel(self) -> str:
@@ -189,7 +267,13 @@ class DiscordClient:
         self._suppress_embeds = suppress_embeds
         try:
             final_summaries = build_summary_messages(linked, real_links, MESSAGE_LIMIT)
-            for i, (msg_id, content) in enumerate(zip(summary_ids, final_summaries)):
+            if len(final_summaries) != len(summary_ids):
+                raise RuntimeError(
+                    f"sync_linked phase-4 repack yielded {len(final_summaries)} summary messages, "
+                    f"phase-1 posted {len(summary_ids)}; placeholder URL length "
+                    "must bound the real-permalink length."
+                )
+            for i, (msg_id, content) in enumerate(zip(summary_ids, final_summaries, strict=True)):
                 if i > 0 and pace > 0:
                     time.sleep(pace + random.uniform(0, jitter))
                 self.edit(msg_id, content)

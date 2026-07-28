@@ -99,6 +99,49 @@ def test_build_summary_empty_prefix():
     assert "[**B**](http://link-b)" in msgs[0]
 
 
+def test_build_summary_hard_splits_oversized_bullet():
+    """A bullet exceeding limit is hard-split at word boundaries with ellipsis markers."""
+    linked = LinkedThread(
+        summary_prefix="",
+        sections=[Section(title="A", summary="one two three four five six seven eight", body="")],
+    )
+    msgs = build_summary_messages(linked, ["u"], 40)
+    assert msgs == [
+        "- [**A**](u) — one two three four five …",
+        "… six seven eight",
+    ]
+    assert all(len(m) <= 40 for m in msgs)
+
+
+def test_build_summary_hard_split_no_word_boundary():
+    """Long unbroken run falls back to hard char split."""
+    linked = LinkedThread(
+        summary_prefix="",
+        sections=[Section(title="A", summary="a" * 30, body="")],
+    )
+    # Bullet = "- [**A**](u) — " (15) + 30 a's = 45 chars.
+    # Chunk 1: "- [**A**](u) — " + 13 a's + " …" = 30 chars.
+    # Chunk 2: "… " + 17 a's = 19 chars.
+    msgs = build_summary_messages(linked, ["u"], 30)
+    assert msgs == [
+        "- [**A**](u) — " + "a" * 13 + " …",
+        "… " + "a" * 17,
+    ]
+    assert all(len(m) <= 30 for m in msgs)
+
+
+def test_split_body_hard_splits_oversized_line():
+    """A single line exceeding limit is hard-split at word boundaries with ellipsis markers."""
+    body = "alpha beta gamma delta epsilon zeta eta theta"
+    result = split_body(body, 20)
+    assert result == [
+        "alpha beta gamma …",
+        "… delta epsilon …",
+        "… zeta eta theta",
+    ]
+    assert all(len(m) <= 20 for m in result)
+
+
 def test_build_summary_custom_bullet_fn():
     """Custom bullet_fn (e.g. Slack mrkdwn format)."""
     def slack_bullet(section, url):
