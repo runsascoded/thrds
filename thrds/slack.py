@@ -8,7 +8,14 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 from .core import Message, OrphanedRepliesError, SyncOptions, SyncResult, Thread, sync
-from .linked import LinkedSyncResult, LinkedThread, Section, build_detail_messages, build_summary_messages
+from .linked import (
+    LinkedSyncResult,
+    LinkedThread,
+    Section,
+    build_detail_messages,
+    build_summary_partition,
+    render_summary_from_partition,
+)
 
 SLACK_MESSAGE_LIMIT = 4000
 
@@ -261,7 +268,7 @@ class SlackClient:
         # Phase 1: Build detail + summary messages with placeholder links
         detail_msgs, section_starts = build_detail_messages(linked.sections, SLACK_MESSAGE_LIMIT)
         placeholder_urls = [placeholder] * len(linked.sections)
-        summary_msgs = build_summary_messages(linked_replies, placeholder_urls, SLACK_MESSAGE_LIMIT, bullet_fn=self._bullet)
+        summary_msgs, partition = build_summary_partition(linked_replies, placeholder_urls, SLACK_MESSAGE_LIMIT, bullet_fn=self._bullet)
 
         n_summary = len(summary_msgs)
         all_reply_msgs = summary_msgs + detail_msgs
@@ -316,14 +323,24 @@ class SlackClient:
             section_detail_map[section.title] = detail_msg_id
             real_links.append(self.permalink(detail_msg_id))
 
-        # Phase 4: Rebuild summaries with real links and edit
-        final_summaries = build_summary_messages(linked_replies, real_links, SLACK_MESSAGE_LIMIT, bullet_fn=self._bullet)
+        # Phase 4: Rebuild each phase-1 message with real URLs, preserving the
+        # partition — this keeps the message count constant regardless of real
+        # vs placeholder URL length, so the strict-zip below is an invariant
+        # assertion (unreachable absent a bug in `build_summary_partition`),
+        # not a common-case failure mode.
+        final_summaries = render_summary_from_partition(linked_replies, real_links, partition, bullet_fn=self._bullet)
         if len(final_summaries) != len(summary_ids):
             raise RuntimeError(
-                f"sync_linked phase-4 repack yielded {len(final_summaries)} summary messages, "
-                f"phase-1 posted {len(summary_ids)}; bump `_detail_url_placeholder` "
-                "to bound the real-permalink length."
+                f"sync_linked phase-4 render yielded {len(final_summaries)} summary messages, "
+                f"phase-1 posted {len(summary_ids)}; partition invariant violated."
             )
+        for j, msg in enumerate(final_summaries):
+            if len(msg) > SLACK_MESSAGE_LIMIT:
+                raise RuntimeError(
+                    f"sync_linked phase-4 message {j} rendered to {len(msg)} chars "
+                    f"(limit {SLACK_MESSAGE_LIMIT}); real permalinks longer than "
+                    "`_detail_url_placeholder` upper bound — bump the placeholder."
+                )
         for i, (msg_id, content) in enumerate(zip(summary_ids, final_summaries, strict=True)):
             if i > 0 and pace > 0:
                 time.sleep(pace + random.uniform(0, jitter))

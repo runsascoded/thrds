@@ -1,6 +1,7 @@
 """Regression tests for transport-layer robustness (specs/transport-robustness.md)."""
 from __future__ import annotations
 
+import re
 import subprocess
 
 import pytest
@@ -31,11 +32,20 @@ class _FakeSlackClient(SlackClient):
         return handler(data, method)
 
 
-def test_slack_sync_linked_raises_on_phase4_count_mismatch():
-    """Phase-4 repack producing != phase-1 count must raise; never silent zip truncation."""
+def test_slack_sync_linked_common_digest_shape_fewer_messages():
+    """21-section digest: phase-1 packs 2 msgs, phase-4 real URLs would pack 1.
+
+    Partition preservation keeps the phase-1 count in phase 4, so the 2 edits
+    both succeed and every rebuilt message stays ≤ SLACK_MESSAGE_LIMIT.
+    """
+    from thrds.slack import SLACK_MESSAGE_LIMIT
+    real_url_template = (
+        "https://openathena.slack.com/archives/C0AQC2VKEJF/"
+        "p1234567890{i:06d}?thread_ts=1234567890.123456&cid=C0AQC2VKEJF"
+    )
+    ts_counter = iter(f"1.{i:06d}" for i in range(1000))
     posts: list[str] = []
     edits: list[tuple[str, str]] = []
-    ts_counter = iter(f"1.{i:06d}" for i in range(1000))
 
     def on_auth(_data, _method):
         return {"ok": True, "user_id": "U1", "bot_id": "B1"}
@@ -52,19 +62,61 @@ def test_slack_sync_linked_raises_on_phase4_count_mismatch():
     def on_replies(_data, _method):
         return {"ok": True, "messages": []}
 
-    # Real permalink pathologically longer than the 180-char placeholder,
-    # so phase-4 real-URL packing must yield more messages than phase 1.
+    permalink_counter = iter(range(1000))
     def on_permalink(_data, _method):
-        return {"ok": True, "permalink": "https://s.slack.com/x" + "z" * 400}
+        return {"ok": True, "permalink": real_url_template.format(i=next(permalink_counter))}
 
-    handlers = {
+    client = _FakeSlackClient({
         "auth.test": on_auth,
         "chat.postMessage": on_post,
         "chat.update": on_edit,
         "conversations.replies": on_replies,
         "chat.getPermalink": on_permalink,
-    }
-    client = _FakeSlackClient(handlers)
+    })
+
+    linked = LinkedThread(
+        summary_prefix="*Weekly summary*",
+        sections=[Section(title=f"Topic {i:02d}", summary="w" * 40, body="b") for i in range(21)],
+    )
+    result = client.sync_linked(linked, pace=0.0, jitter=0.0)
+    assert len(result.summary_ids) == 2
+    assert len(edits) == 2
+    assert [len(c) <= SLACK_MESSAGE_LIMIT for _, c in edits] == [True, True]
+    url_pattern = re.compile(r"<(https://[^|]+)\|")
+    found_urls = [url for _, content in edits for url in url_pattern.findall(content)]
+    assert found_urls == [real_url_template.format(i=i) for i in range(21)]
+
+
+def test_slack_sync_linked_raises_on_undersized_placeholder():
+    """Real permalink longer than the placeholder upper bound → the phase-4
+    render produces an over-limit message; the length check raises with an
+    actionable RuntimeError instead of the message reaching Slack."""
+    ts_counter = iter(f"1.{i:06d}" for i in range(1000))
+
+    def on_auth(_data, _method):
+        return {"ok": True, "user_id": "U1", "bot_id": "B1"}
+
+    def on_post(data, _method):
+        return {"ok": True, "ts": next(ts_counter)}
+
+    def on_edit(_data, _method):
+        return {"ok": True}
+
+    def on_replies(_data, _method):
+        return {"ok": True, "messages": []}
+
+    # Real permalink pathologically longer than the 180-char placeholder — the
+    # only regime where partition preservation cannot bound the phase-4 size.
+    def on_permalink(_data, _method):
+        return {"ok": True, "permalink": "https://s.slack.com/x" + "z" * 400}
+
+    client = _FakeSlackClient({
+        "auth.test": on_auth,
+        "chat.postMessage": on_post,
+        "chat.update": on_edit,
+        "conversations.replies": on_replies,
+        "chat.getPermalink": on_permalink,
+    })
 
     linked = LinkedThread(
         summary_prefix="",
@@ -73,7 +125,7 @@ def test_slack_sync_linked_raises_on_phase4_count_mismatch():
             for i in range(8)
         ],
     )
-    with pytest.raises(RuntimeError, match=r"phase-4 repack yielded \d+ summary messages, phase-1 posted \d+"):
+    with pytest.raises(RuntimeError, match=r"phase-4 message \d+ rendered to \d+ chars.*bump the placeholder"):
         client.sync_linked(linked, pace=0.0, jitter=0.0)
 
 

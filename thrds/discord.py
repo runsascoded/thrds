@@ -6,7 +6,13 @@ import subprocess
 import time
 
 from .core import EditRateLimited, Message, SyncOptions, SyncResult, Thread, sync
-from .linked import LinkedSyncResult, LinkedThread, build_detail_messages, build_summary_messages
+from .linked import (
+    LinkedSyncResult,
+    LinkedThread,
+    build_detail_messages,
+    build_summary_partition,
+    render_summary_from_partition,
+)
 
 DISCORD_API = "https://discord.com/api/v10"
 MESSAGE_LIMIT = 2000
@@ -225,7 +231,7 @@ class DiscordClient:
         # Phase 1: Build detail + summary messages with placeholder links
         detail_msgs, section_starts = build_detail_messages(linked.sections, MESSAGE_LIMIT)
         placeholder_urls = [placeholder] * len(linked.sections)
-        summary_msgs = build_summary_messages(linked, placeholder_urls, MESSAGE_LIMIT)
+        summary_msgs, partition = build_summary_partition(linked, placeholder_urls, MESSAGE_LIMIT)
 
         n_summary = len(summary_msgs)
         all_msgs = summary_msgs + detail_msgs
@@ -266,13 +272,21 @@ class DiscordClient:
         self._active_thread_id = tid
         self._suppress_embeds = suppress_embeds
         try:
-            final_summaries = build_summary_messages(linked, real_links, MESSAGE_LIMIT)
+            # Rebuild each phase-1 message with real URLs, preserving the
+            # partition (see `SlackClient.sync_linked` for rationale).
+            final_summaries = render_summary_from_partition(linked, real_links, partition)
             if len(final_summaries) != len(summary_ids):
                 raise RuntimeError(
-                    f"sync_linked phase-4 repack yielded {len(final_summaries)} summary messages, "
-                    f"phase-1 posted {len(summary_ids)}; placeholder URL length "
-                    "must bound the real-permalink length."
+                    f"sync_linked phase-4 render yielded {len(final_summaries)} summary messages, "
+                    f"phase-1 posted {len(summary_ids)}; partition invariant violated."
                 )
+            for j, msg in enumerate(final_summaries):
+                if len(msg) > MESSAGE_LIMIT:
+                    raise RuntimeError(
+                        f"sync_linked phase-4 message {j} rendered to {len(msg)} chars "
+                        f"(limit {MESSAGE_LIMIT}); real message URLs longer than "
+                        "the placeholder upper bound."
+                    )
             for i, (msg_id, content) in enumerate(zip(summary_ids, final_summaries, strict=True)):
                 if i > 0 and pace > 0:
                     time.sleep(pace + random.uniform(0, jitter))

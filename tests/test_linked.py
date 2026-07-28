@@ -1,6 +1,15 @@
 """Tests for linked summary thread logic."""
+import pytest
+
 from thrds import LinkedThread, Section
-from thrds.linked import build_detail_messages, build_summary_messages, split_body
+from thrds.linked import (
+    MessageAtoms,
+    build_detail_messages,
+    build_summary_messages,
+    build_summary_partition,
+    render_summary_from_partition,
+    split_body,
+)
 
 
 def test_split_body_under_limit():
@@ -99,35 +108,63 @@ def test_build_summary_empty_prefix():
     assert "[**B**](http://link-b)" in msgs[0]
 
 
-def test_build_summary_hard_splits_oversized_bullet():
-    """A bullet exceeding limit is hard-split at word boundaries with ellipsis markers."""
+def test_build_summary_raises_on_oversized_bullet():
+    """A single bullet exceeding limit raises — partition preservation requires
+    every bullet to fit in one chunk, so callers must trim rather than the
+    packer silently hard-splitting (which would misalign phase-1/phase-4
+    chunk counts when the real URL is shorter than the placeholder)."""
     linked = LinkedThread(
         summary_prefix="",
-        sections=[Section(title="A", summary="one two three four five six seven eight", body="")],
+        sections=[Section(title="A", summary="a" * 5000, body="")],
     )
-    msgs = build_summary_messages(linked, ["u"], 40)
-    assert msgs == [
-        "- [**A**](u) — one two three four five …",
-        "… six seven eight",
+    with pytest.raises(ValueError, match=r"Section 0 \('A'\) bullet is \d+ chars, exceeds limit 40"):
+        build_summary_messages(linked, ["u"], 40)
+
+
+def test_build_summary_partition_captures_prefix_and_indices():
+    """Partition records which section indices land in each message and where
+    the prefix and suffix are attached."""
+    linked = LinkedThread(
+        summary_prefix="# Digest",
+        sections=[
+            Section(title="A", summary="stuff", body=""),
+            Section(title="B", summary="things", body=""),
+            Section(title="C", summary="items", body=""),
+        ],
+        summary_suffix="_footer_",
+    )
+    urls = ["ua", "ub", "uc"]
+    # Bullets ≈ 21-22 chars each; prefix 8; suffix 8. limit=32 fits prefix+A in
+    # msg 0, B alone in msg 1, C+suffix in msg 2.
+    msgs, partition = build_summary_partition(linked, urls, 32)
+    assert partition == [
+        MessageAtoms(bullet_indices=[0], has_prefix=True, has_suffix=False),
+        MessageAtoms(bullet_indices=[1], has_prefix=False, has_suffix=False),
+        MessageAtoms(bullet_indices=[2], has_prefix=False, has_suffix=True),
     ]
-    assert all(len(m) <= 40 for m in msgs)
+    assert msgs == [
+        "# Digest\n- [**A**](ua) — stuff",
+        "- [**B**](ub) — things",
+        "- [**C**](uc) — items\n_footer_",
+    ]
 
 
-def test_build_summary_hard_split_no_word_boundary():
-    """Long unbroken run falls back to hard char split."""
+def test_render_from_partition_preserves_count_with_shorter_urls():
+    """Given a partition computed from long placeholder URLs, rendering with
+    shorter real URLs preserves the message count and every message shrinks."""
     linked = LinkedThread(
         summary_prefix="",
-        sections=[Section(title="A", summary="a" * 30, body="")],
+        sections=[
+            Section(title=f"T{i:02d}", summary="w" * 40, body="") for i in range(21)
+        ],
     )
-    # Bullet = "- [**A**](u) — " (15) + 30 a's = 45 chars.
-    # Chunk 1: "- [**A**](u) — " + 13 a's + " …" = 30 chars.
-    # Chunk 2: "… " + 17 a's = 19 chars.
-    msgs = build_summary_messages(linked, ["u"], 30)
-    assert msgs == [
-        "- [**A**](u) — " + "a" * 13 + " …",
-        "… " + "a" * 17,
-    ]
-    assert all(len(m) <= 30 for m in msgs)
+    placeholder = "x" * 180
+    real_url = "https://example.com/abc"
+    _, partition = build_summary_partition(linked, [placeholder] * 21, 4000)
+    rendered = render_summary_from_partition(linked, [real_url] * 21, partition)
+    # Same message count as phase 1; every rebuilt message fits.
+    assert len(rendered) == len(partition)
+    assert [len(m) <= 4000 for m in rendered] == [True] * len(rendered)
 
 
 def test_split_body_hard_splits_oversized_line():
