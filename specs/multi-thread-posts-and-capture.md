@@ -84,6 +84,14 @@ Framing this explicitly: it is RLHF for message composition. The library's value
 
 Note the messages will often be posted **by hand**, not by `thrds`: posting through a Slack app stamps an uneditable "Sent using @Claude" footer, which for external recipients is worse than an inline, in-voice attribution line. So **pull must work against threads `thrds` did not create.** Push is for scratch spaces; pull is the product.
 
+## Why this is worth building at all: the MCP cannot edit
+
+The Claude Slack MCP exposes send / draft / schedule / read / search / react / create — but **no `chat.update` and no delete**. So an agent iterating on a draft in Slack can only *append* replacement messages, which is exactly the mess this spec exists to fix: during the motivating session the self-DM accumulated v2/v3/v4/v5 plus per-thread "proposed replacement" posts, none of which could be cleaned up programmatically.
+
+`thrds`'s `ThreadClient` already has `edit` and `delete`. What it needs is a **user token** (`xoxp-`, `chat:write`): `chat.update` only edits messages authored by the token's owner, so a bot token can edit the app's own posts but not ones the human typed. With a user token, `sync()` reconciles a hand-edited thread against a new desired state in place — the actual workflow — instead of appending.
+
+This is the single highest-leverage capability gap; without it, drafting-in-Slack is append-only.
+
 ## Gap 5: a scratch space
 
 Drafting in a self-DM is what the motivating post used, and it was bad: several revisions each became a separate top-level DM, scrolling real history away, with no delete API.
