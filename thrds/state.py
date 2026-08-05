@@ -68,6 +68,7 @@ class SessionState:
     staging_channel: str | None = None
     staging_preamble_ts: str | None = None
     staging_threads: dict[str, str] = field(default_factory=dict)                    # slug → thread_ts
+    staging_archived: bool = False                                                   # True once the PC has been archived (idempotence marker)
     prod_threads: dict[str, dict[str, str]] = field(default_factory=dict)            # channel → (slug → thread_ts)
     prod_preamble_ts: dict[str, str] = field(default_factory=dict)                   # channel → preamble ts
 

@@ -3,12 +3,16 @@
 Use `click.testing.CliRunner` and monkeypatch `thrds.cli.SlackClient` to a
 lightweight spy — the CLI's job is arg parsing, state handling, and
 delegating to the library; Slack round-tripping is covered by
-`test_doc_sync.py`.
+`test_doc_sync.py`. Gist creation is skipped via `--no-gist` on init to
+avoid depending on real `gh`; a separate test covers the gist code path
+via subprocess mocking.
 """
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -90,7 +94,7 @@ def spy(monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    # Return a proxy that resolves to the latest-instantiated spy.
+
     class LatestSpy:
         def __getattr__(self, item):
             if not captured:
@@ -103,68 +107,161 @@ def spy(monkeypatch):
 
 @pytest.fixture
 def in_tmp(tmp_path, monkeypatch):
-    """CWD → tmp_path so state.json read/write is scoped to the test."""
+    """CWD → tmp_path so state.json read/write is scoped to the test.
+
+    Sets git author/committer env so `git commit` in mirror.py works without
+    depending on system-wide `git config`, and stamps a fake Slack token so
+    CLI subcommands that call `_make_slack_client` don't error on env lookup.
+    """
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('GIT_AUTHOR_NAME', 'Test')
+    monkeypatch.setenv('GIT_AUTHOR_EMAIL', 'test@example.com')
+    monkeypatch.setenv('GIT_COMMITTER_NAME', 'Test')
+    monkeypatch.setenv('GIT_COMMITTER_EMAIL', 'test@example.com')
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
     return tmp_path
 
 
-def _write_doc(tmp: 'PathLike', name: str = 'trainium.md', text: str | None = None) -> str:
-    from pathlib import Path
-    if text is None:
-        text = "=== a\n\nOP a.\n"
-    p = Path(tmp) / name
-    p.write_text(text)
+def _write_doc(tmp: Path, name: str = 'trainium.md', text: str = "=== a\n\nOP a.\n") -> str:
+    """Write DOC_PATH content into `tmp`; return the filename (relative)."""
+    (tmp / name).write_text(text)
     return name
+
+
+def _init_session(in_tmp: Path, monkeypatch, doc_name: str = 'trainium.md',
+                  doc_text: str = "=== a\n\nOP a.\n") -> Path:
+    """Write the doc, run `thrds init --no-gist <doc>`, chdir to session dir.
+
+    Returns the session dir path (=``in_tmp / 'thrds' / <slug>``). Every
+    test that needs a live session uses this helper; init-specific tests
+    call `init` directly and inspect the target dir.
+    """
+    _write_doc(in_tmp, doc_name, doc_text)
+    result = CliRunner().invoke(cli, ['init', '--no-gist', doc_name])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    slug = Path(doc_name).stem
+    session_dir = in_tmp / 'thrds' / slug
+    monkeypatch.chdir(session_dir)
+    return session_dir
 
 
 # --- init ---
 
-def test_init_creates_state_json_with_doc_path_and_session_id(in_tmp):
-    doc_name = _write_doc(in_tmp)
-    result = CliRunner().invoke(cli, ['init', doc_name])
-    assert result.exit_code == 0, result.output
-    state = SessionState.load(in_tmp)
-    assert state.doc_path == doc_name
+def test_init_creates_session_subdir_with_state_json_and_doc(in_tmp):
+    _write_doc(in_tmp)
+    result = CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    session = in_tmp / 'thrds' / 'trainium'
+    assert (session / STATE_PATH).is_file()
+    assert (session / 'trainium.md').read_text() == "=== a\n\nOP a.\n"
+    state = SessionState.load(session)
+    assert state.doc_path == 'trainium.md'
     assert state.channel_prefix is None
     assert state.session_id  # non-empty uuid
+    assert state.gist_id is None  # --no-gist
+
+
+def test_init_creates_git_repo_with_initial_commit(in_tmp):
+    _write_doc(in_tmp)
+    CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    session = in_tmp / 'thrds' / 'trainium'
+    assert (session / '.git').is_dir()
+    log = subprocess.run(
+        ['git', 'log', '--format=%s'],
+        cwd=session, capture_output=True, text=True, check=True,
+    ).stdout.strip().splitlines()
+    assert log == ['thrds: init trainium']
 
 
 def test_init_records_prefix_override(in_tmp):
-    doc_name = _write_doc(in_tmp)
-    result = CliRunner().invoke(cli, ['init', '-p', 'rw-', doc_name])
-    assert result.exit_code == 0, result.output
-    state = SessionState.load(in_tmp)
+    _write_doc(in_tmp)
+    CliRunner().invoke(cli, ['init', '--no-gist', '-p', 'rw-', 'trainium.md'])
+    state = SessionState.load(in_tmp / 'thrds' / 'trainium')
     assert state.channel_prefix == 'rw-'
 
 
-def test_init_refuses_when_state_json_exists(in_tmp):
+def test_init_refuses_when_target_dir_exists(in_tmp):
     _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
-    result = CliRunner().invoke(cli, ['init', 'trainium.md'])
-    assert result.exit_code == 2  # click.UsageError → exit code 2
-    # click prints UsageError as the last stderr line; assert exact.
+    CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    result = CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        "Error: .thrds/state.json already exists — rm to start fresh."
+        f"Error: Target session dir already exists: {in_tmp / 'thrds' / 'trainium'}"
     )
+
+
+def test_init_creates_empty_doc_when_source_absent(in_tmp):
+    """If DOC_PATH doesn't exist in CWD, init creates it empty in the session dir."""
+    result = CliRunner().invoke(cli, ['init', '--no-gist', 'brandnew.md'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    dest = in_tmp / 'thrds' / 'brandnew' / 'brandnew.md'
+    assert dest.read_text() == ""
+
+
+def test_init_state_json_is_valid_pretty_printed(in_tmp):
+    _write_doc(in_tmp)
+    CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    text = (in_tmp / 'thrds' / 'trainium' / STATE_PATH).read_text()
+    data = json.loads(text)
+    assert data['doc_path'] == 'trainium.md'
+    assert data['staging_archived'] is False
+    assert text.endswith('\n') and not text.endswith('\n\n')
+
+
+def test_init_gist_flow_shells_out_to_gh_and_records_gist_id(in_tmp, monkeypatch):
+    """Init without --no-gist: shells out to `gh gist create`, records the id, adds `g` remote."""
+    _write_doc(in_tmp)
+    calls: list[list[str]] = []
+    # Snapshot the original before patching — else the fake recurses into itself
+    # (patching `thrds.mirror.subprocess.run` patches the module-shared `run`,
+    # which the fake would then call recursively for real-git delegation).
+    from thrds import mirror as mirror_mod
+    orig_run = mirror_mod.subprocess.run
+
+    def fake_run(cmd, cwd=None, check=True, capture_output=True, text=True):
+        calls.append(cmd)
+        if cmd[:3] == ['gh', 'gist', 'create']:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0,
+                stdout='https://gist.github.com/abc123\n', stderr='',
+            )
+        # Real git; also fake `git push g` so the test doesn't try to
+        # actually push to gist.github.com/abc123.git.
+        if cmd[:2] == ['git', 'push']:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout='', stderr='')
+        return orig_run(cmd, cwd=cwd, check=check, capture_output=capture_output, text=text)
+
+    monkeypatch.setattr('thrds.mirror.subprocess.run', fake_run)
+    result = CliRunner().invoke(cli, ['init', 'trainium.md'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    state = SessionState.load(in_tmp / 'thrds' / 'trainium')
+    assert state.gist_id == 'abc123'
+    # `gh gist create` was invoked exactly once.
+    gh_calls = [c for c in calls if c[:2] == ['gh', 'gist']]
+    assert gh_calls == [['gh', 'gist', 'create', '--secret', '--desc', 'thrds: trainium', 'trainium.md']]
+    # The `g` remote is configured.
+    remote_url = subprocess.run(
+        ['git', 'remote', 'get-url', 'g'],
+        cwd=in_tmp / 'thrds' / 'trainium', capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert remote_url == 'https://gist.github.com/abc123.git'
 
 
 # --- push ---
 
-def test_push_staging_delegates_to_sync_doc_staging(in_tmp, spy):
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+def test_push_staging_delegates_to_sync_doc_staging(in_tmp, monkeypatch, spy):
+    _init_session(in_tmp, monkeypatch)
     result = CliRunner().invoke(cli, ['push'])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, (result.output, result.stderr)
     assert [c['mode'] for c in spy.push_calls] == ['staging']
     assert spy.push_calls[0]['dry_run'] is False
     assert spy.push_calls[0]['doc'] == Doc(threads=[DocThread(slug='a', messages=[DocMessage('OP a.')])])
 
 
-def test_push_prod_delegates_to_sync_doc_prod_with_keep_staging(in_tmp, spy):
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+def test_push_prod_delegates_to_sync_doc_prod_with_keep_staging(in_tmp, monkeypatch, spy):
+    _init_session(in_tmp, monkeypatch)
     result = CliRunner().invoke(cli, ['push', '--prod', '--keep-staging', '-c', 'C_OARL'])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, (result.output, result.stderr)
     assert spy.push_calls == [{
         'mode': 'prod',
         'doc': Doc(threads=[DocThread(slug='a', messages=[DocMessage('OP a.')])]),
@@ -174,63 +271,96 @@ def test_push_prod_delegates_to_sync_doc_prod_with_keep_staging(in_tmp, spy):
     }]
 
 
-def test_push_dry_run_propagates_flag(in_tmp, spy):
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+def test_push_dry_run_propagates_flag(in_tmp, monkeypatch, spy):
+    _init_session(in_tmp, monkeypatch)
     result = CliRunner().invoke(cli, ['push', '-n'])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, (result.output, result.stderr)
     assert spy.push_calls[0]['dry_run'] is True
 
 
-def test_push_rejects_channel_without_prod(in_tmp, spy):
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+def test_push_rejects_channel_without_prod(in_tmp, monkeypatch, spy):
+    _init_session(in_tmp, monkeypatch)
     result = CliRunner().invoke(cli, ['push', '-c', 'C_X'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == "Error: --channel requires --prod."
 
 
-def test_push_rejects_keep_staging_without_prod(in_tmp, spy):
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+def test_push_rejects_keep_staging_without_prod(in_tmp, monkeypatch, spy):
+    _init_session(in_tmp, monkeypatch)
     result = CliRunner().invoke(cli, ['push', '-k'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == "Error: --keep-staging requires --prod."
 
 
-def test_push_uses_explicit_doc_path_over_state(in_tmp, spy):
+def test_push_uses_explicit_doc_path_over_state(in_tmp, monkeypatch, spy):
     """DOC_PATH arg wins over state.doc_path."""
-    _write_doc(in_tmp, name='trainium.md')
-    _write_doc(in_tmp, name='other.md', text="=== b\n\nOP b.\n")
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+    session = _init_session(in_tmp, monkeypatch)
+    # Add a second doc in the session dir; push at it explicitly.
+    (session / 'other.md').write_text("=== b\n\nOP b.\n")
     result = CliRunner().invoke(cli, ['push', 'other.md'])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, (result.output, result.stderr)
     assert spy.push_calls[0]['doc'].threads[0].slug == 'b'
+
+
+def test_push_autocommits_state_and_doc(in_tmp, monkeypatch, spy):
+    """A successful non-dry-run push commits state.json + doc.md to the session git."""
+    session = _init_session(in_tmp, monkeypatch)
+    result = CliRunner().invoke(cli, ['push'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    log = subprocess.run(
+        ['git', 'log', '--format=%s'],
+        cwd=session, capture_output=True, text=True, check=True,
+    ).stdout.strip().splitlines()
+    assert log == ['thrds: push staging', 'thrds: init trainium']
+
+
+def test_push_dry_run_does_not_autocommit(in_tmp, monkeypatch, spy):
+    """Dry-run push adds no commit."""
+    session = _init_session(in_tmp, monkeypatch)
+    CliRunner().invoke(cli, ['push', '-n'])
+    log = subprocess.run(
+        ['git', 'log', '--format=%s'],
+        cwd=session, capture_output=True, text=True, check=True,
+    ).stdout.strip().splitlines()
+    assert log == ['thrds: init trainium']
 
 
 # --- pull ---
 
-def test_pull_writes_to_disk_with_write_flag(in_tmp, spy, monkeypatch):
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+def test_pull_writes_to_disk_with_write_flag(in_tmp, monkeypatch):
+    session = _init_session(in_tmp, monkeypatch)
 
-    # Script what pull returns.
     def factory(*, token, channel):
         s = SlackSpy(token=token, channel=channel)
         s.pull_returns = Doc(threads=[DocThread(slug='x', messages=[DocMessage('Pulled OP.')])])
-        # Reroute the fixture's latest reference too.
-        monkeypatch.setattr('thrds.cli.SlackClient', lambda *, token, channel: s)
         return s
-
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
+
     result = CliRunner().invoke(cli, ['pull', '-w'])
-    assert result.exit_code == 0, result.output
-    assert (in_tmp / 'trainium.md').read_text() == "=== x\n\nPulled OP.\n"
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert (session / 'trainium.md').read_text() == "=== x\n\nPulled OP.\n"
 
 
-def test_pull_prints_to_stdout_without_write(in_tmp, spy, monkeypatch):
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+def test_pull_write_autocommits_doc(in_tmp, monkeypatch):
+    """Pull --write commits the updated doc to session git."""
+    session = _init_session(in_tmp, monkeypatch)
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.pull_returns = Doc(threads=[DocThread(slug='x', messages=[DocMessage('Pulled OP.')])])
+        return s
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+
+    CliRunner().invoke(cli, ['pull', '-w'])
+    log = subprocess.run(
+        ['git', 'log', '--format=%s'],
+        cwd=session, capture_output=True, text=True, check=True,
+    ).stdout.strip().splitlines()
+    assert log == ['thrds: pull staging → trainium.md', 'thrds: init trainium']
+
+
+def test_pull_prints_to_stdout_without_write(in_tmp, monkeypatch):
+    _init_session(in_tmp, monkeypatch)
 
     def factory(*, token, channel):
         s = SlackSpy(token=token, channel=channel)
@@ -238,23 +368,21 @@ def test_pull_prints_to_stdout_without_write(in_tmp, spy, monkeypatch):
         return s
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     result = CliRunner().invoke(cli, ['pull'])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, (result.output, result.stderr)
     assert result.output == "=== x\n\nPulled OP.\n"
 
 
-def test_pull_prod_passes_channel(in_tmp, spy):
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+def test_pull_prod_passes_channel(in_tmp, monkeypatch, spy):
+    _init_session(in_tmp, monkeypatch)
     result = CliRunner().invoke(cli, ['pull', '--prod', '-c', 'C_OTHER'])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, (result.output, result.stderr)
     assert spy.pull_calls == [{'mode': 'prod', 'channel': 'C_OTHER'}]
 
 
 # --- diff ---
 
-def test_diff_compares_local_against_pulled(in_tmp, spy, monkeypatch):
-    _write_doc(in_tmp, text="=== a\n\nLocal OP.\n")
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+def test_diff_compares_local_against_pulled(in_tmp, monkeypatch):
+    session = _init_session(in_tmp, monkeypatch, doc_text="=== a\n\nLocal OP.\n")
 
     def factory(*, token, channel):
         s = SlackSpy(token=token, channel=channel)
@@ -263,9 +391,7 @@ def test_diff_compares_local_against_pulled(in_tmp, spy, monkeypatch):
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
 
     result = CliRunner().invoke(cli, ['diff'])
-    assert result.exit_code == 0, result.output
-    # Both docs are identical shape (one thread `a`, one message OP), so the
-    # unified diff is just the OP-line change with 3 lines of context.
+    assert result.exit_code == 0, (result.output, result.stderr)
     assert result.output.splitlines() == [
         "--- local",
         "+++ slack",
@@ -279,27 +405,39 @@ def test_diff_compares_local_against_pulled(in_tmp, spy, monkeypatch):
 
 # --- archive ---
 
-def test_archive_calls_slack_archive_and_uses_staging_channel(in_tmp, spy):
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
-    # Simulate a prior push that set staging_channel.
-    state = SessionState.load(in_tmp)
+def test_archive_calls_slack_archive_and_flips_flag(in_tmp, monkeypatch, spy):
+    session = _init_session(in_tmp, monkeypatch)
+    state = SessionState.load(session)
     state.staging_channel = "C_STAGE_TO_ARCHIVE"
-    state.save()
+    state.save(session)
 
     result = CliRunner().invoke(cli, ['archive'])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, (result.output, result.stderr)
     assert spy.archive_calls == ["C_STAGE_TO_ARCHIVE"]
+    assert SessionState.load(session).staging_archived is True
 
 
-def test_archive_is_a_no_op_when_no_staging_channel(in_tmp, spy):
-    """No staging_channel in state → early return, no SlackClient constructed."""
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+def test_archive_is_idempotent_when_already_archived(in_tmp, monkeypatch, spy):
+    session = _init_session(in_tmp, monkeypatch)
+    state = SessionState.load(session)
+    state.staging_channel = "C_STAGE"
+    state.staging_archived = True
+    state.save(session)
+
     result = CliRunner().invoke(cli, ['archive'])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert result.stderr.splitlines() == ["Already archived: C_STAGE"]
+    # spy proxy would raise if SlackClient was constructed → verifies no API call.
+    with pytest.raises(AttributeError, match="No SlackClient was constructed"):
+        _ = spy.archive_calls
+
+
+def test_archive_is_a_no_op_when_no_staging_channel(in_tmp, monkeypatch, spy):
+    """No staging_channel in state → early return, no SlackClient constructed."""
+    _init_session(in_tmp, monkeypatch)
+    result = CliRunner().invoke(cli, ['archive'])
+    assert result.exit_code == 0, (result.output, result.stderr)
     assert result.stderr.splitlines() == ["No staging PC to archive."]
-    # spy is unaccessed → SlackClient never got constructed (short-circuit).
     with pytest.raises(AttributeError, match="No SlackClient was constructed"):
         _ = spy.archive_calls
 
@@ -307,8 +445,7 @@ def test_archive_is_a_no_op_when_no_staging_channel(in_tmp, spy):
 # --- error paths ---
 
 def test_push_requires_slack_token_env(in_tmp, monkeypatch):
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
+    _init_session(in_tmp, monkeypatch)
     monkeypatch.delenv(SLACK_TOKEN_ENV, raising=False)
     result = CliRunner().invoke(cli, ['push'])
     assert result.exit_code == 2
@@ -325,11 +462,3 @@ def test_push_requires_state_json(in_tmp, spy):
     assert result.stderr.splitlines()[-1] == (
         "Error: No thrds session state at .thrds/state.json; run `thrds init` first."
     )
-
-
-def test_state_json_is_valid_json_after_init(in_tmp):
-    _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', 'trainium.md'])
-    data = json.loads((in_tmp / STATE_PATH).read_text())
-    assert data['doc_path'] == 'trainium.md'
-    assert 'session_id' in data

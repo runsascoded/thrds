@@ -1,9 +1,12 @@
 """Command-line interface for `thrds` sessions.
 
 Wraps the `Doc` / `SessionState` / `SlackClient` primitives into
-init/push/pull/diff/archive subcommands. Session state lives at
-``.thrds/state.json`` in the current working directory (see
-`thrds.state`); the CLI is a thin operational layer over the library.
+init/push/pull/diff/archive subcommands. Each session lives in its own
+directory (ghpr-style: ``<git-root-or-cwd>/thrds/<slug>/``) with its
+own private git repo (nested `.git/` is invisible to any surrounding
+project's git). A secret gist created at init becomes the ``g`` remote;
+state-mutating verbs (`push`, `pull --write`, `archive`) auto-commit +
+push, so the mirror always reflects the current session state.
 
 Slack access requires ``SLACK_THRDS_USER_TOKEN`` (a user-scoped ``xoxp-``
 token with ``chat:write`` + ``groups:write`` — see the spec for why user
@@ -17,10 +20,11 @@ from pathlib import Path
 
 import click
 
+from . import mirror
 from .doc import Doc
 from .md import diff_docs, parse_doc, serialize_doc
 from .slack import SlackClient
-from .state import SessionState
+from .state import STATE_PATH, SessionState
 
 
 def err(*msg):
@@ -83,6 +87,20 @@ def _print_sync_summary(kind: str, result) -> None:
         err(f"  deleted (terraform): {result.deleted_slugs}")
 
 
+def _autocommit(session_root: Path, paths: list[str], message: str) -> None:
+    """Commit ``paths`` (relative to session_root) and push to gist if configured.
+
+    No-op if ``session_root`` isn't a git repo (rare — only if user manually
+    removed `.git/`). No-op if there's no `g` remote (``thrds init --no-gist``).
+    """
+    if not mirror.is_git_repo(session_root):
+        return
+    try:
+        mirror.commit_and_push(session_root, paths, message)
+    except mirror.MirrorError as e:
+        err(f"warning: mirror commit/push failed: {e}")
+
+
 @click.group()
 def cli():
     """`thrds`: draft multi-thread posts locally, sync to Slack (staging + prod)."""
@@ -90,20 +108,70 @@ def cli():
 
 
 @cli.command()
+@click.option('-G', '--no-gist', is_flag=True, help='Skip gist creation; local git repo only.')
 @click.option('-p', '--prefix', help='Staging PC channel-name prefix override (else `THRDS_CHANNEL_PREFIX` env, else empty).')
 @click.argument('doc_path')
-def init(prefix: str | None, doc_path: str):
+def init(no_gist: bool, prefix: str | None, doc_path: str):
     """Initialize a `thrds` session for DOC_PATH (a `.md` file).
 
-    Creates `.thrds/state.json` with a fresh session_id. Refuses if
-    state.json already exists — rm to start fresh.
+    Creates ``<git-root-or-cwd>/thrds/<slug>/`` (ghpr-style), copies or
+    creates the doc there, `git init`s the session dir, and by default
+    creates a secret gist and adds it as the ``g`` remote. Refuses if the
+    target dir already exists.
     """
-    if Path('.thrds/state.json').exists():
-        raise click.UsageError('.thrds/state.json already exists — rm to start fresh.')
-    state = SessionState.new(doc_path=doc_path, channel_prefix=prefix)
-    state.save()
-    err(f"Initialized session {state.session_id} for {doc_path}")
+    doc_p = Path(doc_path)
+    slug = doc_p.stem
+    if not slug:
+        raise click.UsageError(f"cannot derive a slug from DOC_PATH: {doc_path!r}")
+    target = mirror.resolve_session_dir(Path.cwd(), slug)
+    if target.exists():
+        raise click.UsageError(f"Target session dir already exists: {target}")
+    target.mkdir(parents=True)
+
+    dest_md = target / f'{slug}.md'
+    if doc_p.exists() and doc_p.is_file():
+        dest_md.write_text(doc_p.read_text())
+    else:
+        # Empty placeholder — user edits before first push.
+        dest_md.write_text('')
+
+    state = SessionState.new(doc_path=f'{slug}.md', channel_prefix=prefix)
+    state.save(target)
+
+    mirror.init_repo(target)
+    mirror.commit(target, [f'{slug}.md', str(STATE_PATH)], f'thrds: init {slug}')
+
+    if not no_gist:
+        try:
+            gist_id, git_url = mirror.create_gist(
+                target,
+                description=f'thrds: {slug}',
+                files=[f'{slug}.md'],
+            )
+        except mirror.MirrorError as e:
+            raise click.UsageError(
+                f"gist creation failed:\n{e}\n\n"
+                "Re-run `thrds init` with `--no-gist` to skip the gist mirror."
+            )
+        state.gist_id = gist_id
+        state.save(target)
+        mirror.add_remote(target, state.gist_remote, git_url)
+        # Push the initial commit (with state.json now carrying gist_id).
+        mirror.commit_and_push(
+            target,
+            [str(STATE_PATH)],
+            f'thrds: record gist_id {gist_id}',
+            remote=state.gist_remote,
+        )
+
+    err(f"Initialized session {state.session_id} at {target}")
     err(f"Staging PC name (on first push): {state.staging_channel_name()}")
+    try:
+        rel = target.relative_to(Path.cwd())
+        err(f"cd {rel} to work on this doc")
+    except ValueError:
+        # target isn't under cwd (git-root was above cwd). Print absolute.
+        err(f"cd {target} to work on this doc")
 
 
 @cli.command()
@@ -128,12 +196,20 @@ def push(channel: str | None, keep_staging: bool, dry_run: bool, prod: bool, doc
             keep_staging=keep_staging,
             dry_run=dry_run,
         )
-        _print_sync_summary('pushed to prod' + (' (dry-run)' if dry_run else ''), result)
-        if not dry_run and not keep_staging and state.staging_channel is not None:
-            err(f"  archived staging PC: {state.staging_channel}")
+        mode = 'prod'
     else:
         result = client.sync_doc_staging(doc, state, dry_run=dry_run)
-        _print_sync_summary('pushed to staging' + (' (dry-run)' if dry_run else ''), result)
+        mode = 'staging'
+    _print_sync_summary(f'pushed to {mode}' + (' (dry-run)' if dry_run else ''), result)
+    if prod and not dry_run and not keep_staging and state.staging_channel is not None:
+        err(f"  archived staging PC: {state.staging_channel}")
+    if not dry_run:
+        doc_rel = _resolve_doc_path(state, doc_path)
+        _autocommit(
+            Path.cwd(),
+            [doc_rel, str(STATE_PATH)],
+            f'thrds: push {mode}',
+        )
 
 
 @cli.command()
@@ -145,6 +221,8 @@ def pull(channel: str | None, prod: bool, write: bool, doc_path: str | None):
     """Pull the doc's current state from Slack. Default: staging PC.
 
     Without ``--write`` the doc is printed to stdout (frontmatter omitted).
+    With ``--write``, DOC_PATH is overwritten and (if the session is a git
+    repo) auto-committed + pushed to the gist mirror.
     """
     state = _load_state()
     if not prod and channel is not None:
@@ -156,6 +234,8 @@ def pull(channel: str | None, prod: bool, write: bool, doc_path: str | None):
         path = _resolve_doc_path(state, doc_path)
         Path(path).write_text(text)
         err(f"wrote pulled doc to {path}")
+        mode = 'prod' if prod else 'staging'
+        _autocommit(Path.cwd(), [path], f'thrds: pull {mode} → {path}')
     else:
         click.echo(text, nl=False)
 
@@ -179,16 +259,22 @@ def diff(channel: str | None, prod: bool, doc_path: str | None):
 def archive():
     """Archive this session's staging PC (reversible via Slack UI/API `unarchive`).
 
-    A no-op if no staging PC exists (nothing was pushed to staging yet, or
-    it was already archived on prod push).
+    Idempotent — subsequent invocations no-op via the ``state.staging_archived``
+    flag. Auto-commits + pushes the flag change to the gist mirror.
     """
     state = _load_state()
     if state.staging_channel is None:
         err("No staging PC to archive.")
         return
+    if state.staging_archived:
+        err(f"Already archived: {state.staging_channel}")
+        return
     client = _make_slack_client()
     client.archive_channel(state.staging_channel)
+    state.staging_archived = True
+    state.save()
     err(f"archived staging PC: {state.staging_channel}")
+    _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: archive {state.staging_channel}')
 
 
 def main():
