@@ -8,6 +8,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 from .core import Message, OrphanedRepliesError, SyncOptions, SyncResult, Thread, sync
+from .doc import Doc, DocSyncResult, DocThread
 from .linked import (
     LinkedSyncResult,
     LinkedThread,
@@ -16,6 +17,9 @@ from .linked import (
     build_summary_partition,
     render_summary_from_partition,
 )
+from .state import SessionState
+
+THRDS_METADATA_EVENT_TYPE = 'thrds'
 
 SLACK_MESSAGE_LIMIT = 4000
 
@@ -352,3 +356,339 @@ class SlackClient:
             detail_ids=detail_ids,
             section_detail_ids=section_detail_map,
         )
+
+    # --- Doc-level sync (multi-thread) ---
+    def create_private_channel(self, name: str) -> str:
+        """Create a private channel with ``name`` and return its channel_id.
+
+        The Slack API may lowercase / rewrite invalid chars in the name; the
+        returned ID (not the name) is the durable handle to record in state.
+        Requires the token to have ``groups:write``.
+        """
+        result = self._request("conversations.create", {
+            "name": name,
+            "is_private": True,
+        })
+        return result["channel"]["id"]
+
+    def archive_channel(self, channel: str) -> None:
+        """Archive ``channel`` (reversible via ``conversations.unarchive``).
+
+        The primary use is GC of a session's staging PC after a successful
+        prod push; Slack has no channel-delete for standard workspaces, so
+        archive is the strongest cleanup available.
+        """
+        self._request("conversations.archive", {"channel": channel})
+
+    def _delete_thread(self, thread_ts: str, pace: float, jitter: float) -> None:
+        """Delete an entire thread — replies bottom-up, OP last.
+
+        Foreign replies (non-editable) will fail chat.delete; we skip them via
+        ``editable`` filter. That leaves them orphaned if any exist, but in a
+        single-member staging PC that shouldn't happen in practice.
+        """
+        replies = self.list_messages(thread_ts)
+        # replies[0] is the OP itself; skip and delete OP last.
+        for msg in reversed(replies[1:]):
+            if not msg.editable:
+                continue
+            self._request("chat.delete", {"channel": self.channel, "ts": msg.id})
+            if pace > 0:
+                time.sleep(pace + random.uniform(0, jitter))
+        # OP:
+        self._request("chat.delete", {"channel": self.channel, "ts": thread_ts})
+
+    def _thrds_metadata(
+        self,
+        state: SessionState,
+        thread_slug: str | None,
+        kind: str,
+    ) -> dict:
+        """Build the Slack metadata payload for one thrds-owned message.
+
+        Emitted on every post/edit so ``recover`` can rebuild state from
+        ``conversations.history`` by filtering on ``event_type == 'thrds'``
+        and ``event_payload.session_id == <id>``.
+        """
+        payload = {
+            "session_id": state.session_id,
+            "doc_slug": state.doc_slug,
+            "kind": kind,
+        }
+        if thread_slug is not None:
+            payload["thread_slug"] = thread_slug
+        return {
+            "event_type": THRDS_METADATA_EVENT_TYPE,
+            "event_payload": payload,
+        }
+
+    def _sync_doc_thread(
+        self,
+        thread: DocThread,
+        existing_ts: str | None,
+        state: SessionState,
+        dry_run: bool,
+        pace: float,
+        jitter: float,
+        suppress_unfurls: bool,
+    ) -> tuple[str, SyncResult]:
+        """Sync one owned thread (its OP + replies) via `sync()`.
+
+        Filters ``thread.messages`` to ours-only (``author is None``) before
+        translating to a `Thread` — foreign messages are preserved on Slack
+        by `core.sync`'s editable filter, never re-posted. Returns
+        ``(op_ts, sync_result)``.
+        """
+        ours = [m for m in thread.messages if m.author is None]
+        if not ours:
+            raise ValueError(
+                f"Thread {thread.slug!r}: no ours messages to sync — every "
+                "message has an author, which shouldn't be possible (OP must "
+                "be ours). Data-model bug."
+            )
+        core_thread = Thread(messages=[m.content for m in ours])
+        metadata: dict[str, dict] = {}
+        for i, m in enumerate(ours):
+            kind = "op" if i == 0 else "reply"
+            metadata[m.content] = self._thrds_metadata(state, thread.slug, kind)
+        result = self.sync(
+            core_thread,
+            thread_ts=existing_ts,
+            dry_run=dry_run,
+            pace=pace,
+            jitter=jitter,
+            suppress_unfurls=suppress_unfurls,
+            metadata=metadata,
+        )
+        return result.thread_id, result
+
+    def _sync_preamble(
+        self,
+        preamble: str | None,
+        existing_ts: str | None,
+        state: SessionState,
+        dry_run: bool,
+        pace: float,
+        jitter: float,
+        suppress_unfurls: bool,
+        delete_on_absent: bool,
+    ) -> str | None:
+        """Sync the doc's preamble (a top-level message with no replies).
+
+        - preamble absent + no existing_ts → nop, return None.
+        - preamble absent + existing_ts + delete_on_absent → delete, return None.
+          (Staging terraforms; prod leaves the existing preamble in place.)
+        - preamble present + no existing_ts → post fresh, return new ts.
+        - preamble present + existing_ts → edit in place, return existing_ts.
+        """
+        if preamble is None:
+            if existing_ts is not None and delete_on_absent and not dry_run:
+                self._request("chat.delete", {"channel": self.channel, "ts": existing_ts})
+                return None
+            return existing_ts  # preserved as-is (or None if never set)
+        # Treat the preamble as a one-message "thread" (no replies).
+        core_thread = Thread(messages=[preamble])
+        metadata = {preamble: self._thrds_metadata(state, thread_slug=None, kind="preamble")}
+        result = self.sync(
+            core_thread,
+            thread_ts=existing_ts,
+            dry_run=dry_run,
+            pace=pace,
+            jitter=jitter,
+            suppress_unfurls=suppress_unfurls,
+            metadata=metadata,
+        )
+        return result.thread_id if not dry_run else (existing_ts or "<new>")
+
+    def sync_doc_staging(
+        self,
+        doc: Doc,
+        state: SessionState,
+        dry_run: bool = False,
+        pace: float = 0.4,
+        jitter: float = 0.0,
+        suppress_unfurls: bool = True,
+    ) -> DocSyncResult:
+        """Terraform-sync a `Doc` into its per-session staging PC.
+
+        Creates the PC lazily on the first non-dry-run call (updates
+        ``state.staging_channel`` and persists state immediately so a mid-run
+        failure doesn't leak the channel handle). Terraform semantics:
+
+        - Slugged threads present in state but absent from the doc are deleted.
+        - Slugged threads in the doc are synced in place (`core.sync` reconciles
+          OP + replies, preserving foreign messages via the editable filter).
+        - Preamble is treated as a one-message thread; deletion on removal.
+
+        Every thread must have a slug (state is slug-keyed). Bare ``===``
+        threads raise ``ValueError``.
+        """
+        for t in doc.threads:
+            if t.slug is None:
+                raise ValueError(
+                    "sync_doc_staging requires every thread to have a slug; "
+                    "bare `===` threads aren't state-trackable."
+                )
+
+        # 1. Ensure staging PC exists.
+        if state.staging_channel is None and not dry_run:
+            state.staging_channel = self.create_private_channel(state.staging_channel_name())
+            state.save()  # persist eagerly — a mid-run failure shouldn't leak the channel handle
+        channel = state.staging_channel if state.staging_channel is not None else "<new-pc>"
+
+        prev_channel = self.channel
+        self.channel = channel
+        try:
+            # 2. Preamble.
+            preamble_ts = self._sync_preamble(
+                doc.preamble,
+                state.staging_preamble_ts,
+                state,
+                dry_run=dry_run,
+                pace=pace,
+                jitter=jitter,
+                suppress_unfurls=suppress_unfurls,
+                delete_on_absent=True,
+            )
+            if not dry_run:
+                state.staging_preamble_ts = preamble_ts
+
+            # 3. Delete stale slugs (in state, absent from doc).
+            desired_slugs = {t.slug for t in doc.threads}
+            stale_slugs = [s for s in list(state.staging_threads) if s not in desired_slugs]
+            for slug in stale_slugs:
+                thread_ts = state.staging_threads[slug]
+                if not dry_run:
+                    del state.staging_threads[slug]
+                    self._delete_thread(thread_ts, pace=pace, jitter=jitter)
+
+            # 4. Sync each desired thread.
+            thread_ts_by_slug: dict[str, str] = {}
+            thread_results: dict[str, SyncResult] = {}
+            for thread in doc.threads:
+                existing_ts = state.staging_threads.get(thread.slug)
+                op_ts, sync_result = self._sync_doc_thread(
+                    thread,
+                    existing_ts,
+                    state,
+                    dry_run=dry_run,
+                    pace=pace,
+                    jitter=jitter,
+                    suppress_unfurls=suppress_unfurls,
+                )
+                if not dry_run:
+                    state.staging_threads[thread.slug] = op_ts
+                thread_ts_by_slug[thread.slug] = op_ts
+                thread_results[thread.slug] = sync_result
+
+            if not dry_run:
+                state.save()
+
+            return DocSyncResult(
+                channel=channel,
+                preamble_ts=preamble_ts,
+                thread_ts_by_slug=thread_ts_by_slug,
+                thread_results=thread_results,
+                deleted_slugs=stale_slugs,
+            )
+        finally:
+            self.channel = prev_channel
+
+    def sync_doc_prod(
+        self,
+        doc: Doc,
+        state: SessionState,
+        channel: str | None = None,
+        keep_staging: bool = False,
+        dry_run: bool = False,
+        pace: float = 0.4,
+        jitter: float = 0.0,
+        suppress_unfurls: bool = True,
+    ) -> DocSyncResult:
+        """Additive sync of a `Doc` into its real target channel.
+
+        Additive semantics (opposite of ``sync_doc_staging``): threads absent
+        from the doc are LEFT in place on Slack (never terraform-deleted); the
+        preamble on a channel is edited if the doc still has one but preserved
+        otherwise. Owned threads present in state are reconciled by
+        ``core.sync``; new threads in the doc get posted fresh and recorded in
+        ``state.prod_threads[channel]``.
+
+        ``channel`` overrides ``state.prod_channel`` for this call; the first
+        successful (non-dry-run) call pins the resolved channel into
+        ``state.prod_channel`` for subsequent runs.
+
+        On success (non-dry-run), archives the session's staging PC unless
+        ``keep_staging=True`` — the "prod push finalizes the session" GC step.
+        The state records (``staging_channel`` + ``staging_threads``) are
+        preserved as history; ``conversations.unarchive`` reopens the PC if
+        needed.
+        """
+        for t in doc.threads:
+            if t.slug is None:
+                raise ValueError(
+                    "sync_doc_prod requires every thread to have a slug; "
+                    "bare `===` threads aren't state-trackable."
+                )
+
+        target = channel if channel is not None else state.prod_channel
+        if target is None:
+            raise ValueError(
+                "No prod channel — pass channel= or set state.prod_channel first."
+            )
+
+        prev_channel = self.channel
+        self.channel = target
+        try:
+            # 1. Preamble (additive: preserved on absence).
+            preamble_ts = self._sync_preamble(
+                doc.preamble,
+                state.prod_preamble_ts.get(target),
+                state,
+                dry_run=dry_run,
+                pace=pace,
+                jitter=jitter,
+                suppress_unfurls=suppress_unfurls,
+                delete_on_absent=False,
+            )
+            if not dry_run:
+                if preamble_ts is not None:
+                    state.prod_preamble_ts[target] = preamble_ts
+                # If preamble_ts is None here (no doc preamble, no prior state), leave state clean.
+
+            # 2. Threads: sync-in-place, add-if-new. No delete of state entries absent from doc.
+            thread_ts_by_slug: dict[str, str] = {}
+            thread_results: dict[str, SyncResult] = {}
+            for thread in doc.threads:
+                existing_ts = state.get_thread_ts(target, thread.slug)
+                op_ts, sync_result = self._sync_doc_thread(
+                    thread,
+                    existing_ts,
+                    state,
+                    dry_run=dry_run,
+                    pace=pace,
+                    jitter=jitter,
+                    suppress_unfurls=suppress_unfurls,
+                )
+                if not dry_run:
+                    state.set_thread_ts(target, thread.slug, op_ts)
+                thread_ts_by_slug[thread.slug] = op_ts
+                thread_results[thread.slug] = sync_result
+
+            if not dry_run:
+                state.prod_channel = target  # pin for future runs
+                state.save()
+
+            # 3. Auto-archive the staging PC unless the caller opted out.
+            if not dry_run and not keep_staging and state.staging_channel is not None:
+                self.archive_channel(state.staging_channel)
+
+            return DocSyncResult(
+                channel=target,
+                preamble_ts=preamble_ts,
+                thread_ts_by_slug=thread_ts_by_slug,
+                thread_results=thread_results,
+                deleted_slugs=[],
+            )
+        finally:
+            self.channel = prev_channel

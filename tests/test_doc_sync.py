@@ -1,0 +1,507 @@
+"""Tests for `SlackClient.sync_doc_staging` (Phase B5).
+
+Uses `_FakeSlackClient` (mirrors `tests/test_transport.py`) to script the
+Slack API responses; asserts on posted content, channel routing, state
+mutation, and terraform semantics.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+from thrds import Doc, DocMessage, DocThread, SessionState
+from thrds.slack import SlackClient
+
+
+class _FakeSlackClient(SlackClient):
+    """SlackClient with `_request` stubbed to a scripted dispatcher."""
+    def __init__(self, handlers):
+        super().__init__(token="x", channel="C_INIT")
+        self._handlers = handlers
+        self.calls: list[tuple[str, dict, str]] = []
+
+    def _request(self, endpoint, data=None, method="POST"):
+        self.calls.append((endpoint, data, method))
+        handler = self._handlers.get(endpoint)
+        if handler is None:
+            raise NotImplementedError(f"no handler for {endpoint}")
+        return handler(data, method)
+
+
+@dataclass
+class Posted:
+    ts: str
+    channel: str
+    text: str
+    thread_ts: str | None
+    metadata: dict | None
+
+
+def _make_client(*, existing_replies: dict[str, list[dict]] | None = None):
+    """Build a fake client with the default handler set for a staging sync.
+
+    ``existing_replies`` maps thread_ts → list of message dicts that
+    ``conversations.replies`` should return for that thread. Absent thread_ts
+    → empty. Every call is recorded; posts/edits/deletes accumulate in the
+    returned tracker.
+    """
+    existing = existing_replies or {}
+    ts_counter = iter(f"1.{i:06d}" for i in range(100))
+    posted: list[Posted] = []
+    edited: list[dict] = []
+    deleted: list[str] = []
+    created_channels: list[dict] = []
+    archived_channels: list[str] = []
+
+    def on_auth(_data, _method):
+        return {"ok": True, "user_id": "U_ME", "bot_id": None}
+
+    def on_create(data, _method):
+        created_channels.append(data)
+        return {"ok": True, "channel": {"id": "C_STAGING", "name": data["name"]}}
+
+    def on_archive(data, _method):
+        archived_channels.append(data["channel"])
+        return {"ok": True}
+
+    def on_replies(data, _method):
+        return {"ok": True, "messages": existing.get(data["ts"], [])}
+
+    def on_post(data, _method):
+        ts = next(ts_counter)
+        posted.append(Posted(
+            ts=ts,
+            channel=data["channel"],
+            text=data["text"],
+            thread_ts=data.get("thread_ts"),
+            metadata=data.get("metadata"),
+        ))
+        return {"ok": True, "ts": ts}
+
+    def on_edit(data, _method):
+        edited.append({
+            "channel": data["channel"],
+            "ts": data["ts"],
+            "text": data["text"],
+            "metadata": data.get("metadata"),
+        })
+        return {"ok": True}
+
+    def on_delete(data, _method):
+        deleted.append(data["ts"])
+        return {"ok": True}
+
+    client = _FakeSlackClient({
+        "auth.test": on_auth,
+        "conversations.create": on_create,
+        "conversations.archive": on_archive,
+        "conversations.replies": on_replies,
+        "chat.postMessage": on_post,
+        "chat.update": on_edit,
+        "chat.delete": on_delete,
+    })
+    return client, posted, edited, deleted, created_channels, archived_channels
+
+
+def _basic_doc() -> Doc:
+    return Doc(
+        preamble="Sorry for the delay, updates below:",
+        threads=[
+            DocThread(slug="mfu", messages=[
+                DocMessage("1. Latest MFU."),
+                DocMessage("Reply about the chip-wide measurement."),
+            ]),
+            DocThread(slug="prof", messages=[
+                DocMessage("2. Profiling / improving MFU"),
+            ]),
+        ],
+    )
+
+
+def _new_state(tmp_path, monkeypatch, **overrides) -> SessionState:
+    """Fresh session state whose save()s land in tmp_path/.thrds/state.json."""
+    monkeypatch.chdir(tmp_path)
+    return SessionState.new(doc_path='trainium-update.md', **overrides)
+
+
+# --- fresh-session sync ---
+
+def test_fresh_sync_creates_pc_and_posts_preamble_and_threads(tmp_path, monkeypatch):
+    """Empty state: creates PC, posts preamble + each thread, records everything."""
+    monkeypatch.setenv('THRDS_CHANNEL_PREFIX', 'rw-')
+    state = _new_state(tmp_path, monkeypatch)
+    client, posted, edited, deleted, created, archived = _make_client()
+
+    result = client.sync_doc_staging(_basic_doc(), state, pace=0.0)
+
+    # PC creation happened with prefix + doc slug.
+    assert created == [{"name": "rw-trainium-update", "is_private": True}]
+    assert state.staging_channel == "C_STAGING"
+    assert archived == []
+    assert edited == []
+    assert deleted == []
+
+    # Posts, in order: preamble, mfu OP, mfu reply, prof OP.
+    assert [(p.text, p.thread_ts) for p in posted] == [
+        ("Sorry for the delay, updates below:", None),
+        ("1. Latest MFU.", None),
+        ("Reply about the chip-wide measurement.", posted[1].ts),
+        ("2. Profiling / improving MFU", None),
+    ]
+    assert {p.channel for p in posted} == {"C_STAGING"}
+
+    # State captured all owned ts's.
+    assert state.staging_preamble_ts == posted[0].ts
+    assert state.staging_threads == {"mfu": posted[1].ts, "prof": posted[3].ts}
+    assert result.channel == "C_STAGING"
+    assert result.preamble_ts == posted[0].ts
+    assert result.thread_ts_by_slug == {"mfu": posted[1].ts, "prof": posted[3].ts}
+    assert result.deleted_slugs == []
+
+    # Init-channel is restored after the sync (self.channel swap is scoped).
+    assert client.channel == "C_INIT"
+
+
+def test_fresh_sync_stamps_thrds_metadata_on_every_post(tmp_path, monkeypatch):
+    """Every posted message carries `event_type='thrds'` + full payload."""
+    state = _new_state(tmp_path, monkeypatch)
+    client, posted, *_ = _make_client()
+
+    client.sync_doc_staging(_basic_doc(), state, pace=0.0)
+
+    kinds = [(p.metadata["event_type"], p.metadata["event_payload"]) for p in posted]
+    assert kinds == [
+        ("thrds", {
+            "session_id": state.session_id,
+            "doc_slug": "trainium-update",
+            "kind": "preamble",
+        }),
+        ("thrds", {
+            "session_id": state.session_id,
+            "doc_slug": "trainium-update",
+            "kind": "op",
+            "thread_slug": "mfu",
+        }),
+        ("thrds", {
+            "session_id": state.session_id,
+            "doc_slug": "trainium-update",
+            "kind": "reply",
+            "thread_slug": "mfu",
+        }),
+        ("thrds", {
+            "session_id": state.session_id,
+            "doc_slug": "trainium-update",
+            "kind": "op",
+            "thread_slug": "prof",
+        }),
+    ]
+
+
+def test_fresh_sync_persists_state_after_pc_create_and_after_full_sync(tmp_path, monkeypatch):
+    """state.json is written at least twice: once after PC create, once at end."""
+    state = _new_state(tmp_path, monkeypatch)
+    client, *_ = _make_client()
+
+    client.sync_doc_staging(_basic_doc(), state, pace=0.0)
+
+    # Reload from disk — the on-disk state matches in-memory (final save).
+    reloaded = SessionState.load(tmp_path)
+    assert reloaded == state
+
+
+# --- edit-in-place ---
+
+def test_sync_edits_changed_op_in_place_when_slug_already_tracked(tmp_path, monkeypatch):
+    """Slug in state → sync reuses OP ts, edits changed content."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+    state.staging_preamble_ts = "1.111000"
+    state.staging_threads = {"mfu": "1.111001"}
+
+    # conversations.replies for the mfu thread: existing OP + one reply, all ours.
+    existing_replies = {
+        "1.111001": [
+            {"ts": "1.111001", "text": "OLD OP.", "user": "U_ME"},
+            {"ts": "1.111002", "text": "OLD reply.", "user": "U_ME"},
+        ],
+        "1.111000": [
+            {"ts": "1.111000", "text": "OLD preamble.", "user": "U_ME"},
+        ],
+    }
+    client, posted, edited, deleted, created, archived = _make_client(existing_replies=existing_replies)
+
+    doc = Doc(
+        preamble="NEW preamble.",
+        threads=[
+            DocThread(slug="mfu", messages=[
+                DocMessage("NEW OP."),
+                DocMessage("NEW reply."),
+            ]),
+        ],
+    )
+    result = client.sync_doc_staging(doc, state, pace=0.0)
+
+    assert created == []  # PC already exists
+    assert deleted == []  # nothing terraform-deleted
+    assert [p.text for p in posted] == []  # nothing new to post
+    # Preamble edited + both mfu messages edited.
+    assert [(e["ts"], e["text"]) for e in edited] == [
+        ("1.111000", "NEW preamble."),
+        ("1.111001", "NEW OP."),
+        ("1.111002", "NEW reply."),
+    ]
+    assert state.staging_preamble_ts == "1.111000"
+    assert state.staging_threads == {"mfu": "1.111001"}
+    assert result.deleted_slugs == []
+
+
+# --- terraform delete ---
+
+def test_stale_slug_thread_is_deleted_from_state_and_slack(tmp_path, monkeypatch):
+    """Slug tracked in state but absent from doc → thread deleted (staging = terraform)."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+    state.staging_threads = {"stale": "1.222001", "keep": "1.222010"}
+
+    existing_replies = {
+        "1.222001": [
+            {"ts": "1.222001", "text": "Stale OP.", "user": "U_ME"},
+            {"ts": "1.222002", "text": "Stale reply.", "user": "U_ME"},
+        ],
+        "1.222010": [
+            {"ts": "1.222010", "text": "Keep OP.", "user": "U_ME"},
+        ],
+    }
+    client, posted, edited, deleted, *_ = _make_client(existing_replies=existing_replies)
+
+    doc = Doc(threads=[
+        DocThread(slug="keep", messages=[DocMessage("Keep OP.")]),
+    ])
+    result = client.sync_doc_staging(doc, state, pace=0.0)
+
+    # Both stale messages deleted, reply-then-OP order.
+    assert deleted == ["1.222002", "1.222001"]
+    # 'keep' unchanged (content matches → no edit needed).
+    assert edited == []
+    assert posted == []
+    assert state.staging_threads == {"keep": "1.222010"}
+    assert result.deleted_slugs == ["stale"]
+
+
+def test_preamble_removed_from_doc_deletes_the_preamble_message(tmp_path, monkeypatch):
+    """Doc no longer has a preamble → the tracked preamble ts is deleted."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+    state.staging_preamble_ts = "1.333000"
+    state.staging_threads = {"a": "1.333001"}
+
+    existing_replies = {"1.333001": [{"ts": "1.333001", "text": "OP.", "user": "U_ME"}]}
+    client, posted, edited, deleted, *_ = _make_client(existing_replies=existing_replies)
+
+    doc = Doc(preamble=None, threads=[DocThread(slug="a", messages=[DocMessage("OP.")])])
+    client.sync_doc_staging(doc, state, pace=0.0)
+
+    assert "1.333000" in deleted
+    assert state.staging_preamble_ts is None
+
+
+# --- foreign-msg preservation ---
+
+def test_foreign_reply_on_slack_is_preserved_across_sync(tmp_path, monkeypatch):
+    """Non-editable msgs (foreign author) stay in place — sync doesn't touch them."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+    state.staging_threads = {"mfu": "1.444001"}
+
+    # Existing thread has our OP + our reply + a foreign reply (different user).
+    existing_replies = {
+        "1.444001": [
+            {"ts": "1.444001", "text": "OP.", "user": "U_ME"},
+            {"ts": "1.444002", "text": "Our reply.", "user": "U_ME"},
+            {"ts": "1.444003", "text": "Grayjh's take.", "user": "U_GRAYJH"},
+        ],
+    }
+    client, posted, edited, deleted, *_ = _make_client(existing_replies=existing_replies)
+
+    # Doc carries the foreign reply for round-trip fidelity, but sync should
+    # skip it (already on Slack, non-editable).
+    doc = Doc(threads=[
+        DocThread(slug="mfu", messages=[
+            DocMessage("OP.", author=None),
+            DocMessage("Our reply.", author=None),
+            DocMessage("Grayjh's take.", author="grayjh"),
+        ]),
+    ])
+    client.sync_doc_staging(doc, state, pace=0.0)
+
+    assert deleted == []  # foreign never deleted
+    assert edited == []   # ours match existing content
+    assert posted == []
+
+
+# --- dry_run ---
+
+def test_dry_run_makes_no_api_calls_other_than_reads(tmp_path, monkeypatch):
+    """dry_run: no PC create, no post/edit/delete; state unchanged."""
+    state = _new_state(tmp_path, monkeypatch)
+    doc = _basic_doc()
+    client, posted, edited, deleted, created, archived = _make_client()
+
+    result = client.sync_doc_staging(doc, state, dry_run=True, pace=0.0)
+
+    assert created == []
+    assert posted == []
+    assert edited == []
+    assert deleted == []
+    assert archived == []
+    # State didn't get a real PC.
+    assert state.staging_channel is None
+    assert state.staging_preamble_ts is None
+    assert state.staging_threads == {}
+    # Result uses the placeholder channel.
+    assert result.channel == "<new-pc>"
+
+
+# --- validation ---
+
+def test_slugless_thread_raises(tmp_path, monkeypatch):
+    """Every thread must have a slug — state is slug-keyed."""
+    state = _new_state(tmp_path, monkeypatch)
+    doc = Doc(threads=[DocThread(slug=None, messages=[DocMessage("OP.")])])
+    client, *_ = _make_client()
+    with pytest.raises(ValueError, match="requires every thread to have a slug"):
+        client.sync_doc_staging(doc, state)
+
+
+# --- archive helper ---
+
+def test_archive_channel_calls_conversations_archive():
+    """archive_channel wraps conversations.archive with the channel_id."""
+    client, *_, archived = _make_client()
+    client.archive_channel("C_STAGING")
+    assert archived == ["C_STAGING"]
+
+
+# --- sync_doc_prod ---
+
+def test_prod_sync_fresh_posts_to_target_channel(tmp_path, monkeypatch):
+    """First prod push: nothing in state.prod_threads yet → posts everything to target."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+    state.staging_threads = {"mfu": "1.999001", "prof": "1.999002"}
+
+    client, posted, edited, deleted, created, archived = _make_client()
+
+    result = client.sync_doc_prod(_basic_doc(), state, channel="C_PROD", pace=0.0)
+
+    # No PC creation (we're not staging).
+    assert created == []
+    # Posted preamble + 2 threads (with 1 reply on mfu) → 4 posts.
+    assert [(p.text, p.channel, p.thread_ts) for p in posted] == [
+        ("Sorry for the delay, updates below:", "C_PROD", None),
+        ("1. Latest MFU.", "C_PROD", None),
+        ("Reply about the chip-wide measurement.", "C_PROD", posted[1].ts),
+        ("2. Profiling / improving MFU", "C_PROD", None),
+    ]
+    # State pins the resolved prod channel + records per-channel prod threads.
+    assert state.prod_channel == "C_PROD"
+    assert state.prod_threads == {"C_PROD": {"mfu": posted[1].ts, "prof": posted[3].ts}}
+    assert state.prod_preamble_ts == {"C_PROD": posted[0].ts}
+    # Staging state (channel + threads) preserved as history.
+    assert state.staging_channel == "C_STAGING"
+    assert state.staging_threads == {"mfu": "1.999001", "prof": "1.999002"}
+    # Auto-archive fired on prod push (default keep_staging=False).
+    assert archived == ["C_STAGING"]
+    assert result.channel == "C_PROD"
+    assert result.deleted_slugs == []
+
+
+def test_prod_sync_keep_staging_skips_archive(tmp_path, monkeypatch):
+    """keep_staging=True: no archive call, PC left as-is."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+
+    client, posted, edited, deleted, created, archived = _make_client()
+
+    client.sync_doc_prod(_basic_doc(), state, channel="C_PROD", keep_staging=True, pace=0.0)
+
+    assert archived == []
+    # Staging channel still tracked; caller can archive it later.
+    assert state.staging_channel == "C_STAGING"
+
+
+def test_prod_sync_is_additive_stale_slug_in_state_is_not_deleted(tmp_path, monkeypatch):
+    """Slug in state.prod_threads but absent from doc: LEFT in place (additive)."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.prod_channel = "C_PROD"
+    state.prod_threads = {"C_PROD": {"gone": "1.777001", "mfu": "1.777002", "prof": "1.777003"}}
+
+    existing_replies = {
+        "1.777002": [{"ts": "1.777002", "text": "1. Latest MFU.", "user": "U_ME"}, {"ts": "1.777002r", "text": "Reply about the chip-wide measurement.", "user": "U_ME"}],
+        "1.777003": [{"ts": "1.777003", "text": "2. Profiling / improving MFU", "user": "U_ME"}],
+    }
+    client, posted, edited, deleted, created, archived = _make_client(existing_replies=existing_replies)
+
+    result = client.sync_doc_prod(_basic_doc(), state, pace=0.0)
+
+    assert deleted == []  # 'gone' NOT deleted
+    assert result.deleted_slugs == []
+    # 'gone' still in state after the push.
+    assert "gone" in state.prod_threads["C_PROD"]
+
+
+def test_prod_sync_dry_run_makes_no_writes(tmp_path, monkeypatch):
+    """dry_run=True: nothing posted, edited, deleted, or archived; state unchanged."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+
+    client, posted, edited, deleted, created, archived = _make_client()
+
+    client.sync_doc_prod(_basic_doc(), state, channel="C_PROD", dry_run=True, pace=0.0)
+
+    assert posted == []
+    assert edited == []
+    assert deleted == []
+    assert archived == []
+    assert state.prod_channel is None
+    assert state.prod_threads == {}
+
+
+def test_prod_sync_raises_when_no_channel_and_state_prod_channel_unset(tmp_path, monkeypatch):
+    """Neither ``channel=`` nor ``state.prod_channel`` set → hard error."""
+    state = _new_state(tmp_path, monkeypatch)
+    client, *_ = _make_client()
+    with pytest.raises(ValueError, match="No prod channel"):
+        client.sync_doc_prod(_basic_doc(), state)
+
+
+def test_prod_sync_preserves_existing_preamble_when_doc_dropped_it(tmp_path, monkeypatch):
+    """Doc.preamble=None + existing prod preamble → preamble NOT deleted (additive)."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.prod_channel = "C_PROD"
+    state.prod_preamble_ts = {"C_PROD": "1.666000"}
+    state.prod_threads = {"C_PROD": {"mfu": "1.666001"}}
+
+    existing_replies = {
+        "1.666001": [{"ts": "1.666001", "text": "OP.", "user": "U_ME"}],
+    }
+    client, posted, edited, deleted, *_ = _make_client(existing_replies=existing_replies)
+
+    doc = Doc(preamble=None, threads=[DocThread(slug="mfu", messages=[DocMessage("OP.")])])
+    client.sync_doc_prod(doc, state, pace=0.0)
+
+    assert deleted == []  # existing preamble NOT deleted (additive)
+    assert state.prod_preamble_ts == {"C_PROD": "1.666000"}  # preserved
+
+
+def test_prod_sync_reuses_state_prod_channel_when_channel_arg_omitted(tmp_path, monkeypatch):
+    """No channel= arg → uses state.prod_channel."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.prod_channel = "C_PINNED"
+
+    client, posted, *_ = _make_client()
+    client.sync_doc_prod(_basic_doc(), state, pace=0.0)
+
+    assert {p.channel for p in posted} == {"C_PINNED"}
+    assert state.prod_channel == "C_PINNED"
