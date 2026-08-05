@@ -5,13 +5,16 @@ description = "Declarative thread sync for Slack, Discord, and Bluesky"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["click>=8.0"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Topic :: Communications :: Chat",
 ]
+
+[project.scripts]
+thrds = "thrds.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/runsascoded/thrds"

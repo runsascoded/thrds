@@ -507,6 +507,9 @@ wheels = [
 name = "thrds"
 version = "0.4.0"
 source = { editable = "." }
+dependencies = [
+    { name = "click" },
+]
 
 [package.optional-dependencies]
 all = [
@@ -523,6 +526,7 @@ test = [
 requires-dist = [
     { name = "atproto", marker = "extra == 'all'", specifier = ">=0.0.46" },
     { name = "atproto", marker = "extra == 'bsky'", specifier = ">=0.0.46" },
+    { name = "click", specifier = ">=8.0" },
     { name = "pytest", marker = "extra == 'test'" },
 ]
 provides-extras = ["slack", "discord", "bsky", "all", "test"]
