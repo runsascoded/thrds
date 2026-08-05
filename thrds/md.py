@@ -25,6 +25,7 @@ preserved.
 """
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass
 
@@ -137,6 +138,31 @@ def parse_doc(text: str) -> ParsedDoc:
         threads.append(DocThread(messages=messages, slug=slug))
 
     return ParsedDoc(doc=Doc(threads=threads, preamble=preamble), frontmatter=frontmatter)
+
+
+def diff_docs(
+    a: Doc,
+    b: Doc,
+    from_label: str = 'local',
+    to_label: str = 'slack',
+    context: int = 3,
+) -> str:
+    """Unified diff of two Docs as canonical `.md` text.
+
+    Both sides are serialized via `serialize_doc` (no frontmatter — the diff
+    is about doc content, not per-source metadata), so formatting variants
+    that round-trip to the same canonical form don't leak into the diff.
+    Returns an empty string when the two Docs are canonically identical.
+    """
+    a_lines = serialize_doc(a).splitlines(keepends=True)
+    b_lines = serialize_doc(b).splitlines(keepends=True)
+    return "".join(difflib.unified_diff(
+        a_lines,
+        b_lines,
+        fromfile=from_label,
+        tofile=to_label,
+        n=context,
+    ))
 
 
 def serialize_doc(doc: Doc, frontmatter: Frontmatter | None = None) -> str:

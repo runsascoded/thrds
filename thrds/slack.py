@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 from .core import Message, OrphanedRepliesError, SyncOptions, SyncResult, Thread, sync
-from .doc import Doc, DocSyncResult, DocThread
+from .doc import Doc, DocMessage, DocSyncResult, DocThread
 from .linked import (
     LinkedSyncResult,
     LinkedThread,
@@ -40,6 +40,7 @@ class SlackClient:
         self._metadata_by_content: dict[str, dict] | None = None
         self._skip_op: bool = False
         self._bot_ids: tuple[str, str | None] | None = None
+        self._user_name_cache: dict[str, str] = {}
 
     @property
     def bot_ids(self) -> tuple[str, str | None]:
@@ -692,3 +693,109 @@ class SlackClient:
             )
         finally:
             self.channel = prev_channel
+
+    # --- Doc-level pull ---
+    def _resolve_user_name(self, user_id: str) -> str:
+        """Look up ``user_id`` → username (Slack ``name`` field), cached per-client.
+
+        Used to populate ``DocMessage.author`` on pull; the cache dedupes
+        ``users.info`` calls when several messages share the same author.
+        """
+        if user_id in self._user_name_cache:
+            return self._user_name_cache[user_id]
+        result = self._request("users.info", {"user": user_id}, method="GET")
+        name = result["user"]["name"]
+        self._user_name_cache[user_id] = name
+        return name
+
+    def _raw_to_doc_message(self, raw: dict) -> DocMessage:
+        """Convert a raw Slack message dict → `DocMessage`.
+
+        ``author=None`` for messages we authored (matched via ``bot_ids``);
+        else the username resolved from ``users.info``.
+        """
+        user_id, bot_id = self.bot_ids
+        ours = raw.get("user") == user_id or (bot_id is not None and raw.get("bot_id") == bot_id)
+        content = raw.get("text", "")
+        if ours:
+            return DocMessage(content=content, author=None)
+        return DocMessage(content=content, author=self._resolve_user_name(raw["user"]))
+
+    def _pull_thread_docmessages(self, thread_ts: str) -> list[DocMessage]:
+        """Fetch a thread's OP + replies from ``self.channel``, translate to DocMessages."""
+        result = self._request("conversations.replies", {
+            "channel": self.channel,
+            "ts": thread_ts,
+        }, method="GET")
+        return [self._raw_to_doc_message(m) for m in result.get("messages", [])]
+
+    def _pull_doc(
+        self,
+        channel: str,
+        preamble_ts: str | None,
+        thread_ts_by_slug: dict[str, str],
+    ) -> Doc:
+        """Fetch a doc's content from ``channel`` given the state pointers.
+
+        Threads are returned in OP-ts numerical order (= channel post-order),
+        which is stable regardless of how ``thread_ts_by_slug`` is iterated.
+        """
+        prev_channel = self.channel
+        self.channel = channel
+        try:
+            preamble = None
+            if preamble_ts is not None:
+                msgs = self._pull_thread_docmessages(preamble_ts)
+                if msgs:
+                    # Preamble has no replies; the OP is the only message.
+                    preamble = msgs[0].content
+
+            sorted_slugs = sorted(thread_ts_by_slug, key=lambda s: float(thread_ts_by_slug[s]))
+            threads = [
+                DocThread(
+                    slug=slug,
+                    messages=self._pull_thread_docmessages(thread_ts_by_slug[slug]),
+                )
+                for slug in sorted_slugs
+            ]
+            return Doc(preamble=preamble, threads=threads)
+        finally:
+            self.channel = prev_channel
+
+    def pull_doc_staging(self, state: SessionState) -> Doc:
+        """Fetch the current state of the session's staging PC as a `Doc`.
+
+        Uses the state's slug → ts pointers as the roots and ``conversations.replies``
+        for each; foreign messages (colleague replies) come back with their
+        ``author`` populated from ``users.info``.
+        """
+        if state.staging_channel is None:
+            raise ValueError(
+                "No staging channel — the session hasn't pushed a staging Doc yet."
+            )
+        return self._pull_doc(
+            state.staging_channel,
+            state.staging_preamble_ts,
+            state.staging_threads,
+        )
+
+    def pull_doc_prod(
+        self,
+        state: SessionState,
+        channel: str | None = None,
+    ) -> Doc:
+        """Fetch the current state of the doc on a real prod channel.
+
+        ``channel`` overrides ``state.prod_channel`` if given; falls back to
+        the pinned prod channel otherwise. Raises if neither is set.
+        """
+        target = channel if channel is not None else state.prod_channel
+        if target is None:
+            raise ValueError(
+                "No prod channel — pass channel= or set state.prod_channel first."
+            )
+        return self._pull_doc(
+            target,
+            state.prod_preamble_ts.get(target),
+            state.prod_threads.get(target, {}),
+        )

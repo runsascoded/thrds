@@ -505,3 +505,205 @@ def test_prod_sync_reuses_state_prod_channel_when_channel_arg_omitted(tmp_path, 
 
     assert {p.channel for p in posted} == {"C_PINNED"}
     assert state.prod_channel == "C_PINNED"
+
+
+# --- pull ---
+
+def _make_pull_client(*, thread_replies: dict[str, list[dict]], users: dict[str, str] | None = None):
+    """Fake client for pull tests.
+
+    ``thread_replies``: thread_ts → list of raw Slack msg dicts to return
+    from conversations.replies.
+
+    ``users``: user_id → username (for users.info lookups). Missing IDs raise.
+    """
+    users = users or {}
+    users_info_calls: list[str] = []
+
+    def on_auth(_data, _method):
+        return {"ok": True, "user_id": "U_ME", "bot_id": None}
+
+    def on_replies(data, _method):
+        return {"ok": True, "messages": thread_replies.get(data["ts"], [])}
+
+    def on_users_info(data, _method):
+        uid = data["user"]
+        users_info_calls.append(uid)
+        if uid not in users:
+            raise NotImplementedError(f"no user data scripted for {uid}")
+        return {"ok": True, "user": {"name": users[uid]}}
+
+    client = _FakeSlackClient({
+        "auth.test": on_auth,
+        "conversations.replies": on_replies,
+        "users.info": on_users_info,
+    })
+    return client, users_info_calls
+
+
+def test_pull_staging_reconstructs_preamble_and_threads(tmp_path, monkeypatch):
+    """Basic pull: preamble + 2 threads (all ours) → Doc with correct shape."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+    state.staging_preamble_ts = "1.000000"
+    state.staging_threads = {"mfu": "1.000001", "prof": "1.000003"}
+
+    thread_replies = {
+        "1.000000": [{"ts": "1.000000", "text": "Preamble text.", "user": "U_ME"}],
+        "1.000001": [
+            {"ts": "1.000001", "text": "OP mfu.", "user": "U_ME"},
+            {"ts": "1.000002", "text": "Reply mfu.", "user": "U_ME"},
+        ],
+        "1.000003": [{"ts": "1.000003", "text": "OP prof.", "user": "U_ME"}],
+    }
+    client, _ = _make_pull_client(thread_replies=thread_replies)
+
+    doc = client.pull_doc_staging(state)
+
+    assert doc == Doc(
+        preamble="Preamble text.",
+        threads=[
+            DocThread(slug="mfu", messages=[
+                DocMessage(content="OP mfu.", author=None),
+                DocMessage(content="Reply mfu.", author=None),
+            ]),
+            DocThread(slug="prof", messages=[DocMessage(content="OP prof.", author=None)]),
+        ],
+    )
+    # Client's channel restored after the pull.
+    assert client.channel == "C_INIT"
+
+
+def test_pull_populates_author_on_foreign_reply(tmp_path, monkeypatch):
+    """Foreign reply (user != our bot_ids) → DocMessage.author = looked-up username."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+    state.staging_threads = {"mfu": "1.000001"}
+
+    thread_replies = {
+        "1.000001": [
+            {"ts": "1.000001", "text": "OP.", "user": "U_ME"},
+            {"ts": "1.000002", "text": "Interesting take.", "user": "U_GRAYJH"},
+            {"ts": "1.000003", "text": "Follow-up.", "user": "U_ME"},
+        ],
+    }
+    client, users_info_calls = _make_pull_client(
+        thread_replies=thread_replies,
+        users={"U_GRAYJH": "grayjh"},
+    )
+
+    doc = client.pull_doc_staging(state)
+
+    assert doc.threads[0].messages == [
+        DocMessage(content="OP.", author=None),
+        DocMessage(content="Interesting take.", author="grayjh"),
+        DocMessage(content="Follow-up.", author=None),
+    ]
+    assert users_info_calls == ["U_GRAYJH"]
+
+
+def test_pull_caches_user_lookups_across_messages(tmp_path, monkeypatch):
+    """The same foreign user appearing twice → one users.info call, not two."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+    state.staging_threads = {"a": "1.000001", "b": "1.000010"}
+
+    thread_replies = {
+        "1.000001": [
+            {"ts": "1.000001", "text": "OP a.", "user": "U_ME"},
+            {"ts": "1.000002", "text": "grayjh weighs in.", "user": "U_GRAYJH"},
+        ],
+        "1.000010": [
+            {"ts": "1.000010", "text": "OP b.", "user": "U_ME"},
+            {"ts": "1.000011", "text": "grayjh again.", "user": "U_GRAYJH"},
+        ],
+    }
+    client, users_info_calls = _make_pull_client(
+        thread_replies=thread_replies,
+        users={"U_GRAYJH": "grayjh"},
+    )
+
+    client.pull_doc_staging(state)
+    assert users_info_calls == ["U_GRAYJH"]  # one call, cached across threads
+
+
+def test_pull_orders_threads_by_ts_regardless_of_state_dict_order(tmp_path, monkeypatch):
+    """Threads returned in ts (post-order), not the state dict's insertion order."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+    # Insert in reverse-ts order to prove the sort matters.
+    state.staging_threads = {"third": "1.000030", "first": "1.000010", "second": "1.000020"}
+
+    thread_replies = {
+        "1.000010": [{"ts": "1.000010", "text": "OP first.", "user": "U_ME"}],
+        "1.000020": [{"ts": "1.000020", "text": "OP second.", "user": "U_ME"}],
+        "1.000030": [{"ts": "1.000030", "text": "OP third.", "user": "U_ME"}],
+    }
+    client, _ = _make_pull_client(thread_replies=thread_replies)
+
+    doc = client.pull_doc_staging(state)
+    assert [t.slug for t in doc.threads] == ["first", "second", "third"]
+
+
+def test_pull_empty_state_returns_empty_doc(tmp_path, monkeypatch):
+    """staging_channel set but no threads / no preamble → Doc with no threads and preamble=None."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.staging_channel = "C_STAGING"
+
+    client, _ = _make_pull_client(thread_replies={})
+    doc = client.pull_doc_staging(state)
+    assert doc == Doc(preamble=None, threads=[])
+
+
+def test_pull_staging_raises_when_no_staging_channel(tmp_path, monkeypatch):
+    """staging_channel is None → clear error, no API call."""
+    state = _new_state(tmp_path, monkeypatch)
+    client, _ = _make_pull_client(thread_replies={})
+    with pytest.raises(ValueError, match="No staging channel"):
+        client.pull_doc_staging(state)
+
+
+def test_pull_prod_uses_state_prod_channel_when_channel_arg_omitted(tmp_path, monkeypatch):
+    """pull_doc_prod(state) with no explicit channel → uses state.prod_channel."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.prod_channel = "C_PROD"
+    state.prod_preamble_ts = {"C_PROD": "1.000000"}
+    state.prod_threads = {"C_PROD": {"mfu": "1.000001"}}
+
+    thread_replies = {
+        "1.000000": [{"ts": "1.000000", "text": "Prod preamble.", "user": "U_ME"}],
+        "1.000001": [{"ts": "1.000001", "text": "Prod OP.", "user": "U_ME"}],
+    }
+    client, _ = _make_pull_client(thread_replies=thread_replies)
+
+    doc = client.pull_doc_prod(state)
+    assert doc == Doc(
+        preamble="Prod preamble.",
+        threads=[DocThread(slug="mfu", messages=[DocMessage(content="Prod OP.", author=None)])],
+    )
+
+
+def test_pull_prod_channel_arg_overrides_state(tmp_path, monkeypatch):
+    """pull_doc_prod(state, channel=X) fetches from X even if state.prod_channel differs."""
+    state = _new_state(tmp_path, monkeypatch)
+    state.prod_channel = "C_DEFAULT"
+    state.prod_threads = {
+        "C_DEFAULT": {"a": "1.000001"},
+        "C_OTHER": {"b": "1.000002"},
+    }
+
+    thread_replies = {
+        "1.000002": [{"ts": "1.000002", "text": "OP b.", "user": "U_ME"}],
+    }
+    client, _ = _make_pull_client(thread_replies=thread_replies)
+
+    doc = client.pull_doc_prod(state, channel="C_OTHER")
+    assert [t.slug for t in doc.threads] == ["b"]
+
+
+def test_pull_prod_raises_without_channel(tmp_path, monkeypatch):
+    """No channel= and no state.prod_channel → hard error."""
+    state = _new_state(tmp_path, monkeypatch)
+    client, _ = _make_pull_client(thread_replies={})
+    with pytest.raises(ValueError, match="No prod channel"):
+        client.pull_doc_prod(state)

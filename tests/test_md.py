@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from thrds import Doc, DocMessage, DocThread, Frontmatter
-from thrds.md import ParsedDoc, parse_doc, serialize_doc
+from thrds.md import ParsedDoc, diff_docs, parse_doc, serialize_doc
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "five_thread_post.md"
@@ -215,3 +215,65 @@ def test_parent_ts_default_is_none():
     """DocThread.parent_ts is the design hook for the reply-to-others case; defaults to None."""
     parsed = parse_doc("=== a\n\nOP.\n")
     assert parsed.doc.threads[0].parent_ts is None
+
+
+# --- diff_docs ---
+
+def test_diff_docs_identical_returns_empty():
+    """Two Docs whose canonical form matches → empty diff string."""
+    doc = Doc(preamble="Hi.", threads=[DocThread(slug="a", messages=_mine("OP."))])
+    assert diff_docs(doc, doc) == ""
+
+
+def test_diff_docs_content_change_shows_minus_plus():
+    """A single-word change in a message body appears as - / + lines."""
+    a = Doc(threads=[DocThread(slug="a", messages=_mine("OLD content."))])
+    b = Doc(threads=[DocThread(slug="a", messages=_mine("NEW content."))])
+    d = diff_docs(a, b)
+    lines = d.splitlines()
+    assert lines[0] == "--- local"
+    assert lines[1] == "+++ slack"
+    assert "-OLD content." in lines
+    assert "+NEW content." in lines
+
+
+def test_diff_docs_new_thread_appears_as_added_block():
+    """A thread in b but not a → the `=== slug` and its content appear as `+` lines."""
+    a = Doc(threads=[DocThread(slug="a", messages=_mine("OP a."))])
+    b = Doc(threads=[
+        DocThread(slug="a", messages=_mine("OP a.")),
+        DocThread(slug="b", messages=_mine("OP b.")),
+    ])
+    d = diff_docs(a, b)
+    assert "+=== b" in d.splitlines()
+    assert "+OP b." in d.splitlines()
+
+
+def test_diff_docs_removed_thread_appears_as_removed_block():
+    """A thread in a but not b → the `=== slug` and its content appear as `-` lines."""
+    a = Doc(threads=[
+        DocThread(slug="a", messages=_mine("OP a.")),
+        DocThread(slug="gone", messages=_mine("Bye.")),
+    ])
+    b = Doc(threads=[DocThread(slug="a", messages=_mine("OP a."))])
+    d = diff_docs(a, b)
+    assert "-=== gone" in d.splitlines()
+    assert "-Bye." in d.splitlines()
+
+
+def test_diff_docs_uses_custom_labels():
+    """from_label / to_label appear in the diff header instead of defaults."""
+    a = Doc(threads=[DocThread(slug="a", messages=_mine("A."))])
+    b = Doc(threads=[DocThread(slug="a", messages=_mine("B."))])
+    d = diff_docs(a, b, from_label="draft.md", to_label="pulled.md")
+    assert d.startswith("--- draft.md\n+++ pulled.md\n")
+
+
+def test_diff_docs_ignores_frontmatter_variations():
+    """serialize_doc omits frontmatter (diff_docs doesn't pass any), so two Docs
+    with only frontmatter differences on parse would produce identical serializations
+    and diff empty. (The Doc dataclass doesn't hold frontmatter — it's returned
+    separately by parse_doc — so this test just pins the canonical-form choice.)
+    """
+    doc = Doc(threads=[DocThread(slug="a", messages=_mine("OP."))])
+    assert diff_docs(doc, doc) == ""
