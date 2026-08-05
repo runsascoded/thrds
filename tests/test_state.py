@@ -1,0 +1,179 @@
+"""Tests for the session state persistence layer (.thrds/state.json)."""
+from __future__ import annotations
+
+import json
+import re
+import uuid
+
+import pytest
+
+from thrds.state import CHANNEL_PREFIX_ENV, DEFAULT_GIST_REMOTE, STATE_PATH, SessionState, resolve_channel_prefix
+
+
+def test_new_generates_uuid4():
+    """SessionState.new() stamps a fresh UUID4 into session_id."""
+    s = SessionState.new()
+    parsed = uuid.UUID(s.session_id)
+    assert parsed.version == 4
+
+
+def test_new_accepts_overrides():
+    """SessionState.new(prod_channel='C1') applies overrides on top of the fresh UUID."""
+    s = SessionState.new(prod_channel='C1', gist_id='abc', channel_prefix='rw-', doc_path='trainium-update.md')
+    assert s.prod_channel == 'C1'
+    assert s.gist_id == 'abc'
+    assert s.channel_prefix == 'rw-'
+    assert s.doc_path == 'trainium-update.md'
+    uuid.UUID(s.session_id)
+
+
+def test_load_missing_raises_clearly(tmp_path):
+    """Load errors with an actionable message if state.json is absent."""
+    with pytest.raises(FileNotFoundError, match=re.escape(f"{tmp_path / STATE_PATH}")):
+        SessionState.load(tmp_path)
+
+
+def test_save_creates_parent_dir(tmp_path):
+    """Save creates .thrds/ if it doesn't exist."""
+    s = SessionState(session_id='fixed-uuid')
+    s.save(tmp_path)
+    assert (tmp_path / STATE_PATH).exists()
+
+
+def test_save_load_round_trip_empty(tmp_path):
+    """save + load is identity on a fresh session with no threads recorded yet."""
+    original = SessionState(
+        session_id='fixed-uuid',
+        doc_path='trainium-update.md',
+        prod_channel='C0PROD',
+        gist_id='gist-abc',
+        gist_remote='g',
+        channel_prefix='rw-',
+    )
+    original.save(tmp_path)
+    loaded = SessionState.load(tmp_path)
+    assert loaded == original
+
+
+def test_save_load_round_trip_with_threads(tmp_path):
+    """save + load is identity on a session with staging + prod thread state."""
+    original = SessionState(
+        session_id='fixed-uuid',
+        doc_path='trainium-update.md',
+        prod_channel='C0PROD',
+        gist_id='gist-abc',
+        staging_channel='C0STAGE',
+        staging_threads={'mfu': '1785.001', 'profiling': '1785.002'},
+        prod_threads={'C0PROD': {'mfu': '1786.001'}},
+    )
+    original.save(tmp_path)
+    loaded = SessionState.load(tmp_path)
+    assert loaded == original
+
+
+def test_save_format_is_pretty_printed_json_with_trailing_newline(tmp_path):
+    """State file is human-readable: pretty-printed JSON, ends with a single newline."""
+    s = SessionState(session_id='fixed-uuid', prod_channel='C0PROD')
+    s.save(tmp_path)
+    text = (tmp_path / STATE_PATH).read_text()
+    assert json.loads(text)['session_id'] == 'fixed-uuid'
+    assert '  "session_id"' in text.split('\n')[1]
+    assert text.endswith('\n') and not text.endswith('\n\n')
+
+
+def test_default_gist_remote_matches_ghpr():
+    """DEFAULT_GIST_REMOTE is 'g' to align with ghpr's convention."""
+    assert DEFAULT_GIST_REMOTE == 'g'
+    assert SessionState(session_id='x').gist_remote == 'g'
+
+
+def test_get_set_thread_ts_staging_routing():
+    """SessionState routes staging_channel to staging_threads."""
+    s = SessionState(session_id='x', staging_channel='C0STAGE')
+    s.set_thread_ts('C0STAGE', 'mfu', '1785.001')
+    assert s.staging_threads == {'mfu': '1785.001'}
+    assert s.prod_threads == {}
+    assert s.get_thread_ts('C0STAGE', 'mfu') == '1785.001'
+    assert s.get_thread_ts('C0STAGE', 'missing') is None
+
+
+def test_get_set_thread_ts_prod_routing():
+    """SessionState routes non-staging channels to prod_threads[channel]."""
+    s = SessionState(session_id='x', staging_channel='C0STAGE')
+    s.set_thread_ts('C0PROD', 'mfu', '1786.001')
+    s.set_thread_ts('C0PROD', 'profiling', '1786.002')
+    s.set_thread_ts('C0OTHER', 'mfu', '1787.001')
+    assert s.prod_threads == {
+        'C0PROD': {'mfu': '1786.001', 'profiling': '1786.002'},
+        'C0OTHER': {'mfu': '1787.001'},
+    }
+    assert s.get_thread_ts('C0PROD', 'mfu') == '1786.001'
+    assert s.get_thread_ts('C0OTHER', 'mfu') == '1787.001'
+    assert s.get_thread_ts('C0PROD', 'C0OTHER-only-slug') is None
+
+
+def test_threads_in_returns_snapshot():
+    """threads_in returns a copy; mutating it doesn't affect state."""
+    s = SessionState(session_id='x', staging_channel='C0STAGE', staging_threads={'mfu': '1785.001'})
+    snap = s.threads_in('C0STAGE')
+    assert snap == {'mfu': '1785.001'}
+    snap['other'] = '9999.999'
+    assert s.staging_threads == {'mfu': '1785.001'}
+
+
+def test_threads_in_empty_for_unknown_channel():
+    """Channel with no recorded threads → empty dict (not None, not KeyError)."""
+    s = SessionState(session_id='x')
+    assert s.threads_in('C0UNKNOWN') == {}
+
+
+def test_resolve_channel_prefix_override_wins(monkeypatch):
+    """Explicit session override beats the env var."""
+    monkeypatch.setenv(CHANNEL_PREFIX_ENV, 'env-')
+    assert resolve_channel_prefix('override-') == 'override-'
+
+
+def test_resolve_channel_prefix_falls_back_to_env(monkeypatch):
+    """No session override → env var wins."""
+    monkeypatch.setenv(CHANNEL_PREFIX_ENV, 'rw-')
+    assert resolve_channel_prefix(None) == 'rw-'
+
+
+def test_resolve_channel_prefix_defaults_to_empty(monkeypatch):
+    """No override and no env → empty string (no prefix)."""
+    monkeypatch.delenv(CHANNEL_PREFIX_ENV, raising=False)
+    assert resolve_channel_prefix(None) == ''
+
+
+def test_doc_slug_from_doc_path():
+    """SessionState.doc_slug strips the .md extension from doc_path."""
+    s = SessionState(session_id='x', doc_path='trainium-update.md')
+    assert s.doc_slug == 'trainium-update'
+
+
+def test_doc_slug_raises_when_unset():
+    """doc_slug is an error if doc_path isn't set (indicates uninitialized session)."""
+    s = SessionState(session_id='x')
+    with pytest.raises(ValueError, match='doc_path is not set'):
+        _ = s.doc_slug
+
+
+def test_staging_channel_name_prefix_env(monkeypatch):
+    """staging_channel_name = <env-prefix><doc_slug> when no session override."""
+    monkeypatch.setenv(CHANNEL_PREFIX_ENV, 'rw-')
+    s = SessionState(session_id='x', doc_path='trainium-update.md')
+    assert s.staging_channel_name() == 'rw-trainium-update'
+
+
+def test_staging_channel_name_override(monkeypatch):
+    """staging_channel_name uses session override even if env is set."""
+    monkeypatch.setenv(CHANNEL_PREFIX_ENV, 'env-')
+    s = SessionState(session_id='x', doc_path='trainium-update.md', channel_prefix='override-')
+    assert s.staging_channel_name() == 'override-trainium-update'
+
+
+def test_staging_channel_name_no_prefix(monkeypatch):
+    """staging_channel_name is bare doc_slug when neither env nor override is set."""
+    monkeypatch.delenv(CHANNEL_PREFIX_ENV, raising=False)
+    s = SessionState(session_id='x', doc_path='trainium-update.md')
+    assert s.staging_channel_name() == 'trainium-update'

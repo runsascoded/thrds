@@ -1,6 +1,21 @@
 # Spec: multi-thread posts, a markdown format, and draft/sent capture
 
-**Status:** draft, unimplemented. Motivated by a 2026-07-31 Trainium status update to an AWS PM, which took five drafts plus a structural rewrite and ended up as **four top-level Slack messages, each with its own reply thread, cross-linked**. Nothing in `thrds` expresses that shape, and the whole draft→sent capture loop was done by hand from screenshots.
+**Status:** in-progress. Motivated by a 2026-07-31 Trainium status update to an AWS PM, which took five drafts plus a structural rewrite and ended up as **four top-level Slack messages, each with its own reply thread, cross-linked**. Nothing in `thrds` expressed that shape, and the whole draft→sent capture loop was done by hand from screenshots.
+
+## Implementation status (2026-08-05)
+
+Landed:
+- **Phase A** — `.md` format + `Doc` model + parser/serializer (`thrds/doc.py`, `thrds/md.py`). Round-trip guaranteed; foreign replies (`+++ @author`) preserved on parse and never posted on push.
+- **Phase B** — session state (`.thrds/state.json`, `thrds/state.py`) and `SlackClient.sync_doc_{staging,prod}` with lazy PC creation, terraform-on-staging, additive-on-prod, and thrds-metadata stamping on every posted message.
+
+Divergences from the design body below (which is preserved as historical record):
+- **Rename `Post` → `Doc`** to avoid clashing with "OP" (original post — the top msg of a Slack thread). `PostThread` → `DocThread`, `PostMessage` → `DocMessage`, `PostFrontmatter` → `Frontmatter`, `PostSyncResult` → `DocSyncResult`.
+- **Session : `.md` : staging PC is 1:1:1.** One doc per session, tracked by `SessionState.doc_path`. Multi-doc-per-session was considered and dropped — a "multi-thread doc" is what the 5-thread trainium series is; multiple docs at once is the rare shape, handled by separate session dirs.
+- **Two sync verbs**: `sync_doc_staging` (terraform: threads/preamble in state but absent from doc are deleted) and `sync_doc_prod` (additive: nothing deleted; per-channel `prod_threads[channel]` + `prod_preamble_ts[channel]`). `sync_doc_prod` auto-archives the staging PC on success by default; opt out with `keep_staging=True`. Slack has no channel-delete for standard workspaces, so archive is the strongest cleanup available; unarchive is reversible.
+- **Channel prefix**: staging PC name is `<prefix><doc_slug>`, where `<prefix>` resolves in order (session override → `THRDS_CHANNEL_PREFIX` env → `""`). Typical usage: `THRDS_CHANNEL_PREFIX=rw-` gives `rw-trainium-update` for user-scoped namespacing on a shared workspace.
+- **Ownership durability**: every posted/edited message carries Slack `metadata` (`event_type='thrds'` + `event_payload={session_id, doc_slug, thread_slug, kind}`), so a future `recover` can rebuild `state.json` from `conversations.history` filtered by session_id. Local state is the write-through cache; metadata is the durable source of truth.
+
+Pending: Phase C (`pull` + `diff`), Phase D (CLI + gist mirror), Phase E (cross-thread `#slug` → permalink resolution — the `linked.py` generalization).
 
 ## What `thrds` already provides
 
