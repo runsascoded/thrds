@@ -17,6 +17,13 @@ from .linked import (
     build_summary_partition,
     render_summary_from_partition,
 )
+from .refs import (
+    PLACEHOLDER_URL,
+    doc_has_refs,
+    substitute_doc_refs,
+    thread_has_refs,
+    validate_refs,
+)
 from .state import SessionState
 
 THRDS_METADATA_EVENT_TYPE = 'thrds'
@@ -358,6 +365,94 @@ class SlackClient:
             section_detail_ids=section_detail_map,
         )
 
+    # --- Cross-thread ref resolution (phase-2 placeholder / phase-3 real URL) ---
+    def _prepare_doc_for_refs(self, doc: Doc, dry_run: bool) -> Doc:
+        """Validate refs and return a Doc suitable for phase-2 posting.
+
+        With refs and not dry-run: every ``[text](#slug)`` replaced with a
+        180-char placeholder URL, so real permalinks (~110-140 chars) fit
+        into the same message slot on the phase-3 rewrite. Every message
+        is length-checked post-substitution — an over-limit failure here
+        beats a mid-sync `chat.postMessage` "message too long".
+
+        Dry-run passes the doc through unchanged (nothing gets posted, and
+        the user reviewing the plan reads the raw `#slug` form more easily
+        than 180 chars of `x`).
+        """
+        validate_refs(doc)
+        if dry_run or not doc_has_refs(doc):
+            return doc
+        substituted = substitute_doc_refs(doc, lambda _slug: PLACEHOLDER_URL)
+        # Length check on every message; identify offenders precisely.
+        if substituted.preamble is not None and len(substituted.preamble) > SLACK_MESSAGE_LIMIT:
+            raise ValueError(
+                f"preamble is {len(substituted.preamble)} chars after ref-placeholder "
+                f"substitution (limit {SLACK_MESSAGE_LIMIT}); shorten or split it."
+            )
+        for thread in substituted.threads:
+            for i, m in enumerate(thread.messages):
+                if len(m.content) > SLACK_MESSAGE_LIMIT:
+                    raise ValueError(
+                        f"thread {thread.slug!r} msg {i} is {len(m.content)} chars after "
+                        f"ref-placeholder substitution (limit {SLACK_MESSAGE_LIMIT}); "
+                        "shorten or split it."
+                    )
+        return substituted
+
+    def _resolve_and_edit_refs(
+        self,
+        doc: Doc,
+        channel: str,
+        preamble_ts: str | None,
+        thread_ts_by_slug: dict[str, str],
+        state: SessionState,
+        pace: float,
+        jitter: float,
+        suppress_unfurls: bool,
+    ) -> None:
+        """Phase-3: fetch permalinks + re-sync messages containing refs.
+
+        The re-sync per thread (or preamble) delegates back to `core.sync`,
+        which lists existing messages, diffs against the real-URL desired
+        content, and edits only the messages whose content actually changed
+        (the ref-containing ones). Threads/preamble without refs are skipped.
+
+        Assumes `self.channel` is already set to ``channel`` by the caller.
+        """
+        if not doc_has_refs(doc):
+            return
+        # Build slug → real permalink via chat.getPermalink on each OP.
+        permalinks = {slug: self.permalink(ts) for slug, ts in thread_ts_by_slug.items()}
+        real_doc = substitute_doc_refs(doc, lambda slug: permalinks[slug])
+
+        # Preamble: only re-sync if it had refs.
+        if doc.preamble is not None and preamble_ts is not None:
+            from .refs import CROSS_REF_RE
+            if CROSS_REF_RE.search(doc.preamble):
+                self._sync_preamble(
+                    real_doc.preamble,
+                    preamble_ts,
+                    state,
+                    dry_run=False,
+                    pace=pace,
+                    jitter=jitter,
+                    suppress_unfurls=suppress_unfurls,
+                    delete_on_absent=False,  # phase-3 never deletes
+                )
+
+        for thread, real_thread in zip(doc.threads, real_doc.threads, strict=True):
+            if not thread_has_refs(thread):
+                continue
+            self._sync_doc_thread(
+                real_thread,
+                thread_ts_by_slug[thread.slug],
+                state,
+                dry_run=False,
+                pace=pace,
+                jitter=jitter,
+                suppress_unfurls=suppress_unfurls,
+            )
+
     # --- Doc-level sync (multi-thread) ---
     def create_private_channel(self, name: str) -> str:
         """Create a private channel with ``name`` and return its channel_id.
@@ -531,6 +626,10 @@ class SlackClient:
                     "bare `===` threads aren't state-trackable."
                 )
 
+        # 0. Validate cross-refs + build phase-2 doc (placeholder-substituted
+        #    if refs present + not dry-run; raw otherwise).
+        phase2_doc = self._prepare_doc_for_refs(doc, dry_run)
+
         # 1. Ensure staging PC exists.
         if state.staging_channel is None and not dry_run:
             state.staging_channel = self.create_private_channel(state.staging_channel_name())
@@ -542,7 +641,7 @@ class SlackClient:
         try:
             # 2. Preamble.
             preamble_ts = self._sync_preamble(
-                doc.preamble,
+                phase2_doc.preamble,
                 state.staging_preamble_ts,
                 state,
                 dry_run=dry_run,
@@ -555,7 +654,7 @@ class SlackClient:
                 state.staging_preamble_ts = preamble_ts
 
             # 3. Delete stale slugs (in state, absent from doc).
-            desired_slugs = {t.slug for t in doc.threads}
+            desired_slugs = {t.slug for t in phase2_doc.threads}
             stale_slugs = [s for s in list(state.staging_threads) if s not in desired_slugs]
             for slug in stale_slugs:
                 thread_ts = state.staging_threads[slug]
@@ -566,7 +665,7 @@ class SlackClient:
             # 4. Sync each desired thread.
             thread_ts_by_slug: dict[str, str] = {}
             thread_results: dict[str, SyncResult] = {}
-            for thread in doc.threads:
+            for thread in phase2_doc.threads:
                 existing_ts = state.staging_threads.get(thread.slug)
                 op_ts, sync_result = self._sync_doc_thread(
                     thread,
@@ -582,7 +681,19 @@ class SlackClient:
                 thread_ts_by_slug[thread.slug] = op_ts
                 thread_results[thread.slug] = sync_result
 
+            # 5. Phase-3 ref resolution: fetch permalinks, rewrite ref-containing
+            #    messages in place. Skipped on dry-run (no ts's to link to).
             if not dry_run:
+                self._resolve_and_edit_refs(
+                    doc,
+                    channel,
+                    preamble_ts,
+                    thread_ts_by_slug,
+                    state,
+                    pace=pace,
+                    jitter=jitter,
+                    suppress_unfurls=suppress_unfurls,
+                )
                 state.save()
 
             return DocSyncResult(
@@ -638,12 +749,15 @@ class SlackClient:
                 "No prod channel — pass channel= or set state.prod_channel first."
             )
 
+        # 0. Validate cross-refs + build phase-2 doc.
+        phase2_doc = self._prepare_doc_for_refs(doc, dry_run)
+
         prev_channel = self.channel
         self.channel = target
         try:
             # 1. Preamble (additive: preserved on absence).
             preamble_ts = self._sync_preamble(
-                doc.preamble,
+                phase2_doc.preamble,
                 state.prod_preamble_ts.get(target),
                 state,
                 dry_run=dry_run,
@@ -660,7 +774,7 @@ class SlackClient:
             # 2. Threads: sync-in-place, add-if-new. No delete of state entries absent from doc.
             thread_ts_by_slug: dict[str, str] = {}
             thread_results: dict[str, SyncResult] = {}
-            for thread in doc.threads:
+            for thread in phase2_doc.threads:
                 existing_ts = state.get_thread_ts(target, thread.slug)
                 op_ts, sync_result = self._sync_doc_thread(
                     thread,
@@ -676,11 +790,22 @@ class SlackClient:
                 thread_ts_by_slug[thread.slug] = op_ts
                 thread_results[thread.slug] = sync_result
 
+            # 3. Phase-3 ref resolution.
             if not dry_run:
+                self._resolve_and_edit_refs(
+                    doc,
+                    target,
+                    preamble_ts,
+                    thread_ts_by_slug,
+                    state,
+                    pace=pace,
+                    jitter=jitter,
+                    suppress_unfurls=suppress_unfurls,
+                )
                 state.prod_channel = target  # pin for future runs
                 state.save()
 
-            # 3. Auto-archive the staging PC unless the caller opted out.
+            # 4. Auto-archive the staging PC unless the caller opted out.
             if not dry_run and not keep_staging and state.staging_channel is not None:
                 self.archive_channel(state.staging_channel)
 

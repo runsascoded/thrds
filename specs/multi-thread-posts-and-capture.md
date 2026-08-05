@@ -9,6 +9,7 @@ Landed:
 - **Phase B** — session state (`.thrds/state.json`, `thrds/state.py`) and `SlackClient.sync_doc_{staging,prod}` with lazy PC creation, terraform-on-staging, additive-on-prod, and thrds-metadata stamping on every posted message.
 - **Phase C** — `SlackClient.pull_doc_{staging,prod}` (rebuild a `Doc` from a channel via `conversations.replies`; foreign authors resolved via cached `users.info`; threads returned in OP-ts order) + `md.diff_docs` (canonical-serialize both sides, `difflib.unified_diff`). Closes the parse → push → pull → diff → parse round-trip.
 - **Phase D.1** — CLI (`thrds/cli.py`, click-based) with `init`, `push [--prod] [--keep-staging] [--dry-run] [--channel]`, `pull [--prod] [--channel] [--write]`, `diff [--prod] [--channel]`, `archive`. `thrds` entry point installed via pyproject `[project.scripts]`. Depends on `click>=8.0` (breaks the zero-dep stance; deliberate tradeoff for CLI ergonomics).
+- **Phase E** — cross-thread `[text](#slug)` → permalink resolution (`thrds/refs.py`). Two-phase pattern (mirrors `linked.py`): phase-2 substitutes every `(#slug)` with a fixed-length placeholder URL (180 chars, safe upper bound on real Slack permalinks) and runs the existing sync flow; phase-3 fetches `chat.getPermalink` per referenced OP, rebuilds the ref-containing messages with real URLs, and re-runs `_sync_doc_thread` per affected thread — `core.sync`'s diff detects the changed messages and edits only those. Wired into both `sync_doc_staging` and `sync_doc_prod`; dry-run skips phase 3 (no ts's to link to). Validates dangling refs upfront (fails before any API call). Length-checks messages post-substitution.
 
 Divergences from the design body below (which is preserved as historical record):
 - **Rename `Post` → `Doc`** to avoid clashing with "OP" (original post — the top msg of a Slack thread). `PostThread` → `DocThread`, `PostMessage` → `DocMessage`, `PostFrontmatter` → `Frontmatter`, `PostSyncResult` → `DocSyncResult`.
@@ -17,7 +18,7 @@ Divergences from the design body below (which is preserved as historical record)
 - **Channel prefix**: staging PC name is `<prefix><doc_slug>`, where `<prefix>` resolves in order (session override → `THRDS_CHANNEL_PREFIX` env → `""`). Typical usage: `THRDS_CHANNEL_PREFIX=rw-` gives `rw-trainium-update` for user-scoped namespacing on a shared workspace.
 - **Ownership durability**: every posted/edited message carries Slack `metadata` (`event_type='thrds'` + `event_payload={session_id, doc_slug, thread_slug, kind}`), so a future `recover` can rebuild `state.json` from `conversations.history` filtered by session_id. Local state is the write-through cache; metadata is the durable source of truth.
 
-Pending: Phase D.2 (gist mirror — `git init` + `gh gist create --secret` + `g` remote setup, so state.json + `.md` version history mirror through a private gist; init should default-on, `--no-gist` opt-out), Phase E (cross-thread `#slug` → permalink resolution — the `linked.py` generalization).
+Pending: Phase D.2 (gist mirror — `git init` + `gh gist create --secret` + `g` remote setup, so state.json + `.md` version history mirror through a private gist; init should default-on, `--no-gist` opt-out).
 
 ## What `thrds` already provides
 

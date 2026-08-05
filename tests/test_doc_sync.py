@@ -45,6 +45,10 @@ def _make_client(*, existing_replies: dict[str, list[dict]] | None = None):
     ``conversations.replies`` should return for that thread. Absent thread_ts
     → empty. Every call is recorded; posts/edits/deletes accumulate in the
     returned tracker.
+
+    A `chat.getPermalink` handler is included by default (returns a
+    predictable `https://slack.example/<ts>` for any ts) so ref-resolution
+    tests don't have to script it separately.
     """
     existing = existing_replies or {}
     ts_counter = iter(f"1.{i:06d}" for i in range(100))
@@ -66,7 +70,25 @@ def _make_client(*, existing_replies: dict[str, list[dict]] | None = None):
         return {"ok": True}
 
     def on_replies(data, _method):
-        return {"ok": True, "messages": existing.get(data["ts"], [])}
+        """Seeded fixture wins; else reconstruct thread from `posted` + `edited`.
+
+        Phase 3 needs to see phase-2 posts as "existing" so its edit-in-place
+        diff works; a static empty return would make sync() re-post instead
+        of edit. Edits mutate the recorded text so subsequent list_messages
+        (rare) see the current state.
+        """
+        ts = data["ts"]
+        if ts in existing:
+            return {"ok": True, "messages": existing[ts]}
+        op = next((p for p in posted if p.ts == ts), None)
+        if op is None:
+            return {"ok": True, "messages": []}
+        latest_text = {e["ts"]: e["text"] for e in edited}
+        msgs = [{"ts": op.ts, "text": latest_text.get(op.ts, op.text), "user": "U_ME"}]
+        for r in posted:
+            if r.thread_ts == ts and r.ts != ts:
+                msgs.append({"ts": r.ts, "text": latest_text.get(r.ts, r.text), "user": "U_ME"})
+        return {"ok": True, "messages": msgs}
 
     def on_post(data, _method):
         ts = next(ts_counter)
@@ -92,6 +114,9 @@ def _make_client(*, existing_replies: dict[str, list[dict]] | None = None):
         deleted.append(data["ts"])
         return {"ok": True}
 
+    def on_permalink(data, _method):
+        return {"ok": True, "permalink": f"https://slack.example/{data['message_ts']}"}
+
     client = _FakeSlackClient({
         "auth.test": on_auth,
         "conversations.create": on_create,
@@ -100,6 +125,7 @@ def _make_client(*, existing_replies: dict[str, list[dict]] | None = None):
         "chat.postMessage": on_post,
         "chat.update": on_edit,
         "chat.delete": on_delete,
+        "chat.getPermalink": on_permalink,
     })
     return client, posted, edited, deleted, created_channels, archived_channels
 
@@ -707,3 +733,145 @@ def test_pull_prod_raises_without_channel(tmp_path, monkeypatch):
     client, _ = _make_pull_client(thread_replies={})
     with pytest.raises(ValueError, match="No prod channel"):
         client.pull_doc_prod(state)
+
+
+# --- cross-thread refs (phase-2 placeholder / phase-3 real URL) ---
+
+def test_cross_ref_phase2_posts_placeholder_phase3_edits_real_url(tmp_path, monkeypatch):
+    """Ref-containing msg: phase-2 posts with placeholder; phase-3 edits to real URL."""
+    from thrds.refs import PLACEHOLDER_URL
+    state = _new_state(tmp_path, monkeypatch)
+    doc = Doc(threads=[
+        DocThread(slug="mfu", messages=[
+            DocMessage("OP mfu."),
+            DocMessage("See the [profiling thread](#prof) for methodology."),
+        ]),
+        DocThread(slug="prof", messages=[DocMessage("OP prof.")]),
+    ])
+    client, posted, edited, deleted, *_ = _make_client()
+
+    client.sync_doc_staging(doc, state, pace=0.0)
+
+    # Phase 2: 3 posts (no preamble in this doc):
+    #   posted[0] = mfu OP,  posted[1] = mfu reply w/ placeholder,  posted[2] = prof OP.
+    assert posted[0].text == "OP mfu."
+    assert posted[1].text == f"See the [profiling thread]({PLACEHOLDER_URL}) for methodology."
+    assert posted[2].text == "OP prof."
+
+    # Phase 3: only the ref-containing message is edited (real URL).
+    ref_msg_ts = posted[1].ts
+    prof_op_ts = posted[2].ts
+    real_url = f"https://slack.example/{prof_op_ts}"
+    assert [(e["ts"], e["text"]) for e in edited] == [
+        (ref_msg_ts, f"See the [profiling thread]({real_url}) for methodology."),
+    ]
+
+
+def test_no_refs_skips_phase3_entirely(tmp_path, monkeypatch):
+    """Doc without refs: no chat.getPermalink calls, no re-sync passes."""
+    state = _new_state(tmp_path, monkeypatch)
+    doc = _basic_doc()  # no refs
+    client, posted, edited, *_ = _make_client()
+
+    client.sync_doc_staging(doc, state, pace=0.0)
+
+    # Zero edits in phase 3 — refs never introduced any.
+    permalink_calls = [c for c in client.calls if c[0] == "chat.getPermalink"]
+    assert permalink_calls == []
+    assert edited == []
+
+
+def test_dry_run_with_refs_makes_no_api_calls(tmp_path, monkeypatch):
+    """Dry-run with refs still validates but never substitutes/posts/edits."""
+    state = _new_state(tmp_path, monkeypatch)
+    doc = Doc(threads=[
+        DocThread(slug="mfu", messages=[DocMessage("See [prof](#prof).")]),
+        DocThread(slug="prof", messages=[DocMessage("OP.")]),
+    ])
+    client, posted, edited, deleted, created, archived = _make_client()
+
+    client.sync_doc_staging(doc, state, dry_run=True, pace=0.0)
+
+    assert created == []
+    assert posted == []
+    assert edited == []
+    permalink_calls = [c for c in client.calls if c[0] == "chat.getPermalink"]
+    assert permalink_calls == []
+
+
+def test_dangling_cross_ref_raises_before_any_api_call(tmp_path, monkeypatch):
+    """A ref to a non-existent slug fails validation, no PC created, no posts."""
+    state = _new_state(tmp_path, monkeypatch)
+    doc = Doc(threads=[
+        DocThread(slug="mfu", messages=[DocMessage("See [gone](#nope).")]),
+    ])
+    client, posted, edited, deleted, created, archived = _make_client()
+
+    with pytest.raises(ValueError, match=r"#nope"):
+        client.sync_doc_staging(doc, state)
+
+    assert created == []
+    assert posted == []
+
+
+def test_preamble_with_cross_ref_resolves(tmp_path, monkeypatch):
+    """A ref in the preamble is substituted phase-2 and edited phase-3 too."""
+    from thrds.refs import PLACEHOLDER_URL
+    state = _new_state(tmp_path, monkeypatch)
+    doc = Doc(
+        preamble="Read the [MFU thread](#mfu) first.",
+        threads=[DocThread(slug="mfu", messages=[DocMessage("OP.")])],
+    )
+    client, posted, edited, *_ = _make_client()
+
+    client.sync_doc_staging(doc, state, pace=0.0)
+
+    # Phase 2: preamble posted with placeholder.
+    assert posted[0].text == f"Read the [MFU thread]({PLACEHOLDER_URL}) first."
+    # Phase 3: preamble edited with real URL (mfu OP is posted[1]).
+    mfu_op_ts = posted[1].ts
+    preamble_ts = posted[0].ts
+    real_url = f"https://slack.example/{mfu_op_ts}"
+    edit_preamble = next(e for e in edited if e["ts"] == preamble_ts)
+    assert edit_preamble["text"] == f"Read the [MFU thread]({real_url}) first."
+
+
+def test_message_too_long_after_placeholder_substitution_raises(tmp_path, monkeypatch):
+    """A message that fits raw but overflows after placeholder substitution → clear error."""
+    from thrds.slack import SLACK_MESSAGE_LIMIT
+    state = _new_state(tmp_path, monkeypatch)
+    # 3900-char body + a single ref (~180-char placeholder inflation).
+    filler = "a" * 3900
+    doc = Doc(threads=[
+        DocThread(slug="mfu", messages=[DocMessage(f"{filler} [prof](#prof)")]),
+        DocThread(slug="prof", messages=[DocMessage("OP.")]),
+    ])
+    client, posted, *_ = _make_client()
+
+    with pytest.raises(ValueError, match=r"ref-placeholder substitution"):
+        client.sync_doc_staging(doc, state)
+
+    # Nothing posted — the length check runs before phase 1.
+    assert posted == []
+
+
+def test_prod_cross_ref_resolves_via_permalink(tmp_path, monkeypatch):
+    """sync_doc_prod also runs phase 3: ref-msg posted w/ placeholder, edited w/ real URL."""
+    from thrds.refs import PLACEHOLDER_URL
+    state = _new_state(tmp_path, monkeypatch)
+    state.prod_channel = "C_PROD"
+    doc = Doc(threads=[
+        DocThread(slug="a", messages=[DocMessage("See [b](#b).")]),
+        DocThread(slug="b", messages=[DocMessage("OP b.")]),
+    ])
+    client, posted, edited, *_ = _make_client()
+
+    client.sync_doc_prod(doc, state, pace=0.0)
+
+    assert posted[0].text == f"See [b]({PLACEHOLDER_URL})."
+    b_op_ts = posted[1].ts
+    real_url = f"https://slack.example/{b_op_ts}"
+    # Phase 3 edits the ref-containing msg with the real URL.
+    assert [(e["ts"], e["text"]) for e in edited] == [
+        (posted[0].ts, f"See [b]({real_url})."),
+    ]
