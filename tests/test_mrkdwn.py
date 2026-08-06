@@ -1,7 +1,7 @@
 """Tests for `thrds.mrkdwn` — local markdown → Slack mrkdwn conversion."""
 from __future__ import annotations
 
-from thrds.mrkdwn import to_markdown, to_slack
+from thrds.mrkdwn import find_custom_shortcodes, substitute_custom_emoji, to_markdown, to_slack
 
 
 def test_plain_text_passthrough():
@@ -201,3 +201,70 @@ def test_roundtrip_unicode_emoji():
     # translation server-side); we only need to_markdown to reverse it.
     slack_wire = ':left_right_arrow:'  # what Slack returns
     assert to_markdown(slack_wire) == '↔'
+
+
+# --- custom emoji: image markdown ↔ shortcode ---
+
+def test_to_slack_emoji_image_becomes_shortcode():
+    """`![:claude:](emoji-claude.png)` → `:claude:` — Slack will render it."""
+    assert to_slack('adapted from ![:claude:](emoji-claude.png)') == 'adapted from :claude:'
+
+
+def test_to_slack_emoji_image_with_gif_ext():
+    """Custom emoji can be GIFs (animated)."""
+    assert to_slack('lgtm ![:claude:](emoji-claude.gif)') == 'lgtm :claude:'
+
+
+def test_to_slack_emoji_image_precedes_normal_link_rewrite():
+    """`![:x:](f.png)` and `[y](url)` in the same line — both handled correctly."""
+    src = 'see ![:claude:](emoji-claude.png) and [docs](https://x.com)'
+    dst = 'see :claude: and <https://x.com|docs>'
+    assert to_slack(src) == dst
+
+
+def test_find_custom_shortcodes_excludes_standard():
+    """`:left_right_arrow:` is standard; `:claude:` is not."""
+    text = 'crash:left_right_arrow:compile — adapted from :claude:'
+    assert find_custom_shortcodes(text) == {'claude'}
+
+
+def test_find_custom_shortcodes_multiple():
+    assert find_custom_shortcodes('want :claude: and :trainium: side-by-side') == {'claude', 'trainium'}
+
+
+def test_find_custom_shortcodes_empty_for_pure_standard():
+    assert find_custom_shortcodes(':fire: and :smile:') == set()
+
+
+def test_substitute_custom_emoji_wraps_bare_shortcode():
+    text = 'adapted from :claude:'
+    out = substitute_custom_emoji(text, {'claude': 'emoji-claude.png'})
+    assert out == 'adapted from ![:claude:](emoji-claude.png)'
+
+
+def test_substitute_custom_emoji_leaves_unmapped_alone():
+    text = ':claude: and :trainium:'
+    out = substitute_custom_emoji(text, {'claude': 'emoji-claude.png'})
+    assert out == '![:claude:](emoji-claude.png) and :trainium:'
+
+
+def test_substitute_custom_emoji_idempotent_on_already_substituted():
+    """Applying twice doesn't double-wrap."""
+    text = 'yo ![:claude:](emoji-claude.png)'
+    out1 = substitute_custom_emoji(text, {'claude': 'emoji-claude.png'})
+    out2 = substitute_custom_emoji(out1, {'claude': 'emoji-claude.png'})
+    assert out1 == text  # nothing to substitute — `:claude:` is inside `![...]`
+    assert out2 == out1
+
+
+def test_roundtrip_custom_emoji():
+    """Local `![:claude:](file)` → Slack `:claude:` → back through substitute → local form."""
+    local = 'adapted from ![:claude:](emoji-claude.png)'
+    on_wire = to_slack(local)
+    assert on_wire == 'adapted from :claude:'
+    # to_markdown alone doesn't restore the image (needs the emoji map).
+    partial = to_markdown(on_wire)
+    assert partial == 'adapted from :claude:'
+    # substitute_custom_emoji closes the loop given the name→filename map.
+    back = substitute_custom_emoji(partial, {'claude': 'emoji-claude.png'})
+    assert back == local

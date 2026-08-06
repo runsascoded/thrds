@@ -16,9 +16,13 @@ Handled today:
 - ``*italic*`` → ``_italic_``. Slack's single-asterisk means bold.
 - Standard emoji (``:left_right_arrow:`` etc.): unicode ↔ shortcode via the
   ``emoji`` package on pull. Slack HTML-encodes unicode emoji into shortcode
-  form on storage, so this closes the pull-side roundtrip. Custom Slack
-  workspace emoji (``:claude:``, ``:trainium:`` etc.) pass through as
-  ``:name:`` — Slack round-trips them literally.
+  form on storage, so this closes the pull-side roundtrip.
+- Custom Slack workspace emoji (``:claude:`` etc.): rendered inline as
+  ``![:name:](emoji-name.ext)`` in the local doc — the image file lives at
+  session root (gists reject subdirs). ``to_slack`` collapses that back to
+  ``:name:`` for the wire. Pull-side download + substitution lives in
+  ``slack.py`` (needs Slack API + local FS access, so can't stay pure here);
+  ``substitute_custom_emoji`` is the pure text-substitution half.
 
 Intentionally not handled:
 
@@ -31,6 +35,12 @@ from __future__ import annotations
 import re
 
 import emoji
+
+# `![:name:](anything)` — an emoji image the pull step wrote into the doc.
+# Alt text must be `:name:` (that's how we recognize an emoji image vs. a
+# regular image); URL body isn't inspected here — `to_slack` only needs
+# the emoji name. Slack chars for emoji names: `[a-z0-9_+-]`.
+_MD_EMOJI_IMG = re.compile(r'!\[:([a-z0-9_+\-]+):\]\([^)]+\)')
 
 # `[text](url)`. Non-greedy on text so `[a](b) and [c](d)` stays two links.
 # Text may contain any char except `]`; url may contain any char except `)`.
@@ -56,13 +66,17 @@ def to_slack(text: str) -> str:
 
     Order matters:
 
-    1. Links first — a link inside bold gets rewritten before its enclosing
-       ``**...**`` is rewritten in step 3, so the link isn't damaged.
-    2. Italic BEFORE bold — the ``**bold**`` rewrite emits ``*bold*`` (single
+    1. Emoji images first — ``![:name:](emoji-name.png)`` is a "special link"
+       whose ``![…](…)`` shell would otherwise get consumed by the regular
+       link rewrite in step 2.
+    2. Links next — a link inside bold gets rewritten before its enclosing
+       ``**...**`` is rewritten in step 4, so the link isn't damaged.
+    3. Italic BEFORE bold — the ``**bold**`` rewrite emits ``*bold*`` (single
        asterisks), which would otherwise be re-matched by the italic pattern.
        Doing italic first, using ``(?<!\\*)`` guards, keeps the two disjoint.
-    3. Bold last.
+    4. Bold last.
     """
+    text = _MD_EMOJI_IMG.sub(r':\1:', text)
     text = _MD_LINK.sub(r'<\2|\1>', text)
     text = _MD_ITALIC.sub(r'_\1_', text)
     text = _MD_BOLD.sub(r'*\1*', text)
@@ -123,3 +137,35 @@ def to_markdown(text: str) -> str:
     text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
     text = _VS_16.sub('', emoji.emojize(text, language='alias'))
     return text
+
+
+# `:name:` custom emoji shortcode — anything the standard emoji lib doesn't
+# know about. Matches names Slack allows (a-z, 0-9, _, +, -). Negative
+# lookbehind `(?<!!\[)` skips `:name:` already wrapped as `![:name:](...)`
+# — needed for `substitute_custom_emoji` to be idempotent.
+_SHORTCODE = re.compile(r'(?<!!\[):([a-z0-9_+\-]+):')
+
+
+def find_custom_shortcodes(text: str) -> set[str]:
+    """Names of `:name:` shortcodes in `text` that are NOT standard emoji.
+
+    Probe per name: if ``emoji.emojize(':name:')`` still returns ``:name:``,
+    the name isn't a standard alias — treat it as a workspace-custom emoji.
+    """
+    return {
+        name for name in set(_SHORTCODE.findall(text))
+        if emoji.emojize(f':{name}:', language='alias') == f':{name}:'
+    }
+
+
+def substitute_custom_emoji(text: str, name_to_filename: dict[str, str]) -> str:
+    """Rewrite `:name:` → `![:name:](filename)` for each mapped name.
+
+    Idempotent: already-substituted `![:name:](...)` won't match `:name:`
+    because `_SHORTCODE` matches only bare `:foo:` (no adjacent `]`).
+    """
+    def repl(m: re.Match) -> str:
+        name = m.group(1)
+        fn = name_to_filename.get(name)
+        return f'![:{name}:]({fn})' if fn else m.group(0)
+    return _SHORTCODE.sub(repl, text)

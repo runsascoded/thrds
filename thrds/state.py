@@ -71,6 +71,7 @@ class SessionState:
     staging_archived: bool = False                                                   # True once the PC has been archived (idempotence marker)
     prod_threads: dict[str, dict[str, str]] = field(default_factory=dict)            # channel → (slug → thread_ts)
     prod_preamble_ts: dict[str, str] = field(default_factory=dict)                   # channel → preamble ts
+    workspace_emoji: dict[str, str] = field(default_factory=dict)                    # custom emoji name → local filename (relative to session dir)
 
     @classmethod
     def new(cls, **overrides: Any) -> 'SessionState':

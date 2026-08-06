@@ -5,6 +5,7 @@ import random
 import re
 import time
 import urllib.request
+from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 
@@ -18,7 +19,12 @@ from .linked import (
     build_summary_partition,
     render_summary_from_partition,
 )
-from .mrkdwn import to_markdown as _slack_to_md, to_slack as _md_to_slack
+from .mrkdwn import (
+    find_custom_shortcodes,
+    substitute_custom_emoji,
+    to_markdown as _slack_to_md,
+    to_slack as _md_to_slack,
+)
 from .refs import (
     PLACEHOLDER_URL,
     doc_has_refs,
@@ -946,40 +952,173 @@ class SlackClient:
         finally:
             self.channel = prev_channel
 
-    def pull_doc_staging(self, state: SessionState) -> Doc:
+    def fetch_workspace_emoji(self) -> dict[str, str]:
+        """Fetch this workspace's custom emoji map (name → URL).
+
+        Slack's ``emoji.list`` returns ``{name: value}`` where ``value`` is
+        one of: a URL (custom PNG/GIF), ``alias:other-name``, or ``-1``
+        (deleted). Follow aliases to their canonical URL; drop deleted and
+        broken-alias entries. Names Slack allows: ``[a-z0-9_+-]``.
+        """
+        result = self._request('emoji.list', {}, method='GET')
+        raw = result.get('emoji', {})
+        resolved: dict[str, str] = {}
+        for name, val in raw.items():
+            target = val
+            seen = {name}
+            while isinstance(target, str) and target.startswith('alias:'):
+                alias = target[len('alias:'):]
+                if alias in seen:
+                    target = None  # cycle; drop
+                    break
+                seen.add(alias)
+                target = raw.get(alias)
+            if isinstance(target, str) and target.startswith('http'):
+                resolved[name] = target
+        return resolved
+
+    def _download_url(self, url: str, dest: Path) -> None:
+        """Fetch ``url`` and write bytes to ``dest``. No auth needed for
+        emoji.slack-edge.com URLs."""
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            dest.write_bytes(resp.read())
+
+    def _resolve_custom_emoji(
+        self,
+        doc: Doc,
+        state: SessionState,
+        session_dir: Path,
+    ) -> Doc:
+        """Substitute custom `:name:` refs → `![:name:](emoji-<name>.<ext>)`.
+
+        For each unique custom shortcode found in the doc, ensure a local
+        emoji file exists in ``session_dir`` — download from Slack if not
+        cached. Missing names (not in workspace or fetch failed) pass
+        through as literal ``:name:``. Mutates ``state.workspace_emoji``;
+        caller saves.
+
+        `emoji.list` is fetched at most once per call, and only when an
+        unknown shortcode is seen. State cache holds across sessions. If
+        the token lacks the ``emoji:read`` scope, prints a one-time hint
+        via ``self._emoji_scope_warned`` and no-ops.
+        """
+        all_names: set[str] = set()
+        if doc.preamble:
+            all_names |= find_custom_shortcodes(doc.preamble)
+        for thread in doc.threads:
+            for m in thread.messages:
+                all_names |= find_custom_shortcodes(m.content)
+
+        unknown = all_names - set(state.workspace_emoji)
+        if unknown:
+            workspace_urls: dict[str, str] = {}
+            try:
+                workspace_urls = self.fetch_workspace_emoji()
+            except RuntimeError as e:
+                # Missing scope is the common failure — surface it once with a
+                # clear fix. Other errors also degrade to "leave shortcodes
+                # literal" but we still warn.
+                msg = str(e)
+                if not getattr(self, '_emoji_scope_warned', False):
+                    if 'missing_scope' in msg:
+                        print(
+                            f"warning: `emoji.list` denied ({msg.strip()}). "
+                            f"Custom emoji ({sorted(unknown)}) will pass through as `:name:` text — "
+                            f"add `emoji:read` to `SLACK_THRDS_USER_TOKEN` to inline them as images.",
+                            file=__import__('sys').stderr,
+                        )
+                    else:
+                        print(f"warning: `emoji.list` failed: {msg}", file=__import__('sys').stderr)
+                    self._emoji_scope_warned = True
+            for name in unknown:
+                url = workspace_urls.get(name)
+                if not url:
+                    continue  # not in workspace or fetch failed; leave literal
+                # Ext from URL, stripped of any query string.
+                ext = url.rsplit('.', 1)[-1].split('?', 1)[0].lower()
+                if not ext or not ext.isalnum() or len(ext) > 5:
+                    ext = 'png'  # sane fallback
+                filename = f'emoji-{name}.{ext}'
+                dest = session_dir / filename
+                if not dest.exists():
+                    try:
+                        self._download_url(url, dest)
+                    except Exception as e:
+                        print(
+                            f"warning: emoji download failed for :{name}: ({e})",
+                            file=__import__('sys').stderr,
+                        )
+                        continue  # leave literal
+                state.workspace_emoji[name] = filename
+
+        # Substitute across all message content using state cache.
+        def sub(text: str) -> str:
+            return substitute_custom_emoji(text, state.workspace_emoji)
+
+        return Doc(
+            preamble=sub(doc.preamble) if doc.preamble else doc.preamble,
+            threads=[
+                DocThread(
+                    slug=t.slug,
+                    messages=[
+                        DocMessage(content=sub(m.content), author=m.author)
+                        for m in t.messages
+                    ],
+                )
+                for t in doc.threads
+            ],
+        )
+
+    def pull_doc_staging(
+        self,
+        state: SessionState,
+        session_dir: Path | None = None,
+    ) -> Doc:
         """Fetch the current state of the session's staging PC as a `Doc`.
 
         Uses the state's slug → ts pointers as the roots and ``conversations.replies``
         for each; foreign messages (colleague replies) come back with their
-        ``author`` populated from ``users.info``.
+        ``author`` populated from ``users.info``. If ``session_dir`` is
+        given, custom Slack emoji are downloaded there and referenced
+        inline in the returned Doc (see ``_resolve_custom_emoji``).
         """
         if state.staging_channel is None:
             raise ValueError(
                 "No staging channel — the session hasn't pushed a staging Doc yet."
             )
-        return self._pull_doc(
+        doc = self._pull_doc(
             state.staging_channel,
             state.staging_preamble_ts,
             state.staging_threads,
         )
+        if session_dir is not None:
+            doc = self._resolve_custom_emoji(doc, state, session_dir)
+        return doc
 
     def pull_doc_prod(
         self,
         state: SessionState,
         channel: str | None = None,
+        session_dir: Path | None = None,
     ) -> Doc:
         """Fetch the current state of the doc on a real prod channel.
 
         ``channel`` overrides ``state.prod_channel`` if given; falls back to
-        the pinned prod channel otherwise. Raises if neither is set.
+        the pinned prod channel otherwise. Raises if neither is set. If
+        ``session_dir`` is given, custom Slack emoji are downloaded there
+        and referenced inline.
         """
         target = channel if channel is not None else state.prod_channel
         if target is None:
             raise ValueError(
                 "No prod channel — pass channel= or set state.prod_channel first."
             )
-        return self._pull_doc(
+        doc = self._pull_doc(
             target,
             state.prod_preamble_ts.get(target),
             state.prod_threads.get(target, {}),
         )
+        if session_dir is not None:
+            doc = self._resolve_custom_emoji(doc, state, session_dir)
+        return doc

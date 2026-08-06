@@ -234,14 +234,24 @@ def pull(channel: str | None, prod: bool, write: bool, doc_path: str | None):
     if not prod and channel is not None:
         raise click.UsageError('--channel requires --prod.')
     client = _make_slack_client()
-    doc = client.pull_doc_prod(state, channel=channel) if prod else client.pull_doc_staging(state)
+    session_dir = Path.cwd()
+    doc = (
+        client.pull_doc_prod(state, channel=channel, session_dir=session_dir)
+        if prod
+        else client.pull_doc_staging(state, session_dir=session_dir)
+    )
     text = serialize_doc(doc)
     if write:
         path = _resolve_doc_path(state, doc_path)
         Path(path).write_text(text)
+        # Persist any new custom emoji entries pulled into state.workspace_emoji.
+        state.save()
         err(f"wrote pulled doc to {path}")
         mode = 'prod' if prod else 'staging'
-        _autocommit(Path.cwd(), [path], f'thrds: pull {mode} → {path}')
+        # Emoji files (`emoji-*.<ext>`) newly-downloaded by pull_doc_* land at
+        # session root; add them to the auto-commit so the gist mirror carries them.
+        emoji_paths = [p.name for p in session_dir.glob('emoji-*') if p.is_file()]
+        _autocommit(session_dir, [path, str(STATE_PATH), *emoji_paths], f'thrds: pull {mode} → {path}')
     else:
         click.echo(text, nl=False)
 
@@ -257,7 +267,12 @@ def diff(channel: str | None, prod: bool, doc_path: str | None):
         raise click.UsageError('--channel requires --prod.')
     local_doc = _load_doc(state, doc_path)
     client = _make_slack_client()
-    slack_doc = client.pull_doc_prod(state, channel=channel) if prod else client.pull_doc_staging(state)
+    session_dir = Path.cwd()
+    slack_doc = (
+        client.pull_doc_prod(state, channel=channel, session_dir=session_dir)
+        if prod
+        else client.pull_doc_staging(state, session_dir=session_dir)
+    )
     click.echo(diff_docs(local_doc, slack_doc, from_label='local', to_label='slack'), nl=False)
 
 

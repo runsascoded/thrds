@@ -70,12 +70,12 @@ class SlackSpy:
             state.save()
         return self._sync_result(resolved)
 
-    def pull_doc_staging(self, state):
-        self.pull_calls.append({"mode": "staging"})
+    def pull_doc_staging(self, state, session_dir=None):
+        self.pull_calls.append({"mode": "staging", "session_dir": session_dir})
         return self.pull_returns or Doc()
 
-    def pull_doc_prod(self, state, channel=None):
-        self.pull_calls.append({"mode": "prod", "channel": channel})
+    def pull_doc_prod(self, state, channel=None, session_dir=None):
+        self.pull_calls.append({"mode": "prod", "channel": channel, "session_dir": session_dir})
         return self.pull_returns or Doc()
 
     def archive_channel(self, channel: str):
@@ -391,7 +391,13 @@ def test_pull_prod_passes_channel(in_tmp, monkeypatch, spy):
     _init_session(in_tmp, monkeypatch)
     result = CliRunner().invoke(cli, ['pull', '--prod', '-c', 'C_OTHER'])
     assert result.exit_code == 0, (result.output, result.stderr)
-    assert spy.pull_calls == [{'mode': 'prod', 'channel': 'C_OTHER'}]
+    # session_dir is CWD (the session dir _init_session chdir'd into) — plumbed
+    # so pull_doc_* can download custom emoji into the session.
+    assert spy.pull_calls == [{
+        'mode': 'prod',
+        'channel': 'C_OTHER',
+        'session_dir': in_tmp / 'thrds' / 'trainium',
+    }]
 
 
 # --- diff ---
