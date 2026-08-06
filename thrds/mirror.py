@@ -4,7 +4,7 @@ Session dir layout (ghpr-style, per `gh/{number}/`):
 
     <parent-git-root-or-cwd>/thrds/<slug>/    session dir; one per doc
       .git/                                   private git repo (nested is fine)
-      .thrds/state.json                       thrds state
+      thrds.json                              thrds state (flat: gists reject dirs)
       <slug>.md                               the doc
 
 The nested `.git/` is invisible to any surrounding project's git — parent's
@@ -110,15 +110,30 @@ def push(session_dir: Path, remote: str = 'g', branch: str = 'main') -> None:
     _run(['git', 'push', '-q', remote, f'HEAD:{branch}'], cwd=session_dir)
 
 
+def align_to_remote(session_dir: Path, remote: str = 'g', branch: str = 'main') -> None:
+    """`git fetch <remote>` + `git reset --hard <remote>/<branch>`.
+
+    After `create_gist` populates a gist from a file directly, our local git
+    history has no shared ancestor with the gist's initial commit — a
+    subsequent `git push` would be rejected as non-fast-forward. Aligning
+    here (drop any pre-existing local HEAD, adopt gist HEAD verbatim) lets
+    our subsequent state.json commit fast-forward cleanly. Only safe on a
+    freshly-init'd session dir where no meaningful commits exist yet.
+    """
+    _run(['git', 'fetch', '-q', remote], cwd=session_dir)
+    _run(['git', 'reset', '-q', '--hard', f'{remote}/{branch}'], cwd=session_dir)
+
+
 def create_gist(session_dir: Path, description: str, files: list[str]) -> tuple[str, str]:
     """Create a secret gist via ``gh gist create`` and return (gist_id, git_url).
 
-    Depends on the ``gh`` CLI (authenticated). ``gh gist create --secret``
-    prints the gist URL on stdout; parse out the gist ID and construct the
-    git-clone URL so `add_remote` can point ``g`` at it.
+    Depends on the ``gh`` CLI (authenticated). ``gh gist create`` defaults to
+    secret (``--public`` to opt out; there is no ``--secret`` flag). Stdout
+    is the gist URL — parse out the gist ID and construct the git-clone URL
+    so `add_remote` can point ``g`` at it.
     """
     r = _run(
-        ['gh', 'gist', 'create', '--secret', '--desc', description, *files],
+        ['gh', 'gist', 'create', '--desc', description, *files],
         cwd=session_dir,
     )
     # gh writes progress to stderr; the URL is the last non-empty stdout line.
@@ -127,7 +142,10 @@ def create_gist(session_dir: Path, description: str, files: list[str]) -> tuple[
         raise MirrorError(f"gh gist create produced no output; stderr: {r.stderr}")
     url = url_lines[-1]
     gist_id = url.rsplit('/', 1)[-1]
-    git_url = f'https://gist.github.com/{gist_id}.git'
+    # SSH URL (not HTTPS) — the HTTPS variant would prompt for a username on
+    # `git push` unless the user has run `gh auth setup-git`; SSH just works
+    # as long as their GH SSH key is set up (the common case).
+    git_url = f'git@gist.github.com:{gist_id}.git'
     return gist_id, git_url
 
 

@@ -91,7 +91,7 @@ class Frontmatter:
     """YAML frontmatter parsed from a `.md` doc.
 
     All fields are optional at the doc level — session state
-    (`.thrds/state.json`) supplies defaults; frontmatter overrides them per-doc.
+    (`thrds.json`) supplies defaults; frontmatter overrides them per-doc.
     """
     channel: str | None = None
     thread_ts: str | None = None

@@ -208,43 +208,52 @@ def test_init_state_json_is_valid_pretty_printed(in_tmp):
     assert text.endswith('\n') and not text.endswith('\n\n')
 
 
-def test_init_gist_flow_shells_out_to_gh_and_records_gist_id(in_tmp, monkeypatch):
-    """Init without --no-gist: shells out to `gh gist create`, records the id, adds `g` remote."""
+def test_init_gist_flow_calls_create_gist_aligns_and_records_gist_id(in_tmp, monkeypatch):
+    """Init without --no-gist: create_gist → add_remote(ssh) → align_to_remote → push.
+
+    Mocks at the mirror module boundary (create_gist / align_to_remote / push)
+    so the test doesn't need a real `gh` binary or a reachable gist URL. This
+    is the right layer: `gh` and network are wrapped by mirror.py; testing the
+    subprocess plumbing itself belongs in test_mirror.py.
+    """
     _write_doc(in_tmp)
-    calls: list[list[str]] = []
-    # Snapshot the original before patching — else the fake recurses into itself
-    # (patching `thrds.mirror.subprocess.run` patches the module-shared `run`,
-    # which the fake would then call recursively for real-git delegation).
+    calls: list[tuple] = []
+
     from thrds import mirror as mirror_mod
-    orig_run = mirror_mod.subprocess.run
 
-    def fake_run(cmd, cwd=None, check=True, capture_output=True, text=True):
-        calls.append(cmd)
-        if cmd[:3] == ['gh', 'gist', 'create']:
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=0,
-                stdout='https://gist.github.com/abc123\n', stderr='',
-            )
-        # Real git; also fake `git push g` so the test doesn't try to
-        # actually push to gist.github.com/abc123.git.
-        if cmd[:2] == ['git', 'push']:
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout='', stderr='')
-        return orig_run(cmd, cwd=cwd, check=check, capture_output=capture_output, text=text)
+    def fake_create_gist(session_dir, description, files):
+        calls.append(('create_gist', str(session_dir), description, list(files)))
+        return ('abc123', 'git@gist.github.com:abc123.git')
 
-    monkeypatch.setattr('thrds.mirror.subprocess.run', fake_run)
+    def fake_align(session_dir, remote='g', branch='main'):
+        calls.append(('align_to_remote', remote, branch))
+
+    def fake_push(session_dir, remote='g', branch='main'):
+        calls.append(('push', remote, branch))
+
+    monkeypatch.setattr(mirror_mod, 'create_gist', fake_create_gist)
+    monkeypatch.setattr(mirror_mod, 'align_to_remote', fake_align)
+    monkeypatch.setattr(mirror_mod, 'push', fake_push)  # commit_and_push routes through mirror.push
+
     result = CliRunner().invoke(cli, ['init', 'trainium.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
-    state = SessionState.load(in_tmp / 'thrds' / 'trainium')
+
+    session_dir = in_tmp / 'thrds' / 'trainium'
+    state = SessionState.load(session_dir)
     assert state.gist_id == 'abc123'
-    # `gh gist create` was invoked exactly once.
-    gh_calls = [c for c in calls if c[:2] == ['gh', 'gist']]
-    assert gh_calls == [['gh', 'gist', 'create', '--secret', '--desc', 'thrds: trainium', 'trainium.md']]
-    # The `g` remote is configured.
+
+    # Exact call sequence: create gist, align local to gist HEAD, then push the state.json commit.
+    assert [c[0] for c in calls] == ['create_gist', 'align_to_remote', 'push']
+    assert calls[0] == ('create_gist', str(session_dir), 'thrds: trainium', ['trainium.md'])
+    assert calls[1] == ('align_to_remote', 'g', 'main')
+    assert calls[2] == ('push', 'g', 'main')
+
+    # The `g` remote is configured with the SSH URL (not HTTPS — HTTPS would prompt for auth).
     remote_url = subprocess.run(
         ['git', 'remote', 'get-url', 'g'],
-        cwd=in_tmp / 'thrds' / 'trainium', capture_output=True, text=True, check=True,
+        cwd=session_dir, capture_output=True, text=True, check=True,
     ).stdout.strip()
-    assert remote_url == 'https://gist.github.com/abc123.git'
+    assert remote_url == 'git@gist.github.com:abc123.git'
 
 
 # --- push ---
@@ -460,5 +469,5 @@ def test_push_requires_state_json(in_tmp, spy):
     result = CliRunner().invoke(cli, ['push'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        "Error: No thrds session state at .thrds/state.json; run `thrds init` first."
+        "Error: No thrds session state at thrds.json; run `thrds init` first."
     )

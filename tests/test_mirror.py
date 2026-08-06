@@ -150,7 +150,7 @@ def test_push_noop_when_no_remote(session_dir):
 # --- create_gist (subprocess-mocked) ---
 
 def test_create_gist_parses_url_from_gh_stdout(session_dir, monkeypatch):
-    """`gh gist create --secret` stdout is a URL; parse it to (gist_id, git_url)."""
+    """`gh gist create` (secret by default) stdout is a URL; parse it to (gist_id, git_url)."""
     captured: list[list[str]] = []
 
     def fake_run(cmd, cwd=None, check=True, capture_output=True, text=True):
@@ -164,9 +164,9 @@ def test_create_gist_parses_url_from_gh_stdout(session_dir, monkeypatch):
 
     gid, git_url = create_gist(session_dir, description='thrds: trainium', files=['trainium.md'])
     assert gid == 'abc123def456'
-    assert git_url == 'https://gist.github.com/abc123def456.git'
+    assert git_url == 'git@gist.github.com:abc123def456.git'
     assert captured == [[
-        'gh', 'gist', 'create', '--secret',
+        'gh', 'gist', 'create',
         '--desc', 'thrds: trainium', 'trainium.md',
     ]]
 

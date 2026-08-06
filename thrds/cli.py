@@ -53,7 +53,7 @@ def _make_slack_client() -> SlackClient:
 
 
 def _load_state() -> SessionState:
-    """Load ``.thrds/state.json`` from CWD or exit clearly."""
+    """Load ``thrds.json`` from CWD or exit clearly."""
     try:
         return SessionState.load()
     except FileNotFoundError as e:
@@ -136,12 +136,17 @@ def init(no_gist: bool, prefix: str | None, doc_path: str):
         dest_md.write_text('')
 
     state = SessionState.new(doc_path=f'{slug}.md', channel_prefix=prefix)
-    state.save(target)
-
     mirror.init_repo(target)
-    mirror.commit(target, [f'{slug}.md', str(STATE_PATH)], f'thrds: init {slug}')
 
-    if not no_gist:
+    if no_gist:
+        # Local-only path: commit doc + state.json under our own initial commit.
+        state.save(target)
+        mirror.commit(target, [f'{slug}.md', str(STATE_PATH)], f'thrds: init {slug}')
+    else:
+        # Gist-mirrored path: create gist FIRST (it seeds an initial commit
+        # from the doc), align local HEAD to that commit, then add state.json
+        # as our fast-forward commit on top. This way local and gist share the
+        # same history from commit 1.
         try:
             gist_id, git_url = mirror.create_gist(
                 target,
@@ -153,14 +158,14 @@ def init(no_gist: bool, prefix: str | None, doc_path: str):
                 f"gist creation failed:\n{e}\n\n"
                 "Re-run `thrds init` with `--no-gist` to skip the gist mirror."
             )
+        mirror.add_remote(target, state.gist_remote, git_url)
+        mirror.align_to_remote(target, remote=state.gist_remote)
         state.gist_id = gist_id
         state.save(target)
-        mirror.add_remote(target, state.gist_remote, git_url)
-        # Push the initial commit (with state.json now carrying gist_id).
         mirror.commit_and_push(
             target,
             [str(STATE_PATH)],
-            f'thrds: record gist_id {gist_id}',
+            f'thrds: init {slug} (gist {gist_id})',
             remote=state.gist_remote,
         )
 

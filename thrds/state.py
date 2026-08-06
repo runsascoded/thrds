@@ -1,6 +1,6 @@
 """Local session state for a thrds session — the write-through cache of thread ownership.
 
-Written to ``.thrds/state.json`` at the session root, tracked and gist-mirrored via
+Written to ``thrds.json`` at the session root, tracked and gist-mirrored via
 the git repo so multi-machine sees the same authoritative slug → thread_ts map
 without needing to scan Slack. The Slack ``metadata`` field on each posted message
 carries the same info (session_id, slug, kind) as belt-and-suspenders: if the
@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 
-STATE_PATH = Path('.thrds/state.json')
+STATE_PATH = Path('thrds.json')  # flat filename (not `.thrds/state.json`) — GitHub gists reject directories
 DEFAULT_GIST_REMOTE = 'g'  # matches ghpr's convention
 CHANNEL_PREFIX_ENV = 'THRDS_CHANNEL_PREFIX'
 
@@ -79,7 +79,7 @@ class SessionState:
 
     @classmethod
     def load(cls, root: Path | str = '.') -> 'SessionState':
-        """Load from ``<root>/.thrds/state.json``; raise if missing."""
+        """Load from ``<root>/thrds.json``; raise if missing."""
         path = Path(root) / STATE_PATH
         if not path.exists():
             raise FileNotFoundError(
@@ -88,7 +88,7 @@ class SessionState:
         return cls(**json.loads(path.read_text()))
 
     def save(self, root: Path | str = '.') -> None:
-        """Persist to ``<root>/.thrds/state.json``, creating the parent dir if needed."""
+        """Persist to ``<root>/thrds.json``, creating the parent dir if needed."""
         path = Path(root) / STATE_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(asdict(self), indent=2) + '\n')

@@ -1,9 +1,10 @@
-"""Tests for the session state persistence layer (.thrds/state.json)."""
+"""Tests for the session state persistence layer (thrds.json)."""
 from __future__ import annotations
 
 import json
 import re
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -33,11 +34,13 @@ def test_load_missing_raises_clearly(tmp_path):
         SessionState.load(tmp_path)
 
 
-def test_save_creates_parent_dir(tmp_path):
-    """Save creates .thrds/ if it doesn't exist."""
+def test_save_writes_flat_file(tmp_path):
+    """Save writes to a flat filename (no directory) — gists reject dirs."""
     s = SessionState(session_id='fixed-uuid')
     s.save(tmp_path)
     assert (tmp_path / STATE_PATH).exists()
+    # Flat: STATE_PATH.parent is '.' (current dir), i.e. no subdirectory.
+    assert STATE_PATH.parent == Path('.')
 
 
 def test_save_load_round_trip_empty(tmp_path):
