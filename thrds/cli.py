@@ -1,7 +1,7 @@
 """Command-line interface for `thrds` sessions.
 
 Wraps the `Doc` / `SessionState` / `SlackClient` primitives into
-init/push/pull/diff/archive subcommands. Each session lives in its own
+init/push/pull/diff/archive/open subcommands. Each session lives in its own
 directory (ghpr-style: ``<git-root-or-cwd>/thrds/<slug>/``) with its
 own private git repo (nested `.git/` is invisible to any surrounding
 project's git). A secret gist created at init becomes the ``g`` remote;
@@ -16,6 +16,7 @@ scope is load-bearing). Read commands (``pull``, ``diff``) also require
 from __future__ import annotations
 
 import os
+import webbrowser
 from pathlib import Path
 
 import click
@@ -280,6 +281,61 @@ def archive():
     state.save()
     err(f"archived staging PC: {state.staging_channel}")
     _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: archive {state.staging_channel}')
+
+
+@cli.command('open')
+@click.option('-p', '--prod', is_flag=True, help='Open the prod channel (default: gist).')
+@click.option('-s', '--staging', is_flag=True, help='Open the staging PC (default: gist).')
+@click.option('-U', '--no-open', is_flag=True, help='Print the URL, do not launch browser.')
+def open_(prod: bool, staging: bool, no_open: bool):
+    """Open this session's gist (default), staging PC, or prod channel in the browser.
+
+    Mirrors ``ghpr open [-g]`` — with three targets instead of two, since a
+    thrds session tracks a gist + a staging channel + (once pushed) a prod
+    channel. Pass ``-U`` to just print the URL (useful in scripts).
+    """
+    if prod and staging:
+        raise click.UsageError('--prod and --staging are mutually exclusive.')
+    state = _load_state()
+
+    if staging:
+        if state.staging_channel is None:
+            raise click.UsageError(
+                'No staging channel — run `thrds push` first to create one.'
+            )
+        url = _channel_url(state.staging_channel)
+        label = f'staging PC {state.staging_channel}'
+    elif prod:
+        if state.prod_channel is None:
+            raise click.UsageError(
+                'No prod channel recorded on this session.'
+            )
+        url = _channel_url(state.prod_channel)
+        label = f'prod channel {state.prod_channel}'
+    else:
+        if state.gist_id is None:
+            raise click.UsageError(
+                'No gist recorded — session was init\'d with --no-gist.'
+            )
+        url = f'https://gist.github.com/{state.gist_id}'
+        label = f'gist {state.gist_id}'
+
+    err(f'Opening {label}: {url}')
+    if not no_open:
+        webbrowser.open(url)
+
+
+def _channel_url(channel_id: str) -> str:
+    """Build the Slack workspace URL for a channel from its ID.
+
+    Uses the auth'd workspace (via `auth.test`) so the URL points at the
+    same workspace the token belongs to. The web URL takes a channel ID as
+    the path segment and Slack redirects appropriately.
+    """
+    client = _make_slack_client()
+    # `auth.test` returns `url`: `https://<workspace>.slack.com/`.
+    workspace_url = client._request('auth.test', {}, method='GET')['url'].rstrip('/')
+    return f'{workspace_url}/archives/{channel_id}'
 
 
 def main():

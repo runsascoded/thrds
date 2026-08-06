@@ -81,6 +81,12 @@ class SlackSpy:
     def archive_channel(self, channel: str):
         self.archive_calls.append(channel)
 
+    def _request(self, api_method, data, **_kw):
+        """Minimal `_request` shim so `cli._channel_url` can call `auth.test`."""
+        if api_method == 'auth.test':
+            return {'url': 'https://openathena.slack.com/'}
+        raise NotImplementedError(f'SlackSpy._request({api_method!r}) not stubbed')
+
 
 @pytest.fixture
 def spy(monkeypatch):
@@ -471,3 +477,75 @@ def test_push_requires_state_json(in_tmp, spy):
     assert result.stderr.splitlines()[-1] == (
         "Error: No thrds session state at thrds.json; run `thrds init` first."
     )
+
+
+# --- open ---
+
+def test_open_gist_default_prints_and_launches(in_tmp, monkeypatch):
+    """`thrds open` (no flag) opens the gist URL — no Slack call needed."""
+    _init_session(in_tmp, monkeypatch)
+    # Simulate init that ran with a gist by stamping gist_id into state.
+    state = SessionState.load()
+    state.gist_id = 'abc123'
+    state.save()
+    opened: list[str] = []
+    monkeypatch.setattr('thrds.cli.webbrowser.open', lambda url: opened.append(url))
+    result = CliRunner().invoke(cli, ['open'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert opened == ['https://gist.github.com/abc123']
+    assert result.stderr.rstrip() == 'Opening gist abc123: https://gist.github.com/abc123'
+
+
+def test_open_gist_no_open_flag_prints_only(in_tmp, monkeypatch):
+    """`-U` prints URL, does not launch browser."""
+    _init_session(in_tmp, monkeypatch)
+    state = SessionState.load()
+    state.gist_id = 'abc123'
+    state.save()
+    opened: list[str] = []
+    monkeypatch.setattr('thrds.cli.webbrowser.open', lambda url: opened.append(url))
+    result = CliRunner().invoke(cli, ['open', '-U'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert opened == []
+
+
+def test_open_gist_errors_when_no_gist_id(in_tmp, monkeypatch):
+    """--no-gist init leaves gist_id=null; `thrds open` says so instead of crashing."""
+    _init_session(in_tmp, monkeypatch)
+    # State from _init_session already has gist_id=None (init used --no-gist).
+    result = CliRunner().invoke(cli, ['open'])
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        "Error: No gist recorded — session was init'd with --no-gist."
+    )
+
+
+def test_open_staging_uses_workspace_url(in_tmp, monkeypatch, spy):
+    """`-s` fetches workspace URL via auth.test and points at the staging channel."""
+    _init_session(in_tmp, monkeypatch)
+    state = SessionState.load()
+    state.staging_channel = 'C_STAGING'
+    state.save()
+    opened: list[str] = []
+    monkeypatch.setattr('thrds.cli.webbrowser.open', lambda url: opened.append(url))
+    result = CliRunner().invoke(cli, ['open', '-s'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert opened == ['https://openathena.slack.com/archives/C_STAGING']
+
+
+def test_open_staging_errors_when_no_staging_channel(in_tmp, monkeypatch):
+    """Never pushed → no staging_channel → clear error."""
+    _init_session(in_tmp, monkeypatch)
+    result = CliRunner().invoke(cli, ['open', '-s'])
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        'Error: No staging channel — run `thrds push` first to create one.'
+    )
+
+
+def test_open_prod_and_staging_mutually_exclusive(in_tmp, monkeypatch):
+    """`-p` + `-s` together → clear usage error."""
+    _init_session(in_tmp, monkeypatch)
+    result = CliRunner().invoke(cli, ['open', '-s', '-p'])
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == 'Error: --prod and --staging are mutually exclusive.'
