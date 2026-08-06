@@ -142,9 +142,13 @@ def test_to_markdown_identifier_with_underscore_unchanged():
     assert to_markdown(src) == dst
 
 
-def test_to_markdown_emoji_shortcode_unchanged():
-    """`:left_right_arrow:` — inner `_`s must survive."""
-    assert to_markdown(':left_right_arrow:') == ':left_right_arrow:'
+def test_to_markdown_unknown_shortcode_underscores_survive_italic():
+    """A non-emoji `:foo_bar_baz:` shortcode — italic pattern must not eat inner `_`s.
+
+    (Real emoji shortcodes get demojized to unicode — see the emoji tests
+    below. This test uses a made-up shortcode to isolate the italic-guard
+    behavior from the emoji conversion.)"""
+    assert to_markdown(':not_a_real_emoji:') == ':not_a_real_emoji:'
 
 
 def test_to_markdown_code_identifier_underscores_unchanged():
@@ -164,3 +168,36 @@ def test_to_slack_identifier_asterisk_multiplication_unchanged():
 def test_to_markdown_identifier_slack_bold_between_word_chars_unchanged():
     """`x*y` (something*something) in Slack shouldn't become `x**y`."""
     assert to_markdown('rate=a*b*c') == 'rate=a*b*c'
+
+
+# --- emoji: standard shortcodes demojize; custom passes through ---
+
+def test_to_markdown_standard_emoji_shortcode_demojized():
+    """`:left_right_arrow:` → `↔` — closes the Slack unicode-to-shortcode drift."""
+    assert to_markdown('crash:left_right_arrow:compile') == 'crash↔compile'
+
+
+def test_to_markdown_variation_selectors_stripped():
+    """Emoji package re-adds VS-16; local convention is bare codepoints."""
+    src = ':left_right_arrow:'
+    out = to_markdown(src)
+    # No VS-16 (U+FE0F) or VS-15 (U+FE0E) in the output.
+    assert '︎' not in out and '️' not in out
+    assert out == '↔'
+
+
+def test_to_markdown_custom_slack_emoji_passes_through():
+    """`:claude:` isn't a standard alias — leave the literal for Slack to render."""
+    assert to_markdown('adapted from :claude:') == 'adapted from :claude:'
+
+
+def test_to_markdown_multiple_emoji_in_one_string():
+    assert to_markdown('gone :fire: back :left_right_arrow: forth') == 'gone 🔥 back ↔ forth'
+
+
+def test_roundtrip_unicode_emoji():
+    """Local `↔` → Slack `:left_right_arrow:` (auto-encoded server-side) → back to `↔`."""
+    # `to_slack` doesn't do emoji (Slack handles the unicode → shortcode
+    # translation server-side); we only need to_markdown to reverse it.
+    slack_wire = ':left_right_arrow:'  # what Slack returns
+    assert to_markdown(slack_wire) == '↔'

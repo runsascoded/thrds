@@ -13,10 +13,15 @@ Handled today:
   and the trailing ``)`` render as dangling literals around it.
 - ``**bold**`` → ``*bold*``. Slack uses single-asterisk bold; double-asterisk
   renders literally.
+- ``*italic*`` → ``_italic_``. Slack's single-asterisk means bold.
+- Standard emoji (``:left_right_arrow:`` etc.): unicode ↔ shortcode via the
+  ``emoji`` package on pull. Slack HTML-encodes unicode emoji into shortcode
+  form on storage, so this closes the pull-side roundtrip. Custom Slack
+  workspace emoji (``:claude:``, ``:trainium:`` etc.) pass through as
+  ``:name:`` — Slack round-trips them literally.
 
 Intentionally not handled:
 
-- ``_italic_``: same in both.
 - Backticks: same in both.
 - Bulleted lists (``- item``): Slack renders ``-`` bullets fine as-is.
 - ``~~strike~~`` → ``~strike~``: not used in current docs; add on demand.
@@ -24,6 +29,8 @@ Intentionally not handled:
 from __future__ import annotations
 
 import re
+
+import emoji
 
 # `[text](url)`. Non-greedy on text so `[a](b) and [c](d)` stays two links.
 # Text may contain any char except `]`; url may contain any char except `)`.
@@ -82,6 +89,13 @@ _SLACK_ITALIC = re.compile(
 )
 
 
+# Variation selectors — U+FE0E (text style) and U+FE0F (emoji style).
+# `emoji.emojize` re-adds these on any emoji that declares them intrinsic
+# (e.g. `:left_right_arrow:` gets VS-16 back), but our local doc convention
+# is bare codepoints, so a naive roundtrip drifts by 1 char per emoji. Strip.
+_VS_16 = re.compile(r'[︎️]')
+
+
 def to_markdown(text: str) -> str:
     """Convert Slack mrkdwn back to local markdown format.
 
@@ -92,6 +106,11 @@ def to_markdown(text: str) -> str:
     - ``*bold*`` → ``**bold**``. Slack's single-star always means bold.
     - ``_italic_`` → ``*italic*``. Local convention uses single-star italic
       (which we send as ``_italic_`` on the wire; this is the reverse).
+    - ``:name:`` (standard emoji only) → unicode via ``emoji.emojize``.
+      Variation selectors stripped for a bare-codepoint roundtrip. Custom
+      workspace emoji (``:claude:`` etc.) don't match any standard alias,
+      so ``emojize`` leaves them untouched — Slack round-trips those as
+      literal text anyway.
     - HTML entities Slack HTML-encodes on storage: ``&amp;`` → ``&``,
       ``&lt;`` → ``<``, ``&gt;`` → ``>``.
 
@@ -102,4 +121,5 @@ def to_markdown(text: str) -> str:
     text = _SLACK_BOLD.sub(r'**\1**', text)
     text = _SLACK_ITALIC.sub(r'*\1*', text)
     text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    text = _VS_16.sub('', emoji.emojize(text, language='alias'))
     return text
