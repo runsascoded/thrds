@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 import urllib.request
 from urllib.error import HTTPError
@@ -17,6 +18,7 @@ from .linked import (
     build_summary_partition,
     render_summary_from_partition,
 )
+from .mrkdwn import to_markdown as _slack_to_md, to_slack as _md_to_slack
 from .refs import (
     PLACEHOLDER_URL,
     doc_has_refs,
@@ -116,7 +118,9 @@ class SlackClient:
         messages = [
             Message(
                 id=m["ts"],
-                content=m.get("text", ""),
+                # Convert Slack mrkdwn back to our local markdown form so pulled
+                # content is diff-clean against local docs. See `mrkdwn.py`.
+                content=_slack_to_md(m.get("text", "")),
                 # Slack bot_messages come back with `user: null` and `bot_id`
                 # set; human messages carry `user`. Match either so our own
                 # bot's posts are correctly marked editable.
@@ -137,9 +141,10 @@ class SlackClient:
             raise ValueError(
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
             )
+        wire = _md_to_slack(content)
         data: dict = {
             "channel": self.channel,
-            "text": content,
+            "text": wire,
             "unfurl_links": not self._suppress_unfurls,
             "unfurl_media": not self._suppress_unfurls,
         }
@@ -153,6 +158,8 @@ class SlackClient:
         if md is not None:
             data["metadata"] = md
         result = self._request("chat.postMessage", data)
+        # Return the ORIGINAL markdown as `content` — that's the local source
+        # of truth, and callers (state.py, tests) compare against it directly.
         return Message(id=result["ts"], content=content)
 
     def edit(self, message_id: str, content: str) -> Message:
@@ -160,10 +167,11 @@ class SlackClient:
             raise ValueError(
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
             )
+        wire = _md_to_slack(content)
         data: dict = {
             "channel": self.channel,
             "ts": message_id,
-            "text": content,
+            "text": wire,
             "unfurl_links": not self._suppress_unfurls,
             "unfurl_media": not self._suppress_unfurls,
         }
@@ -838,10 +846,14 @@ class SlackClient:
 
         ``author=None`` for messages we authored (matched via ``bot_ids``);
         else the username resolved from ``users.info``.
+
+        Runs ``to_markdown`` on the raw Slack text so pulled content is in the
+        same format the local doc uses — the roundtrip diff is a real content
+        diff rather than a format-mismatch diff.
         """
         user_id, bot_id = self.bot_ids
         ours = raw.get("user") == user_id or (bot_id is not None and raw.get("bot_id") == bot_id)
-        content = raw.get("text", "")
+        content = _slack_to_md(raw.get("text", ""))
         if ours:
             return DocMessage(content=content, author=None)
         return DocMessage(content=content, author=self._resolve_user_name(raw["user"]))
@@ -854,6 +866,42 @@ class SlackClient:
         }, method="GET")
         return [self._raw_to_doc_message(m) for m in result.get("messages", [])]
 
+    def _reverse_cross_refs(
+        self,
+        content: str,
+        channel: str,
+        thread_ts_by_slug: dict[str, str],
+    ) -> str:
+        """Rewrite `[text](permalink)` back to `[text](#slug)` for our own threads.
+
+        The push path resolved `[text](#slug)` → `[text](<slack-permalink>)`;
+        this reverses it so a `thrds pull --write` writes doc content the
+        `push` codepath can consume again as source. Without this, `pull`
+        would clobber every cross-ref with a permalink and a subsequent
+        push would send the URL literally (bypassing ref resolution).
+
+        Matches only permalinks in ``channel`` whose thread_ts is in our
+        slug map — foreign links, links to other channels, and links to
+        threads not tracked by this doc pass through unchanged.
+        """
+        if not thread_ts_by_slug:
+            return content
+        ts_to_slug = {ts: slug for slug, ts in thread_ts_by_slug.items()}
+        # `(permalink)` where the URL matches our workspace + channel and
+        # carries a `thread_ts=<ts>` we recognize.
+        cid = re.escape(channel)
+        # The `p<ts_no_dot>` fragment isn't reliable (Slack sometimes omits it
+        # in shorter permalinks), but `thread_ts=<ts>` is always present on
+        # thread-parent permalinks.
+        pattern = re.compile(rf'\((https?://[^)]*/archives/{cid}/[^)]*thread_ts=([\d.]+)[^)]*)\)')
+
+        def repl(m: re.Match) -> str:
+            ts = m.group(2)
+            slug = ts_to_slug.get(ts)
+            return f'(#{slug})' if slug else m.group(0)
+
+        return pattern.sub(repl, content)
+
     def _pull_doc(
         self,
         channel: str,
@@ -864,6 +912,9 @@ class SlackClient:
 
         Threads are returned in OP-ts numerical order (= channel post-order),
         which is stable regardless of how ``thread_ts_by_slug`` is iterated.
+
+        Applies ``_reverse_cross_refs`` on each message's content so pulled
+        text uses ``#slug`` refs (symmetric with local doc format).
         """
         prev_channel = self.channel
         self.channel = channel
@@ -873,16 +924,24 @@ class SlackClient:
                 msgs = self._pull_thread_docmessages(preamble_ts)
                 if msgs:
                     # Preamble has no replies; the OP is the only message.
-                    preamble = msgs[0].content
+                    preamble = self._reverse_cross_refs(
+                        msgs[0].content, channel, thread_ts_by_slug,
+                    )
 
             sorted_slugs = sorted(thread_ts_by_slug, key=lambda s: float(thread_ts_by_slug[s]))
-            threads = [
-                DocThread(
+            threads = []
+            for slug in sorted_slugs:
+                msgs = self._pull_thread_docmessages(thread_ts_by_slug[slug])
+                threads.append(DocThread(
                     slug=slug,
-                    messages=self._pull_thread_docmessages(thread_ts_by_slug[slug]),
-                )
-                for slug in sorted_slugs
-            ]
+                    messages=[
+                        DocMessage(
+                            content=self._reverse_cross_refs(m.content, channel, thread_ts_by_slug),
+                            author=m.author,
+                        )
+                        for m in msgs
+                    ],
+                ))
             return Doc(preamble=preamble, threads=threads)
         finally:
             self.channel = prev_channel

@@ -754,16 +754,17 @@ def test_cross_ref_phase2_posts_placeholder_phase3_edits_real_url(tmp_path, monk
 
     # Phase 2: 3 posts (no preamble in this doc):
     #   posted[0] = mfu OP,  posted[1] = mfu reply w/ placeholder,  posted[2] = prof OP.
+    # Post texts are in Slack mrkdwn (`<url|text>`) — the client converts on the wire.
     assert posted[0].text == "OP mfu."
-    assert posted[1].text == f"See the [profiling thread]({PLACEHOLDER_URL}) for methodology."
+    assert posted[1].text == f"See the <{PLACEHOLDER_URL}|profiling thread> for methodology."
     assert posted[2].text == "OP prof."
 
-    # Phase 3: only the ref-containing message is edited (real URL).
+    # Phase 3: only the ref-containing message is edited (real URL, also converted).
     ref_msg_ts = posted[1].ts
     prof_op_ts = posted[2].ts
     real_url = f"https://slack.example/{prof_op_ts}"
     assert [(e["ts"], e["text"]) for e in edited] == [
-        (ref_msg_ts, f"See the [profiling thread]({real_url}) for methodology."),
+        (ref_msg_ts, f"See the <{real_url}|profiling thread> for methodology."),
     ]
 
 
@@ -826,14 +827,14 @@ def test_preamble_with_cross_ref_resolves(tmp_path, monkeypatch):
 
     client.sync_doc_staging(doc, state, pace=0.0)
 
-    # Phase 2: preamble posted with placeholder.
-    assert posted[0].text == f"Read the [MFU thread]({PLACEHOLDER_URL}) first."
-    # Phase 3: preamble edited with real URL (mfu OP is posted[1]).
+    # Phase 2: preamble posted with placeholder (in Slack mrkdwn on the wire).
+    assert posted[0].text == f"Read the <{PLACEHOLDER_URL}|MFU thread> first."
+    # Phase 3: preamble edited with real URL.
     mfu_op_ts = posted[1].ts
     preamble_ts = posted[0].ts
     real_url = f"https://slack.example/{mfu_op_ts}"
     edit_preamble = next(e for e in edited if e["ts"] == preamble_ts)
-    assert edit_preamble["text"] == f"Read the [MFU thread]({real_url}) first."
+    assert edit_preamble["text"] == f"Read the <{real_url}|MFU thread> first."
 
 
 def test_message_too_long_after_placeholder_substitution_raises(tmp_path, monkeypatch):
@@ -868,10 +869,11 @@ def test_prod_cross_ref_resolves_via_permalink(tmp_path, monkeypatch):
 
     client.sync_doc_prod(doc, state, pace=0.0)
 
-    assert posted[0].text == f"See [b]({PLACEHOLDER_URL})."
+    # Slack mrkdwn on the wire (`<url|text>`).
+    assert posted[0].text == f"See <{PLACEHOLDER_URL}|b>."
     b_op_ts = posted[1].ts
     real_url = f"https://slack.example/{b_op_ts}"
     # Phase 3 edits the ref-containing msg with the real URL.
     assert [(e["ts"], e["text"]) for e in edited] == [
-        (posted[0].ts, f"See [b]({real_url})."),
+        (posted[0].ts, f"See <{real_url}|b>."),
     ]
