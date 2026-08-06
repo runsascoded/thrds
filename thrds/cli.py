@@ -108,6 +108,37 @@ def cli():
     pass
 
 
+def _do_gist_init(target: Path, state: SessionState, slug: str) -> str:
+    """Create gist, add remote, align local HEAD, commit + push state.json.
+
+    Shared between the fresh-init path and the resume path — either can leave
+    the session in the same "gist populated + state.json committed" end state.
+    Returns the new gist_id.
+    """
+    try:
+        gist_id, git_url = mirror.create_gist(
+            target,
+            description=f'thrds: {slug}',
+            files=[f'{slug}.md'],
+        )
+    except mirror.MirrorError as e:
+        raise click.UsageError(
+            f"gist creation failed:\n{e}\n\n"
+            "Re-run `thrds init` with `--no-gist` to skip the gist mirror."
+        )
+    mirror.add_remote(target, state.gist_remote, git_url)
+    mirror.align_to_remote(target, remote=state.gist_remote)
+    state.gist_id = gist_id
+    state.save(target)
+    mirror.commit_and_push(
+        target,
+        [str(STATE_PATH)],
+        f'thrds: init {slug} (gist {gist_id})',
+        remote=state.gist_remote,
+    )
+    return gist_id
+
+
 @cli.command()
 @click.option('-G', '--no-gist', is_flag=True, help='Skip gist creation; local git repo only.')
 @click.option('-p', '--prefix', help='Staging PC channel-name prefix override (else `THRDS_CHANNEL_PREFIX` env, else empty).')
@@ -117,16 +148,44 @@ def init(no_gist: bool, prefix: str | None, doc_path: str):
 
     Creates ``<git-root-or-cwd>/thrds/<slug>/`` (ghpr-style), copies or
     creates the doc there, `git init`s the session dir, and by default
-    creates a secret gist and adds it as the ``g`` remote. Refuses if the
-    target dir already exists.
+    creates a secret gist and adds it as the ``g`` remote.
+
+    Auto-resume: if the target dir already exists and holds a valid
+    ``thrds.json`` with ``gist_id: null``, finishes the gist-creation
+    step instead of refusing (recovers from an earlier init that failed
+    at the gist step — e.g. network hiccup, `gh` unauth'd).
     """
     doc_p = Path(doc_path)
     slug = doc_p.stem
     if not slug:
         raise click.UsageError(f"cannot derive a slug from DOC_PATH: {doc_path!r}")
     target = mirror.resolve_session_dir(Path.cwd(), slug)
+
     if target.exists():
-        raise click.UsageError(f"Target session dir already exists: {target}")
+        state_path = target / STATE_PATH
+        if not state_path.is_file():
+            raise click.UsageError(
+                f"Target dir exists but has no {STATE_PATH} — not a thrds session dir: {target}"
+            )
+        try:
+            existing = SessionState.load(target)
+        except Exception as e:
+            raise click.UsageError(f"Target session dir has an invalid {STATE_PATH}: {e}")
+        if existing.gist_id is not None:
+            raise click.UsageError(
+                f"Target session dir already fully initialized (gist_id={existing.gist_id}): {target}\n"
+                f"Use `thrds open` to browse, or delete the dir and re-run to reset."
+            )
+        if no_gist:
+            # gist_id=None + --no-gist = re-running the same intent; nothing to do.
+            raise click.UsageError(
+                f"Target session dir already exists (no-gist mode): {target}"
+            )
+        err(f"Resuming partial init at {target} (gist step)...")
+        gist_id = _do_gist_init(target, existing, slug)
+        err(f"Gist created: https://gist.github.com/{gist_id}")
+        return
+
     target.mkdir(parents=True)
 
     dest_md = target / f'{slug}.md'
@@ -138,37 +197,20 @@ def init(no_gist: bool, prefix: str | None, doc_path: str):
 
     state = SessionState.new(doc_path=f'{slug}.md', channel_prefix=prefix)
     mirror.init_repo(target)
+    # Save state.json BEFORE anything that can fail (gist creation, network,
+    # `gh` auth). If a subsequent step blows up, the target dir has a
+    # detectable "partial init" marker (state.json with gist_id=None) that
+    # a re-run of `thrds init` picks up as resumable.
+    state.save(target)
 
     if no_gist:
-        # Local-only path: commit doc + state.json under our own initial commit.
-        state.save(target)
         mirror.commit(target, [f'{slug}.md', str(STATE_PATH)], f'thrds: init {slug}')
     else:
         # Gist-mirrored path: create gist FIRST (it seeds an initial commit
-        # from the doc), align local HEAD to that commit, then add state.json
-        # as our fast-forward commit on top. This way local and gist share the
-        # same history from commit 1.
-        try:
-            gist_id, git_url = mirror.create_gist(
-                target,
-                description=f'thrds: {slug}',
-                files=[f'{slug}.md'],
-            )
-        except mirror.MirrorError as e:
-            raise click.UsageError(
-                f"gist creation failed:\n{e}\n\n"
-                "Re-run `thrds init` with `--no-gist` to skip the gist mirror."
-            )
-        mirror.add_remote(target, state.gist_remote, git_url)
-        mirror.align_to_remote(target, remote=state.gist_remote)
-        state.gist_id = gist_id
-        state.save(target)
-        mirror.commit_and_push(
-            target,
-            [str(STATE_PATH)],
-            f'thrds: init {slug} (gist {gist_id})',
-            remote=state.gist_remote,
-        )
+        # from the doc), align local HEAD to that commit, then re-save
+        # state.json (now with gist_id) as our fast-forward commit on top.
+        # This way local and gist share the same history from commit 1.
+        _do_gist_init(target, state, slug)
 
     err(f"Initialized session {state.session_id} at {target}")
     err(f"Staging PC name (on first push): {state.staging_channel_name()}")

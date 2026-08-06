@@ -186,13 +186,85 @@ def test_init_records_prefix_override(in_tmp):
     assert state.channel_prefix == 'rw-'
 
 
-def test_init_refuses_when_target_dir_exists(in_tmp):
+def test_init_refuses_second_run_with_no_gist(in_tmp):
+    """Second `--no-gist` init on the same target: nothing to do; clean refusal."""
     _write_doc(in_tmp)
     CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
     result = CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        f"Error: Target session dir already exists: {in_tmp / 'thrds' / 'trainium'}"
+        f"Error: Target session dir already exists (no-gist mode): {in_tmp / 'thrds' / 'trainium'}"
+    )
+
+
+def test_init_resumes_partial_when_gist_id_null_and_gist_flag_set(in_tmp, monkeypatch):
+    """After a --no-gist init, running `thrds init` (without --no-gist) resumes the gist step.
+
+    (Simulates the real recovery flow: user's earlier init failed at gist
+    creation, leaving state.json with gist_id=None; a re-run picks up.)
+    """
+    _write_doc(in_tmp)
+    # First init: no gist, leaves state.json with gist_id=None.
+    r1 = CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    assert r1.exit_code == 0, (r1.output, r1.stderr)
+    session = in_tmp / 'thrds' / 'trainium'
+    assert SessionState.load(session).gist_id is None
+
+    # Mock the mirror module boundary so the resumed gist step succeeds
+    # without touching real `gh` or network.
+    from thrds import mirror as mirror_mod
+    calls: list[str] = []
+    monkeypatch.setattr(mirror_mod, 'create_gist',
+                        lambda session_dir, description, files: ('resumed_gist', 'git@gist.github.com:resumed_gist.git'))
+    monkeypatch.setattr(mirror_mod, 'align_to_remote',
+                        lambda session_dir, remote='g', branch='main': calls.append('align'))
+    monkeypatch.setattr(mirror_mod, 'push',
+                        lambda session_dir, remote='g', branch='main': calls.append('push'))
+
+    # Second init: no --no-gist → auto-resumes the gist step.
+    r2 = CliRunner().invoke(cli, ['init', 'trainium.md'])
+    assert r2.exit_code == 0, (r2.output, r2.stderr)
+    assert r2.stderr.splitlines()[0].startswith('Resuming partial init at ')
+
+    # gist_id now recorded; `g` remote configured.
+    assert SessionState.load(session).gist_id == 'resumed_gist'
+    remote_url = subprocess.run(
+        ['git', 'remote', 'get-url', 'g'],
+        cwd=session, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert remote_url == 'git@gist.github.com:resumed_gist.git'
+    # align_to_remote and push both ran.
+    assert calls == ['align', 'push']
+
+
+def test_init_refuses_when_already_fully_initialized(in_tmp, monkeypatch):
+    """Second `thrds init` on a session that already has gist_id → refuses cleanly."""
+    _write_doc(in_tmp)
+    # First init with mocked gist so it fully succeeds.
+    from thrds import mirror as mirror_mod
+    monkeypatch.setattr(mirror_mod, 'create_gist',
+                        lambda session_dir, description, files: ('fully_done', 'git@gist.github.com:fully_done.git'))
+    monkeypatch.setattr(mirror_mod, 'align_to_remote', lambda *a, **k: None)
+    monkeypatch.setattr(mirror_mod, 'push', lambda *a, **k: None)
+    r1 = CliRunner().invoke(cli, ['init', 'trainium.md'])
+    assert r1.exit_code == 0
+
+    r2 = CliRunner().invoke(cli, ['init', 'trainium.md'])
+    assert r2.exit_code == 2
+    session = in_tmp / 'thrds' / 'trainium'
+    assert r2.stderr.splitlines()[-2] == (
+        f"Error: Target session dir already fully initialized (gist_id=fully_done): {session}"
+    )
+
+
+def test_init_refuses_when_target_dir_exists_without_state_json(in_tmp):
+    """Existing target dir without a thrds.json — refuse (not our dir)."""
+    _write_doc(in_tmp)
+    (in_tmp / 'thrds' / 'trainium').mkdir(parents=True)
+    result = CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        f"Error: Target dir exists but has no thrds.json — not a thrds session dir: {in_tmp / 'thrds' / 'trainium'}"
     )
 
 
