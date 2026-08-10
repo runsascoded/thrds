@@ -1,0 +1,11 @@
+# thrds - multi-thread Slack post drafting (https://github.com/runsascoded/thrds)
+# Sample rc file; source from your dotfiles (or via `~/.private/.thrds-rc`).
+
+# `open`: browse a session's gist / staging PC / prod channel
+alias thrdso='thrds open'            # gist (default)
+alias thrdsos='thrds open -s'        # staging PC
+alias thrdsop='thrds open -p'        # prod channel
+
+# `list-sessions` / `recover`: long command names + likely-repeated flags
+alias thrdsls='thrds list-sessions'  # what sessions exist in a channel
+alias thrdsr='thrds recover'         # rebuild state from Slack metadata
