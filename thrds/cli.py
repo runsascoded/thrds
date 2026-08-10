@@ -8,10 +8,24 @@ project's git). A secret gist created at init becomes the ``g`` remote;
 state-mutating verbs (`push`, `pull --write`, `archive`) auto-commit +
 push, so the mirror always reflects the current session state.
 
-Slack access requires ``SLACK_THRDS_USER_TOKEN`` (a user-scoped ``xoxp-``
-token with ``chat:write`` + ``groups:write`` — see the spec for why user
-scope is load-bearing). Read commands (``pull``, ``diff``) also require
-``users:read`` for foreign-author resolution.
+Slack access requires ``SLACK_THRDS_USER_TOKEN`` — a **user-scoped**
+``xoxp-`` token (see `multi-thread-posts-and-capture.md` for why user
+scope is load-bearing: `chat.update` only edits messages authored by
+the token's owner, so a bot token can't edit human-typed drafts).
+
+Required scopes (add all in the Slack app's OAuth & Permissions →
+User Token Scopes):
+
+- ``chat:write`` — post + edit messages
+- ``groups:write`` — create + archive staging private channels
+- ``groups:read`` — read private channel history + resolve names to IDs
+- ``channels:read`` — resolve public channel names to IDs (only if you
+  push/pull to public channels)
+- ``users:read`` — resolve foreign-author names on ``pull``
+- ``emoji:read`` — download custom workspace emoji on ``pull``
+
+Metadata visibility is app-scoped (Slack only returns your app's
+metadata to your app); no extra scope required for ``recover``.
 """
 from __future__ import annotations
 

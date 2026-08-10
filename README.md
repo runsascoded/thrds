@@ -117,6 +117,38 @@ Foreign (non-editable) messages — e.g. human replies in a bot thread — are a
 - **Bot token prefix**: Discord `Bot ` prefix auto-prepended
 - **Metadata support**: Slack message metadata passthrough
 
+## CLI
+
+`thrds` also ships a CLI for drafting multi-thread Slack posts locally + syncing them to a staging private channel + promoting to a real prod channel. One session per `.md` file lives in `<git-root-or-cwd>/thrds/<slug>/` with its own private git repo and (default) a secret gist mirror for version history.
+
+```bash
+thrds init draft.md              # scaffold session dir + gist mirror
+thrds push                       # sync to staging PC (terraform)
+thrds pull --write               # pull edits back → .md
+thrds push --prod --channel #foo # sync to prod (additive)
+thrds diff --prod --channel #foo # see what would change
+thrds archive                    # archive the staging PC
+thrds list-sessions #foo         # what thrds sessions exist in #foo
+thrds recover -i <sid> #foo      # rebuild a lost session from Slack metadata
+```
+
+### Slack app scopes
+
+The CLI needs a **user token** (`xoxp-`, exposed as `SLACK_THRDS_USER_TOKEN`) — `chat.update` only edits messages authored by the token's owner, so a bot token can't edit human-typed drafts, which is the whole point.
+
+Add these under **OAuth & Permissions → User Token Scopes**:
+
+| Scope | Needed for |
+| --- | --- |
+| `chat:write` | Post + edit messages (all sync verbs) |
+| `groups:write` | Create + archive staging private channels (`init`, `push`, `archive`) |
+| `groups:read` | Read private channel history + resolve `#name` → `C…` for private channels |
+| `channels:read` | Resolve `#name` → `C…` for public channels (only if pushing/pulling public) |
+| `users:read` | Resolve foreign-author names on `pull` |
+| `emoji:read` | Download custom workspace emoji on `pull` |
+
+Metadata visibility is app-scoped (Slack only returns your app's metadata to your app), so `recover` needs **no** additional scope beyond the ones above.
+
 ## Used by
 
 - [hudcostreets/nj-crashes] — Slack crash-notification threads (`SlackClient.sync()`)
