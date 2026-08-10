@@ -16,6 +16,7 @@ scope is load-bearing). Read commands (``pull``, ``diff``) also require
 from __future__ import annotations
 
 import os
+import time
 import webbrowser
 from pathlib import Path
 
@@ -24,7 +25,7 @@ import click
 from . import mirror
 from .doc import Doc
 from .md import diff_docs, parse_doc, serialize_doc
-from .slack import SlackClient
+from .slack import ScanCapReached, SlackClient
 from .state import STATE_PATH, SessionState
 
 
@@ -383,11 +384,20 @@ def open_(prod: bool, staging: bool, no_open: bool):
 
 
 @cli.command()
+@click.option('-d', '--oldest-days', type=float, help='Only scan messages posted in the last N days (default: unbounded).')
 @click.option('-i', '--session-id', help='Session ID to recover (required if channel holds >1 session).')
+@click.option('-m', '--max-pages', type=int, default=50, show_default=True, help='Safety cap on `conversations.history` pages fetched (200 msgs/page). Pass 0 to disable.')
 @click.option('-s', '--staging', is_flag=True, help='Route recovered pointers to staging_threads (default: prod_threads[channel]).')
 @click.option('-W', '--no-write-doc', is_flag=True, help='Skip the doc-pull step; write thrds.json only.')
 @click.argument('channel')
-def recover(session_id: str | None, staging: bool, no_write_doc: bool, channel: str):
+def recover(
+    oldest_days: float | None,
+    session_id: str | None,
+    max_pages: int,
+    staging: bool,
+    no_write_doc: bool,
+    channel: str,
+):
     """Rebuild `thrds.json` (and DOC.md) from Slack metadata in CHANNEL.
 
     Every ``thrds`` post carries ``event_type='thrds'`` metadata (session_id,
@@ -401,6 +411,10 @@ def recover(session_id: str | None, staging: bool, no_write_doc: bool, channel: 
     Bare invocation lists sessions found in the channel and exits (code 2)
     if there's more than one — pass ``-i/--session-id`` to pick one; a
     single-session channel auto-selects.
+
+    Scan cost: Slack does not index message metadata, so scanning is the
+    only path. Default cap is 50 pages (10k messages). For busy channels,
+    narrow with ``-d/--oldest-days N`` — the cheapest lever.
     """
     session_dir = Path.cwd()
     if (session_dir / STATE_PATH).is_file():
@@ -409,7 +423,23 @@ def recover(session_id: str | None, staging: bool, no_write_doc: bool, channel: 
             'cd into a fresh session dir before running `thrds recover`.'
         )
     client = _make_slack_client()
-    sessions = client.scan_thrds_metadata(channel)
+    oldest_ts = time.time() - oldest_days * 86400 if oldest_days is not None else None
+    total_msgs = 0
+
+    def on_page(page_num: int, msg_count: int) -> None:
+        nonlocal total_msgs
+        total_msgs += msg_count
+        err(f'  scan page {page_num}: {msg_count} msgs (total {total_msgs})')
+
+    try:
+        sessions = client.scan_thrds_metadata(
+            channel,
+            oldest=oldest_ts,
+            max_pages=max_pages if max_pages > 0 else None,
+            on_page=on_page,
+        )
+    except ScanCapReached as e:
+        raise click.UsageError(str(e))
     if not sessions:
         raise click.UsageError(
             f'No thrds-metadata messages found in {channel}. '

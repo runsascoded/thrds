@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from thrds import RecoveredSession
+from thrds import RecoveredSession, ScanCapReached
 from thrds.slack import SlackClient, THRDS_METADATA_EVENT_TYPE
 
 
@@ -233,3 +233,62 @@ def test_scan_requests_include_all_metadata_flag():
     assert data['channel'] == 'C_TARGET'
     assert data['include_all_metadata'] is True
     assert data['limit'] == 200
+
+
+# --- scan bounds ---
+
+def test_scan_forwards_oldest_to_slack_when_given():
+    """`oldest=<ts>` becomes `oldest` in the request; omitted when None."""
+    client = _FakeSlackClient(_single_page([]))
+    client.scan_thrds_metadata('C1', oldest=1_700_000_000.0)
+    assert client.calls[0][1]['oldest'] == 1_700_000_000.0
+
+
+def test_scan_omits_oldest_when_not_given():
+    client = _FakeSlackClient(_single_page([]))
+    client.scan_thrds_metadata('C1')
+    assert 'oldest' not in client.calls[0][1]
+
+
+def test_scan_max_pages_raises_scan_cap_reached():
+    """`max_pages=2` on a 3-page channel → raises `ScanCapReached`."""
+    # Always claims has_more with a fresh cursor → would loop forever without a cap.
+    def handler(data):
+        return {
+            'messages': [_msg('1.001', kind='op', thread_slug='a')],
+            'has_more': True,
+            'response_metadata': {'next_cursor': f'C_{data.get("cursor", "start")}'},
+        }
+
+    client = _FakeSlackClient(handler)
+    with pytest.raises(ScanCapReached, match=r'hit --max-pages=2'):
+        client.scan_thrds_metadata('C1', max_pages=2)
+
+
+def test_scan_max_pages_none_disables_cap_and_terminates_normally():
+    """`max_pages=None` explicitly disables the cap; scan still terminates via has_more."""
+    client = _FakeSlackClient(_single_page([_msg('1.001', kind='op', thread_slug='a')]))
+    result = client.scan_thrds_metadata('C1', max_pages=None)
+    assert list(result['s-1'].thread_ts_by_slug) == ['a']
+
+
+def test_scan_on_page_callback_receives_page_number_and_count():
+    """`on_page(page_num, msg_count)` called once per page fetch, 1-indexed."""
+    pages = [
+        {'messages': [_msg('1.001', kind='op', thread_slug='a'),
+                      _msg('1.002', kind='op', thread_slug='b')],
+         'has_more': True, 'response_metadata': {'next_cursor': 'C1'}},
+        {'messages': [_msg('1.003', kind='op', thread_slug='c')],
+         'has_more': False},
+    ]
+    idx = [0]
+
+    def handler(data):
+        page = pages[idx[0]]
+        idx[0] += 1
+        return page
+
+    observed: list[tuple[int, int]] = []
+    client = _FakeSlackClient(handler)
+    client.scan_thrds_metadata('C1', on_page=lambda n, c: observed.append((n, c)))
+    assert observed == [(1, 2), (2, 1)]

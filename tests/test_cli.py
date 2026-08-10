@@ -37,9 +37,10 @@ class SlackSpy:
         self.push_calls = []
         self.pull_calls = []
         self.archive_calls = []
-        self.scan_calls: list[str] = []
+        self.scan_calls: list[dict] = []
         self.pull_returns = None
-        self.scan_returns: dict[str, RecoveredSession] | None = None
+        # Either a scripted result dict, or an Exception instance to raise.
+        self.scan_returns: dict[str, RecoveredSession] | Exception | None = None
         self.sync_returns_channel = "C_STAGING"
 
     def _sync_result(self, channel: str) -> DocSyncResult:
@@ -83,9 +84,21 @@ class SlackSpy:
     def archive_channel(self, channel: str):
         self.archive_calls.append(channel)
 
-    def scan_thrds_metadata(self, channel: str) -> dict[str, RecoveredSession]:
-        """Scriptable via `scan_returns`; defaults to {} (no sessions found)."""
-        self.scan_calls.append(channel)
+    def scan_thrds_metadata(self, channel: str, oldest=None, max_pages=None, on_page=None):
+        """Scriptable via `scan_returns`; defaults to {} (no sessions found).
+
+        Records the full call (channel + scan bounds) so tests can assert
+        `--oldest-days` / `--max-pages` are forwarded correctly."""
+        self.scan_calls.append({
+            'channel': channel,
+            'oldest': oldest,
+            'max_pages': max_pages,
+        })
+        if isinstance(self.scan_returns, Exception):
+            raise self.scan_returns
+        if on_page is not None:
+            # Simulate a single-page response so progress-log tests can observe it.
+            on_page(1, sum(1 + len(s.thread_ts_by_slug) for s in (self.scan_returns or {}).values()))
         return self.scan_returns or {}
 
     def _request(self, api_method, data, **_kw):
@@ -827,3 +840,97 @@ def test_recover_preserves_session_id_from_metadata(in_tmp, monkeypatch):
     result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert SessionState.load().session_id == 'a-specific-uuid'
+
+
+# --- recover: scan caps ---
+
+def test_recover_oldest_days_forwards_unix_ts_to_scan(in_tmp, monkeypatch):
+    """`-d 7` translates to `oldest=<now - 7*86400>` on the underlying scan call."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered()}
+        s.pull_returns = Doc()
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    # Freeze time so the derived `oldest` is deterministic.
+    monkeypatch.setattr('thrds.cli.time.time', lambda: 1_000_000.0)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', '-d', '7', 'C_PROD'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert captured[-1].scan_calls == [{
+        'channel': 'C_PROD',
+        'oldest': 1_000_000.0 - 7 * 86400,
+        'max_pages': 50,   # default
+    }]
+
+
+def test_recover_default_max_pages_is_50(in_tmp, monkeypatch):
+    """Default cap is 50 pages; forwarded to scan verbatim."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered()}
+        s.pull_returns = Doc()
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    assert captured[-1].scan_calls[-1]['max_pages'] == 50
+
+
+def test_recover_max_pages_zero_disables_cap(in_tmp, monkeypatch):
+    """`-m 0` translates to `max_pages=None` (uncapped)."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered()}
+        s.pull_returns = Doc()
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    CliRunner().invoke(cli, ['recover', '-m', '0', 'C_PROD'])
+    assert captured[-1].scan_calls[-1]['max_pages'] is None
+
+
+def test_recover_translates_scan_cap_reached_to_usage_error(in_tmp, monkeypatch):
+    """Scan raising `ScanCapReached` surfaces as a UsageError (exit 2) with the msg."""
+    from thrds import ScanCapReached
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = ScanCapReached('hit --max-pages=50 on channel C_PROD; ...')
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    assert result.exit_code == 2
+    assert 'hit --max-pages=50 on channel C_PROD' in result.stderr
+
+
+def test_recover_progress_log_emits_per_page(in_tmp, monkeypatch):
+    """`on_page` callback drives a `scan page N: M msgs (total T)` line on stderr."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered(threads={'a': '1.0', 'b': '1.1'})}
+        s.pull_returns = Doc()
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # SlackSpy.scan_thrds_metadata simulates a single page whose msg count
+    # is `preamble + threads = 1 + 2 = 3` for this scripted RecoveredSession.
+    scan_lines = [l for l in result.stderr.splitlines() if 'scan page' in l]
+    assert scan_lines == ['  scan page 1: 3 msgs (total 3)']

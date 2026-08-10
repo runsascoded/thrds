@@ -40,6 +40,13 @@ THRDS_METADATA_EVENT_TYPE = 'thrds'
 SLACK_MESSAGE_LIMIT = 4000
 
 
+class ScanCapReached(RuntimeError):
+    """Raised by ``scan_thrds_metadata`` when ``max_pages`` is exhausted
+    before ``has_more`` clears. Signals the caller to widen the window or
+    narrow the time bound; distinct from `RuntimeError` so it can be caught
+    without swallowing real failures."""
+
+
 @dataclass
 class RecoveredSession:
     """A thrds session discovered in a channel via metadata scan (``recover`` verb).
@@ -972,7 +979,13 @@ class SlackClient:
         finally:
             self.channel = prev_channel
 
-    def scan_thrds_metadata(self, channel: str) -> dict[str, RecoveredSession]:
+    def scan_thrds_metadata(
+        self,
+        channel: str,
+        oldest: float | None = None,
+        max_pages: int | None = None,
+        on_page: 'callable | None' = None,
+    ) -> dict[str, RecoveredSession]:
         """Scan ``channel``'s history for messages carrying thrds metadata.
 
         Backs the ``thrds recover`` verb: every ``chat.postMessage`` /
@@ -999,20 +1012,46 @@ class SlackClient:
         Raises `ValueError` on metadata-shape inconsistency (two messages
         with the same session_id disagreeing on ``doc_slug``) — treat that
         as corruption, don't silently pick a side.
+
+        Args:
+            oldest: unix timestamp; if given, forwarded to Slack as
+                ``oldest=<ts>`` so scan stops at that lower bound. Cheapest
+                way to bound the scan when the user knows a rough post date.
+            max_pages: safety cap on pages fetched. If reached before
+                ``has_more`` clears, raise `ScanCapReached` — the caller
+                decides whether to retry with a smaller window or a higher
+                cap. Metadata (like ``search:messages``) is not indexable,
+                so this is the only backstop against runaway scans on busy
+                channels.
+            on_page: called with ``(page_num, msg_count)`` after each page
+                fetch — for progress-log hooks. `page_num` is 1-based.
         """
         # session_id -> mutable working dict; assembled into RecoveredSession at the end
         partial: dict[str, dict] = {}
         cursor: str | None = None
+        page_num = 0
         while True:
+            page_num += 1
+            if max_pages is not None and page_num > max_pages:
+                raise ScanCapReached(
+                    f'scan_thrds_metadata: hit --max-pages={max_pages} on channel '
+                    f'{channel}; scanned ~{max_pages * 200} messages without exhausting history. '
+                    'Pass a larger --max-pages, or narrow with --oldest.'
+                )
             params: dict = {
                 'channel': channel,
                 'limit': 200,
                 'include_all_metadata': True,
             }
+            if oldest is not None:
+                params['oldest'] = oldest
             if cursor:
                 params['cursor'] = cursor
             result = self._request('conversations.history', params)
-            for msg in result.get('messages', []):
+            msgs = result.get('messages', [])
+            if on_page is not None:
+                on_page(page_num, len(msgs))
+            for msg in msgs:
                 md = msg.get('metadata') or {}
                 if md.get('event_type') != THRDS_METADATA_EVENT_TYPE:
                     continue

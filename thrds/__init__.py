@@ -3,7 +3,7 @@ from .discord import DiscordClient
 from .doc import Doc, DocMessage, DocSyncResult, DocThread, Frontmatter
 from .linked import LinkedSyncResult, LinkedThread, Section
 from .protocol import ThreadClient
-from .slack import RecoveredSession, SlackClient
+from .slack import RecoveredSession, ScanCapReached, SlackClient
 from .state import SessionState
 
 __all__ = [
@@ -21,6 +21,7 @@ __all__ = [
     "Message",
     "OrphanedRepliesError",
     "RecoveredSession",
+    "ScanCapReached",
     "Section",
     "SessionState",
     "SlackClient",
