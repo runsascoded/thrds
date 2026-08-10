@@ -1,6 +1,26 @@
 # Spec: multi-thread posts, a markdown format, and draft/sent capture
 
-**Status:** in-progress. Motivated by a 2026-07-31 Trainium status update to an AWS PM, which took five drafts plus a structural rewrite and ended up as **four top-level Slack messages, each with its own reply thread, cross-linked**. Nothing in `thrds` expressed that shape, and the whole draft→sent capture loop was done by hand from screenshots.
+**Status:** done (all phases + follow-ups landed as of 2026-08-10). Motivated by a 2026-07-31 Trainium status update to an AWS PM, which took five drafts plus a structural rewrite and ended up as **four top-level Slack messages, each with its own reply thread, cross-linked**. Nothing in `thrds` expressed that shape, and the whole draft→sent capture loop was done by hand from screenshots.
+
+## Final state (post-2026-08-10)
+
+Everything in "Implementation status (2026-08-05)" below plus:
+
+- **`.thrds/state.json` became `thrds.json`** (flat file at session root) — GitHub gists reject directories.
+- **Markdown ↔ Slack mrkdwn conversion** (`thrds/mrkdwn.py`) — `[text](url)` ↔ `<url|text>`, `**bold**` ↔ `*bold*`, `*italic*` ↔ `_italic_`, with word-boundary guards for identifiers (`thread_ts` not eaten by italic regex).
+- **Standard + custom emoji** roundtrip (`emoji` lib for standard; `emoji.list` API + `emoji:read` scope for custom workspace emoji; images inlined as `![:name:](emoji-name.png)` in pulled `.md`).
+- **`thrds init` resume** — half-initialized session dir (state.json with `gist_id=None`) auto-detected and completed on re-run.
+- **`thrds open`** — browse gist / staging PC / prod channel in browser.
+- **`thrds recover`** — `specs/done/recover-verb.md`. Rebuild `thrds.json` + doc from Slack metadata trail. Scan caps (`-d/-D/-m`) and cursor resume (`-c`) included.
+- **`thrds list-sessions`** — read-only session inventory in a channel.
+- **Channel-name resolution** — `#name` / bare `name` accepted anywhere a channel is; passthrough for uppercase-first (Slack IDs).
+- **`.thrds-rc`** — sample shell-alias file (`specs/done/thrds-rc-aliases.md`).
+
+Two Slack Web API encoding quirks discovered along the way + documented in code:
+1. `conversations.history` requires `oldest`/`latest` as strings with ≥7 decimal places (JSON float or `.6f` silently returns 0 msgs).
+2. `conversations.list` requires GET/urlencoded — JSON POST silently ignores the `types` param (returns only public channels).
+
+Live-verified end-to-end: byte-identical recovery of the trainium session (`C0BNK26CASV` staging PC).
 
 ## Implementation status (2026-08-05)
 
