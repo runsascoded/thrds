@@ -1,4 +1,4 @@
-from .core import Action, ActionType, EditRateLimited, Message, Msg, OrphanedRepliesError, SyncOptions, SyncResult, Thread, sync
+from .core import Action, ActionType, EditRateLimited, Message, Msg, OrphanedRepliesError, SenderChangeForbidden, SenderChangePolicy, SyncOptions, SyncResult, Thread, sync
 from .discord import DiscordClient
 from .doc import Doc, DocMessage, DocSyncResult, DocThread, Frontmatter
 from .linked import LinkedSyncResult, LinkedThread, Section
@@ -24,6 +24,8 @@ __all__ = [
     "RecoveredSession",
     "ScanCapReached",
     "Section",
+    "SenderChangeForbidden",
+    "SenderChangePolicy",
     "SessionState",
     "SlackClient",
     "SyncOptions",

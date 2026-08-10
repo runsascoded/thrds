@@ -14,6 +14,24 @@ class EditRateLimited(Exception):
     """Raised when an edit is rate-limited (e.g. Discord code 30046)."""
 
 
+class SenderChangeForbidden(Exception):
+    """Raised when `sync` detects a sender mismatch it can't reconcile.
+
+    Fires when:
+    - `SyncOptions.sender_change` is None (default; strict) and any `Msg`
+      whose content matches an existing message has a different resolved
+      sender than the live message.
+    - A `SenderChangePolicy` is set but a hard rule fails: target is the
+      OP (`thread_ts` change breaks state / permalinks), or a foreign
+      message sits between the change target and thread-end (cascade
+      would reorder past a msg we can't delete).
+    - A policy gate fails: `len(cascade) > policy.max_reposts`, or any
+      cascade member has reactions and `policy.lose_reactions_ok=False`.
+
+    Message on the exception names which rule fired + which msgs.
+    """
+
+
 class OrphanedRepliesError(Exception):
     """Raised when attempting to delete a message that has thread replies."""
 
@@ -114,6 +132,134 @@ def _post_kwargs(entry: str | Msg) -> dict:
     return {}
 
 
+def _resolve_sender(
+    msg: Msg,
+    client_username: str | None,
+    client_icon_url: str | None,
+    client_icon_emoji: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve (username, icon_url, icon_emoji) as they'd appear on POST.
+
+    Mirrors `SlackClient.post()`'s resolution — msg-level username is a
+    simple override; icon is treated as a unit (msg icon fully replaces
+    client icon; within either source, url beats emoji if both set).
+    Returns a normalized triple where at most one of icon_url/icon_emoji
+    is non-None. Used by `sync` to compare desired vs live sender.
+    """
+    username = msg.username if msg.username is not None else client_username
+    if msg.icon_url is not None or msg.icon_emoji is not None:
+        icon_url = msg.icon_url
+        icon_emoji = None if msg.icon_url is not None else msg.icon_emoji
+    elif client_icon_url is not None or client_icon_emoji is not None:
+        icon_url = client_icon_url
+        icon_emoji = None if client_icon_url is not None else client_icon_emoji
+    else:
+        icon_url = None
+        icon_emoji = None
+    return username, icon_url, icon_emoji
+
+
+def _enforce_sender_change_policy(
+    target_index: int,
+    editable_existing: 'list[Message]',
+    all_existing: 'list[Message]',
+    policy: 'SenderChangePolicy | None',
+    client,
+) -> None:
+    """Raise `SenderChangeForbidden` if any rule blocks a sender-change cascade
+    starting at ``target_index`` (index into the editable-only ``existing`` list).
+
+    Hard rules (not gated):
+    - ``target_index == 0`` → target is OP → forbidden (thread_ts change breaks state).
+    - Any foreign message sits AFTER the target's live ts → forbidden (order hazard).
+
+    Policy gates (require an opted-in policy):
+    - ``policy is None`` → any sender mismatch is forbidden.
+    - Cascade length (= number of ours-msgs from target to end) > ``policy.max_reposts``.
+    - Any cascade member has reactions and not ``policy.lose_reactions_ok``.
+    """
+    target = editable_existing[target_index]
+    if target_index == 0:
+        raise SenderChangeForbidden(
+            f"sender change on OP (index 0, msg {target.id}) is always forbidden: "
+            "delete+repost of the OP changes thread_ts, invalidating state.json / "
+            "cross-refs / permalinks. Create a new thread instead."
+        )
+    if policy is None:
+        raise SenderChangeForbidden(
+            f"sender mismatch on msg {target.id} (index {target_index}); "
+            "no `SyncOptions.sender_change` policy set — pass a `SenderChangePolicy` "
+            "to opt in to delete+repost."
+        )
+    # Foreign-after-target check: walk `all_existing` (which includes foreign
+    # msgs); any foreign msg with a later ts than the target is a hard-abort.
+    target_id = target.id
+    saw_target = False
+    for m in all_existing:
+        if m.id == target_id:
+            saw_target = True
+            continue
+        if saw_target and not m.editable:
+            raise SenderChangeForbidden(
+                f"sender change on msg {target_id} would require reordering past "
+                f"foreign msg {m.id} (index would move to end of thread). "
+                "Foreign msgs can't be deleted, so order can't be preserved. "
+                "Hard-forbidden."
+            )
+    # Cascade: from target to end of editable_existing.
+    cascade = editable_existing[target_index:]
+    if len(cascade) > policy.max_reposts:
+        raise SenderChangeForbidden(
+            f"sender-change cascade at index {target_index} would touch "
+            f"{len(cascade)} msgs, exceeding policy.max_reposts={policy.max_reposts}. "
+            "Raise the cap or narrow the change."
+        )
+    if not policy.lose_reactions_ok:
+        # Pre-flight: reactions.get on each cascade member. Skip silently if
+        # the client doesn't expose `get_reactions` (non-Slack clients).
+        get_reactions = getattr(client, 'get_reactions', None)
+        if get_reactions is not None:
+            with_reactions = [m.id for m in cascade if get_reactions(m.id)]
+            if with_reactions:
+                raise SenderChangeForbidden(
+                    f"sender-change cascade would delete msgs with reactions: "
+                    f"{with_reactions}. Pass `lose_reactions_ok=True` on the policy "
+                    "to proceed anyway."
+                )
+
+
+def _sender_mismatch(desired: Msg, live: Message, client) -> bool:
+    """Return True iff desired's resolved sender differs from live's stored sender.
+
+    Consults ``client.username`` / ``client.icon_url`` / ``client.icon_emoji``
+    for the resolution fallback (all optional; missing attrs treated as None).
+
+    Returns False (no cascade) in two "can't verify" cases:
+    - All live sender fields are None — the client's `list_messages`
+      didn't populate them (Discord/Bluesky).
+    - Desired resolves to `icon_emoji` (with no `icon_url`) — Slack's
+      `conversations.replies` doesn't preserve emoji-vs-URL on read
+      (emojis are rendered to URLs server-side), so we can't verify.
+      Users with icon_emoji overrides don't get auto-cascade; document
+      as a v1 limitation.
+    """
+    if live.sender_username is None and live.sender_icon_url is None and live.sender_icon_emoji is None:
+        return False
+    d_user, d_url, d_emoji = _resolve_sender(
+        desired,
+        getattr(client, 'username', None),
+        getattr(client, 'icon_url', None),
+        getattr(client, 'icon_emoji', None),
+    )
+    if d_user != live.sender_username:
+        return True
+    # Icon check: compare url form only. If desired resolved to icon_emoji
+    # (d_url is None but d_emoji is set), skip icon check — unverifiable.
+    if d_url is None and d_emoji is not None:
+        return False
+    return d_url != live.sender_icon_url
+
+
 @dataclass
 class Thread:
     """Desired state of a thread.
@@ -134,10 +280,20 @@ class Message:
     (typically because they were authored by another user/bot). Such
     messages are preserved in place — never included in the `sync()`
     reconcile, never counted against the desired message slots.
+
+    Sender fields default to ``None`` = "unknown / not populated by this
+    client". `SlackClient.list_messages` populates them from the returned
+    message dict; Discord + Bluesky leave them `None`. When populated,
+    ``sync`` compares against the desired `Msg`'s resolved sender at the
+    SKIP path to drive `SenderChangePolicy` (see the aggressive-mode
+    section in ``specs/per-message-sender.md``).
     """
     id: str
     content: str
     editable: bool = True
+    sender_username: str | None = None
+    sender_icon_url: str | None = None
+    sender_icon_emoji: str | None = None
 
 
 @dataclass
@@ -160,6 +316,20 @@ class SyncResult:
 
 
 @dataclass
+class SenderChangePolicy:
+    """Opt-in policy for delete+repost of existing replies whose live
+    sender differs from the desired `Msg`. Attach to `SyncOptions.sender_change`
+    to enable; default `None` means strict (any sender mismatch raises).
+
+    Never gated (hard rules): OP sender change is always forbidden
+    (`thread_ts` invariant); a cascade cannot cross a foreign reply
+    (ordering hazard). See ``specs/per-message-sender.md``.
+    """
+    max_reposts: int = 3
+    lose_reactions_ok: bool = False
+
+
+@dataclass
 class SyncOptions:
     suppress_embeds: bool = False
     suppress_unfurls: bool = True
@@ -167,6 +337,7 @@ class SyncOptions:
     thread_name: str | None = None
     pace: float = 0.0
     jitter: float = 0.0
+    sender_change: SenderChangePolicy | None = None
 
 
 def sync(
@@ -224,8 +395,23 @@ def sync(
     # Phase 2: Edit overlapping messages
     overlap = min(M, N)
     repost_from: int | None = None
+    sender_repost_from: int | None = None
     for i in range(overlap):
         if existing[i].content == desired_contents[i]:
+            # Content match → SKIP normally. But if the desired entry is a
+            # `Msg` with a resolved sender that differs from the live
+            # message's stored sender, that's a sender-change candidate;
+            # policy check + cascade planning happens once we hit the FIRST
+            # such index, then we break out and run the cascade below.
+            desired_entry = desired.messages[i]
+            if isinstance(desired_entry, Msg) and _sender_mismatch(
+                desired_entry, existing[i], client,
+            ):
+                _enforce_sender_change_policy(
+                    i, existing, all_existing, opts.sender_change, client,
+                )
+                sender_repost_from = i
+                break
             actions.append(Action(
                 type=ActionType.SKIP,
                 index=i,
@@ -279,6 +465,50 @@ def sync(
                 **_post_kwargs(desired.messages[j]),
             )
             message_ids.append(result_msg.id)
+        return SyncResult(
+            thread_id=thread_id or "",
+            message_ids=message_ids,
+            actions=actions,
+        )
+
+    # Phase 2c: Sender-change cascade — one contiguous DELETE+REPOST run
+    # from the first sender-mismatch SKIP to end of thread. Policy already
+    # passed the pre-flight checks in Phase 2; here we execute.
+    if sender_repost_from is not None:
+        cascade = existing[sender_repost_from:]
+        # Preserve message_ids for indices before the cascade start (already
+        # appended as SKIPs above); wipe the cascade slot forward.
+        # Delete end-to-start (matches Phase 1's delete-backwards discipline).
+        for j in range(len(cascade) - 1, -1, -1):
+            msg = cascade[j]
+            actions.append(Action(
+                type=ActionType.DELETE,
+                index=sender_repost_from + j,
+                message_id=msg.id,
+                prior_content=msg.content,
+            ))
+            if not opts.dry_run:
+                _pace()
+                client.delete(msg.id)
+        # Repost start-to-end. thread_id is guaranteed non-None here — the
+        # cascade only fires when target_index >= 1, which requires an OP
+        # to already exist (i.e. `thread_id` was passed in).
+        for j in range(sender_repost_from, M):
+            actions.append(Action(
+                type=ActionType.POST,
+                index=j,
+                content=desired_contents[j],
+            ))
+            if opts.dry_run:
+                message_ids.append("<new>")
+            else:
+                _pace()
+                result_msg = client.post(
+                    desired_contents[j],
+                    thread_id=thread_id,
+                    **_post_kwargs(desired.messages[j]),
+                )
+                message_ids.append(result_msg.id)
         return SyncResult(
             thread_id=thread_id or "",
             message_ids=message_ids,

@@ -121,5 +121,88 @@ The `ts` branch (Slack subset) should mirror: a `Post` type, client `iconUrl`, a
 
 ## Out of scope (future)
 
-- **Auto-repost on sender drift** — have `sync` detect that an unchanged-content message's live sender differs from desired and delete+repost it (needs `list_messages` to surface the live `username`/icons). Deferred; the digest sets sender once at post time.
 - **Discord webhook sender** — per-message name/avatar via webhook execution instead of the bot API.
+
+## Aggressive-mode extension: sender-change reposts (in-progress)
+
+Baseline treats sender as post-time-only. The extension: allow `sync` to change an existing message's sender by **delete + repost**, gated behind policy. Motivated by the "I want to fix the sender on a fresh reply" ergonomic — real, but tangled with reactions loss + notification pings + Slack's message ordering.
+
+### Slack constraints (verified)
+
+- `chat.update` silently ignores `username`/`icon_url`/`icon_emoji`. Only path to change sender is delete + repost.
+- Reactions on the deleted message are lost — no API to preserve them.
+- A reposted message gets a fresh (later) `ts`; it moves to the END of the thread's chronological order.
+- `thread_ts` is fixed at OP-post time. Deleting the OP + reposting creates a **new thread** (new `thread_ts`); anything referring to the old OP's ts is dead.
+- Foreign (non-editable) messages between the change target and thread-end cannot be deleted, so their relative position is fixed — meaning any cascade that would move ours-messages past a foreign one is a semantic hazard (foreign messages responding to the pre-cascade thread ordering suddenly appear out of context).
+
+### Design (settled 2026-08-10)
+
+**Hard rules (not gated):**
+
+- **OP sender change is always forbidden.** Delete+repost of the OP changes `thread_ts`, invalidating `thrds.json` state, cross-refs from other threads, and any external permalinks. If you want a different OP sender, that's a new thread (`thrds init` + repost + archive old), not a `sync()`.
+- **Cascade cannot cross a foreign message.** If any foreign reply sits between the sender-change target and thread-end, hard-abort. No knob to override — there's no way to preserve order across a message you can't delete.
+
+**Opt-in via `SyncOptions.sender_change`:**
+
+```python
+@dataclass
+class SenderChangePolicy:
+    """Policy for handling a per-reply sender mismatch on existing messages.
+
+    Default (SyncOptions.sender_change = None): any sender mismatch raises
+    `SenderChangeForbidden`. Setting a policy opts in to delete+repost with
+    the safety gates below.
+    """
+    max_reposts: int = 3           # cascade length cap (target + later ours-replies to preserve order)
+    lose_reactions_ok: bool = False  # if False, abort on any target with reactions
+
+@dataclass
+class SyncOptions:
+    ...
+    sender_change: SenderChangePolicy | None = None
+```
+
+**Detection**: extend `Message` with optional sender fields:
+
+```python
+@dataclass
+class Message:
+    id: str
+    content: str
+    editable: bool = True
+    # NEW — None means "unknown / not populated by this client".
+    sender_username: str | None = None
+    sender_icon_url: str | None = None
+    sender_icon_emoji: str | None = None
+```
+
+`SlackClient.list_messages` populates these from the returned message dict; other clients (Discord bot, Bluesky) leave them `None` — the aggressive mode is Slack-specific.
+
+**Sync trigger**: only at the SKIP path (content matches). If `desired[i] is Msg` AND its resolved sender (msg → client → unset, matching `post()`'s logic) differs from `existing[i]`'s stored sender:
+
+1. If `i == 0` (OP) → raise `SenderChangeForbidden` (hard rule).
+2. If any foreign message sits at index > i in the thread → raise `SenderChangeForbidden` (hard rule).
+3. Plan cascade = [i, i+1, ..., last-ours-index] (contiguous ours-replies from target to thread-end).
+4. If `len(cascade) > policy.max_reposts` → raise.
+5. If `not policy.lose_reactions_ok`: pre-flight `reactions.get` for each cascade member. If any has reactions → raise (listing which).
+6. Execute: delete cascade end-to-start; repost start-to-end (each with its original content + preserved sender, except the target which gets its new sender).
+
+**Content-change cases**: if content ALSO differs from live, prefer plain `chat.update` (existing EDIT path) and leave sender drift silent. Rationale: v1 keeps the sender-cascade concern purely at the SKIP boundary, avoids interleaving EDIT + DELETE+REPOST cost models. Users needing "changed content + changed sender to also propagate" can re-run sync after the edit lands — the second pass will hit the SKIP-mismatch path and cascade.
+
+### Rejected knobs
+
+- `allow_op_sender_change` — hard rule instead. `thread_ts` change breaks too much.
+- `across_foreign_ok` — no way to actually preserve order past a foreign msg.
+- Channel-member-count-based rate limiting — poor proxy for notification spam (users have per-channel prefs); `lose_reactions_ok=False` implicitly covers the "nobody has engaged yet" case.
+
+### v1 status: implemented 2026-08-10
+
+Landed on `py` alongside the baseline. Full suite: 350 passed, 2 skipped.
+
+**One documented limitation**: `SlackClient.list_messages` populates
+`sender_icon_url` from `icons.image_*` but Slack does not preserve the
+`icon_url`-vs-`icon_emoji` distinction on read (emojis are rendered to
+URLs server-side). So `_sender_mismatch` skips the icon check entirely
+when the desired `Msg` uses `icon_emoji` (not `icon_url`) — users on
+emoji-based overrides don't get auto-cascade. Rare in practice; the
+motivating digest use case is `icon_url`-based (hosted avatar).

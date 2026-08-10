@@ -27,6 +27,9 @@ User Token Scopes):
   ``username`` / ``icon_url`` / ``icon_emoji``); library-level feature,
   not currently used by any CLI verb. Add only if you use it in library
   code.
+- ``reactions:read`` — `SenderChangePolicy` pre-flight (`sync` aborts a
+  sender-change repost if a target has reactions and
+  ``lose_reactions_ok=False``); library-level, not used by any CLI verb.
 
 Metadata visibility is app-scoped (Slack only returns your app's
 metadata to your app); no extra scope required for ``recover``.

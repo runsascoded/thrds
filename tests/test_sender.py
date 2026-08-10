@@ -178,3 +178,85 @@ def test_discord_post_no_warning_when_no_sender_overrides():
         client.post('goodbye')
     sender_warnings = [w for w in caught if 'per-message sender' in str(w.message)]
     assert sender_warnings == []
+
+
+# --- Slack list_messages populates sender fields for cascade detection ---
+
+class _RepliesClient(SlackClient):
+    """SlackClient whose `_request` returns a scripted `conversations.replies`."""
+    def __init__(self, messages):
+        super().__init__(token='x', channel='C')
+        self._messages = messages
+
+    def _request(self, endpoint, data=None, method='POST'):
+        if endpoint == 'auth.test':
+            return {'user_id': 'UBOT', 'bot_id': 'BBOT'}
+        if endpoint == 'conversations.replies':
+            return {'messages': self._messages}
+        raise NotImplementedError(endpoint)
+
+
+def test_slack_list_messages_populates_sender_username_and_icon_url():
+    """A msg posted with an override comes back with `username` + `icons.image_*`;
+    both surface on the `Message` for `_sender_mismatch` to consume."""
+    client = _RepliesClient([
+        {'ts': '1.000', 'text': 'op', 'user': 'UBOT',
+         'username': 'GCS usage — 2026-08-10',
+         'icons': {'image_original': 'https://cdn.example/avatar.png',
+                   'image_48': 'https://cdn.example/avatar48.png'}},
+    ])
+    msgs = client.list_messages('1.000')
+    assert msgs[0].sender_username == 'GCS usage — 2026-08-10'
+    assert msgs[0].sender_icon_url == 'https://cdn.example/avatar.png'
+    assert msgs[0].sender_icon_emoji is None   # Slack doesn't return the emoji form
+
+
+def test_slack_list_messages_falls_back_to_any_image_size_when_original_absent():
+    """`icons.image_original` absent → pick any `image_*` (Slack sometimes omits original)."""
+    client = _RepliesClient([
+        {'ts': '1.001', 'text': 'r1', 'user': 'UBOT',
+         'icons': {'image_48': 'https://cdn.example/only-48.png'}},
+    ])
+    assert client.list_messages('1.000')[0].sender_icon_url == 'https://cdn.example/only-48.png'
+
+
+def test_slack_list_messages_leaves_sender_fields_none_when_no_override():
+    """No `username` / no `icons` on the msg → both sender fields stay None."""
+    client = _RepliesClient([{'ts': '1.002', 'text': 'plain', 'user': 'UBOT'}])
+    msg = client.list_messages('1.000')[0]
+    assert msg.sender_username is None
+    assert msg.sender_icon_url is None
+
+
+# --- Slack get_reactions ---
+
+class _ReactionsClient(SlackClient):
+    def __init__(self, response):
+        super().__init__(token='x', channel='C')
+        self._response = response
+        self.calls: list[tuple[str, dict | None, str]] = []
+
+    def _request(self, endpoint, data=None, method='POST'):
+        self.calls.append((endpoint, data, method))
+        if endpoint == 'reactions.get':
+            return self._response
+        raise NotImplementedError(endpoint)
+
+
+def test_slack_get_reactions_returns_reactions_list():
+    client = _ReactionsClient({'ok': True, 'message': {'reactions': [
+        {'name': 'thumbsup', 'count': 3, 'users': ['U1', 'U2', 'U3']},
+        {'name': 'eyes', 'count': 1, 'users': ['U4']},
+    ]}})
+    result = client.get_reactions('1.000001')
+    assert [r['name'] for r in result] == ['thumbsup', 'eyes']
+    endpoint, data, method = client.calls[0]
+    assert endpoint == 'reactions.get'
+    assert data == {'channel': 'C', 'timestamp': '1.000001'}
+    assert method == 'GET'
+
+
+def test_slack_get_reactions_returns_empty_list_when_none():
+    """`reactions.get` on a msg with no reactions omits the field — return []."""
+    client = _ReactionsClient({'ok': True, 'message': {'text': 'plain'}})
+    assert client.get_reactions('1.000001') == []

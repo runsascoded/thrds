@@ -40,6 +40,25 @@ THRDS_METADATA_EVENT_TYPE = 'thrds'
 SLACK_MESSAGE_LIMIT = 4000
 
 
+def _slack_icon_url(msg: dict) -> str | None:
+    """Extract a canonical icon URL from a Slack message dict.
+
+    `conversations.replies` returns an `icons` object with multiple sized
+    URLs (`image_original`, `image_72`, `image_48`, etc.). Prefer the
+    original for round-trip fidelity; fall back to any `image_*` key if
+    the original is absent (some responses omit it).
+    """
+    icons = msg.get("icons") or {}
+    if not icons:
+        return None
+    if "image_original" in icons:
+        return icons["image_original"]
+    for k, v in icons.items():
+        if k.startswith("image_") and isinstance(v, str):
+            return v
+    return None
+
+
 class ScanCapReached(RuntimeError):
     """Raised by ``scan_thrds_metadata`` when ``max_pages`` is exhausted
     before ``has_more`` clears.
@@ -191,6 +210,15 @@ class SlackClient:
                     m.get("user") == user_id
                     or (bot_id is not None and m.get("bot_id") == bot_id)
                 ),
+                # Sender fields for `SenderChangePolicy` mismatch detection.
+                # `username` is only set on user-token posts with an override
+                # (bot posts show the app's name via bot_profile — ignored
+                # here since sender-change cascade is a user-token feature).
+                # Slack renders icon_emoji to a URL on read, so we never
+                # get emoji back — `sender_icon_emoji` stays None. See
+                # `_sender_mismatch` for the "unverifiable" fallback.
+                sender_username=m.get("username"),
+                sender_icon_url=_slack_icon_url(m),
             )
             for m in result.get("messages", [])
         ]
@@ -198,6 +226,20 @@ class SlackClient:
         if self._skip_op and messages:
             messages = messages[1:]
         return messages
+
+    def get_reactions(self, message_id: str) -> list[dict]:
+        """Return the list of reactions on ``message_id`` (empty if none).
+
+        Called by `sync` under `SenderChangePolicy` when
+        ``lose_reactions_ok=False`` — cascade aborts if any target has
+        reactions. Uses ``reactions.get`` which requires ``reactions:read``
+        scope.
+        """
+        result = self._request("reactions.get", {
+            "channel": self.channel,
+            "timestamp": message_id,
+        }, method="GET")
+        return result.get("message", {}).get("reactions", []) or []
 
     def post(
         self,
