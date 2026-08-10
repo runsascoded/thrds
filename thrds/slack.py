@@ -103,6 +103,7 @@ class SlackClient:
         self._skip_op: bool = False
         self._bot_ids: tuple[str, str | None] | None = None
         self._user_name_cache: dict[str, str] = {}
+        self._channels_by_name_cache: dict[str, str] | None = None
 
     @property
     def bot_ids(self) -> tuple[str, str | None]:
@@ -1161,6 +1162,50 @@ class SlackClient:
             )
             for sid, d in partial.items()
         }
+
+    def list_channels_by_name(self) -> dict[str, str]:
+        """Return ``{name: id}`` for all channels this token can see.
+
+        Paginates ``conversations.list`` across public + private + mpim
+        (single-member private channels + multi-party DMs) types. Includes
+        archived channels — recovering from an archived staging PC is a
+        real use case. Result cached per-client instance because channel
+        lists change slowly and one CLI invocation is one client's lifetime.
+
+        Requires ``channels:read`` (public) and ``groups:read`` (private)
+        scopes on the token. `groups:read` is granted implicitly with
+        `groups:write` — but ``channels:read`` needs to be added
+        explicitly if the token doesn't have it (Slack raises
+        ``missing_scope`` otherwise).
+        """
+        if self._channels_by_name_cache is not None:
+            return self._channels_by_name_cache
+        result: dict[str, str] = {}
+        cursor: str | None = None
+        while True:
+            params: dict = {
+                # Slack silently ignores `types` when the request is a JSON
+                # POST — must be GET/urlencoded (only public_channel comes
+                # back otherwise). Empirically: JSON POST → 51 channels,
+                # GET/urlencoded → 108. `_request` handles both; force GET.
+                'types': 'public_channel,private_channel,mpim',
+                'limit': 1000,
+                # For form-encoding, booleans must be JSON-style strings.
+                'exclude_archived': 'false',
+            }
+            if cursor:
+                params['cursor'] = cursor
+            r = self._request('conversations.list', params, method='GET')
+            for c in r.get('channels', []):
+                name = c.get('name')
+                cid = c.get('id')
+                if name and cid:
+                    result[name] = cid
+            cursor = (r.get('response_metadata') or {}).get('next_cursor')
+            if not cursor:
+                break
+        self._channels_by_name_cache = result
+        return result
 
     def fetch_workspace_emoji(self) -> dict[str, str]:
         """Fetch this workspace's custom emoji map (name → URL).

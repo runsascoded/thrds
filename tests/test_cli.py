@@ -38,9 +38,12 @@ class SlackSpy:
         self.pull_calls = []
         self.archive_calls = []
         self.scan_calls: list[dict] = []
+        self.list_channels_calls: int = 0
         self.pull_returns = None
         # Either a scripted result dict, or an Exception instance to raise.
         self.scan_returns: dict[str, RecoveredSession] | Exception | None = None
+        # Scripted {name: id} for `list_channels_by_name` (Exception → raise).
+        self.channels_by_name: dict[str, str] | Exception | None = None
         self.sync_returns_channel = "C_STAGING"
 
     def _sync_result(self, channel: str) -> DocSyncResult:
@@ -83,6 +86,13 @@ class SlackSpy:
 
     def archive_channel(self, channel: str):
         self.archive_calls.append(channel)
+
+    def list_channels_by_name(self) -> dict[str, str]:
+        """Scriptable via `channels_by_name`; defaults to {} (raises 'not found')."""
+        self.list_channels_calls += 1
+        if isinstance(self.channels_by_name, Exception):
+            raise self.channels_by_name
+        return dict(self.channels_by_name or {})
 
     def scan_thrds_metadata(self, channel: str, oldest=None, latest=None,
                             cursor=None, max_pages=None, on_page=None):
@@ -1113,3 +1123,156 @@ def test_list_sessions_singular_when_one_session(in_tmp, monkeypatch):
     assert result.exit_code == 0, (result.output, result.stderr)
     assert '1 session in C_PROD' in result.stderr
     assert '1 sessions in C_PROD' not in result.stderr
+
+
+# --- channel-name resolution ---
+
+def test_channel_id_passthrough_avoids_list_channels_api_call(in_tmp, monkeypatch):
+    """Uppercase-starting refs (Slack IDs) skip the `conversations.list` lookup."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered()}
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['list-sessions', 'C08XYZ001'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # No `conversations.list` calls — passthrough hit.
+    assert captured[0].list_channels_calls == 0
+    # And the scan was called with the ID verbatim.
+    assert captured[0].scan_calls[-1]['channel'] == 'C08XYZ001'
+
+
+def test_channel_name_hash_prefix_resolves_via_list_channels(in_tmp, monkeypatch):
+    """`#foo` → strip `#` → look up in `conversations.list` → pass ID to scan."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.channels_by_name = {'foo': 'C08FOO001', 'bar': 'C08BAR002'}
+        s.scan_returns = {'s-1': _recovered()}
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['list-sessions', '#foo'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert captured[0].list_channels_calls == 1
+    assert captured[0].scan_calls[-1]['channel'] == 'C08FOO001'
+
+
+def test_channel_bare_name_resolves_via_list_channels(in_tmp, monkeypatch):
+    """Bare `foo` (no `#`) also resolves; the leading `#` is optional."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.channels_by_name = {'foo': 'C08FOO001'}
+        s.scan_returns = {'s-1': _recovered()}
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['list-sessions', 'foo'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert captured[0].scan_calls[-1]['channel'] == 'C08FOO001'
+
+
+def test_channel_hash_uppercase_still_resolves_via_lookup(in_tmp, monkeypatch):
+    """`#FOO` → hash-prefix bypasses the uppercase-passthrough rule → case-insensitive lookup."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.channels_by_name = {'foo': 'C08FOO001'}
+        s.scan_returns = {'s-1': _recovered()}
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['list-sessions', '#FOO'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert captured[0].list_channels_calls == 1
+    assert captured[0].scan_calls[-1]['channel'] == 'C08FOO001'
+
+
+def test_channel_uppercase_no_hash_passes_through_as_id(in_tmp, monkeypatch):
+    """`FOO` (no `#`, uppercase-first) → treated as a Slack ID via the passthrough rule.
+
+    Trade-off: `foo` and `FOO` don't behave identically. Documented — Slack
+    channel names are lowercase, and uppercase-starting refs are almost
+    always IDs. Prepend `#` when in doubt.
+    """
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.channels_by_name = {'foo': 'C08FOO001'}
+        s.scan_returns = {'s-1': _recovered()}
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['list-sessions', 'FOO'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # Passthrough hit, no lookup.
+    assert captured[0].list_channels_calls == 0
+    assert captured[0].scan_calls[-1]['channel'] == 'FOO'
+
+
+def test_channel_name_not_found_shows_available_hint(in_tmp, monkeypatch):
+    """Unknown name → UsageError listing (some of) the available names."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.channels_by_name = {f'ch-{i}': f'C{i:04d}' for i in range(20)}
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['list-sessions', '#does-not-exist'])
+    assert result.exit_code == 2
+    assert "Channel '#does-not-exist' not found" in result.stderr
+    # Preview shows first 5 sorted names.
+    assert "'ch-0'" in result.stderr
+
+
+def test_channel_name_missing_scope_error_is_helpful(in_tmp, monkeypatch):
+    """RuntimeError with `missing_scope` → UsageError telling user to add scope or use ID."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.channels_by_name = RuntimeError('Slack API error: missing_scope')
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['list-sessions', '#foo'])
+    assert result.exit_code == 2
+    assert 'channels:read' in result.stderr
+    assert 'groups:read' in result.stderr
+
+
+def test_push_prod_channel_flag_resolves_name(in_tmp, monkeypatch):
+    """`push --prod --channel #foo` resolves to `C08FOO001` before sync_doc_prod."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.channels_by_name = {'foo': 'C08FOO001'}
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    _init_session(in_tmp, monkeypatch)
+    result = CliRunner().invoke(cli, ['push', '--prod', '--channel', '#foo'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # The captured `sync_doc_prod` call should carry the RESOLVED ID.
+    prod_calls = [c for c in captured[-1].push_calls if c['mode'] == 'prod']
+    assert prod_calls[0]['channel'] == 'C08FOO001'

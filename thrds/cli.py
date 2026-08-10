@@ -238,6 +238,8 @@ def push(channel: str | None, keep_staging: bool, dry_run: bool, prod: bool, doc
     if not prod and keep_staging:
         raise click.UsageError('--keep-staging requires --prod.')
     client = _make_slack_client()
+    if channel is not None:
+        channel = _resolve_channel(client, channel)
     if prod:
         result = client.sync_doc_prod(
             doc, state,
@@ -277,6 +279,8 @@ def pull(channel: str | None, prod: bool, write: bool, doc_path: str | None):
     if not prod and channel is not None:
         raise click.UsageError('--channel requires --prod.')
     client = _make_slack_client()
+    if channel is not None:
+        channel = _resolve_channel(client, channel)
     session_dir = Path.cwd()
     doc = (
         client.pull_doc_prod(state, channel=channel, session_dir=session_dir)
@@ -310,6 +314,8 @@ def diff(channel: str | None, prod: bool, doc_path: str | None):
         raise click.UsageError('--channel requires --prod.')
     local_doc = _load_doc(state, doc_path)
     client = _make_slack_client()
+    if channel is not None:
+        channel = _resolve_channel(client, channel)
     session_dir = Path.cwd()
     slack_doc = (
         client.pull_doc_prod(state, channel=channel, session_dir=session_dir)
@@ -410,12 +416,17 @@ def _scan_sessions(
     latest_ts: float | None,
     cursor: str | None,
     max_pages: int | None,
-) -> 'dict[str, object]':
+) -> 'tuple[dict[str, object], str]':
     """Run `scan_thrds_metadata` with a progress log; translate
     `ScanCapReached` to a `UsageError` after surfacing the resume cursor
     on its own stderr line. Shared between `recover` and `list-sessions`.
+
+    Returns ``(sessions, resolved_channel_id)`` — resolving the channel
+    name up front means downstream code (state writeback, doc pull) all
+    use the ID consistently.
     """
     client = _make_slack_client()
+    channel = _resolve_channel(client, channel)
     total_msgs = 0
 
     def on_page(page_num: int, msg_count: int) -> None:
@@ -424,7 +435,7 @@ def _scan_sessions(
         err(f'  scan page {page_num}: {msg_count} msgs (total {total_msgs})')
 
     try:
-        return client.scan_thrds_metadata(
+        sessions = client.scan_thrds_metadata(
             channel,
             oldest=oldest_ts,
             latest=latest_ts,
@@ -437,6 +448,7 @@ def _scan_sessions(
         if e.next_cursor:
             err(f'  next cursor: {e.next_cursor}')
         raise click.UsageError(str(e))
+    return sessions, channel
 
 
 def _print_sessions_table(sessions: dict, channel: str) -> None:
@@ -466,7 +478,7 @@ def list_sessions(cursor, oldest_days, latest_days, max_pages, channel):
     `recover -i <sid>`, or just to see what's in a channel.
     """
     oldest_ts, latest_ts, cur, cap = _scan_bounds(cursor, oldest_days, latest_days, max_pages)
-    sessions = _scan_sessions(channel, oldest_ts, latest_ts, cur, cap)
+    sessions, channel = _scan_sessions(channel, oldest_ts, latest_ts, cur, cap)
     if not sessions:
         err(f'No thrds-metadata sessions found in {channel}.')
         return
@@ -518,7 +530,7 @@ def recover(
             'cd into a fresh session dir before running `thrds recover`.'
         )
     oldest_ts, latest_ts, cur, cap = _scan_bounds(cursor, oldest_days, latest_days, max_pages)
-    sessions = _scan_sessions(channel, oldest_ts, latest_ts, cur, cap)
+    sessions, channel = _scan_sessions(channel, oldest_ts, latest_ts, cur, cap)
     if not sessions:
         raise click.UsageError(
             f'No thrds-metadata messages found in {channel}. '
@@ -574,6 +586,44 @@ def recover(
     doc_path = session_dir / f'{recovered.doc_slug}.md'
     doc_path.write_text(text)
     err(f'wrote pulled doc to {doc_path.name}')
+
+
+def _resolve_channel(client, ref: str) -> str:
+    """Resolve a channel reference to a Slack channel ID (``C…``).
+
+    Accepts:
+    - Bare Slack ID (``C…`` / ``G…``): passthrough. Detection: first char
+      is uppercase — Slack channel names are always lowercase, so an
+      uppercase-starting ref cannot be a name. Cheap + unambiguous.
+    - ``#name`` or ``name``: looked up via
+      :meth:`SlackClient.list_channels_by_name`, case-insensitive.
+
+    Raises :class:`click.UsageError` on missing scope (``channels:read``
+    or ``groups:read``) or unknown name — with a hint listing the first
+    few names the token *can* see.
+    """
+    if ref and ref[0].isupper():
+        return ref
+    name = ref.lstrip('#').lower()
+    try:
+        channels = client.list_channels_by_name()
+    except RuntimeError as e:
+        if 'missing_scope' in str(e):
+            raise click.UsageError(
+                f'Channel-name lookup requires `channels:read` (public) or '
+                f'`groups:read` (private) scope on the token. Pass a Slack ID '
+                f'(`C…`) instead, or add the scope. (Slack error: {e})'
+            )
+        raise
+    cid = channels.get(name)
+    if cid is None:
+        preview = sorted(channels)[:5]
+        raise click.UsageError(
+            f'Channel {ref!r} not found. Pass a Slack ID (C…) or an exact '
+            f'name (with or without leading #). Available (first 5 of '
+            f'{len(channels)}): {preview}'
+        )
+    return cid
 
 
 def _channel_url(channel_id: str) -> str:
