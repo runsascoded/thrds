@@ -84,14 +84,17 @@ class SlackSpy:
     def archive_channel(self, channel: str):
         self.archive_calls.append(channel)
 
-    def scan_thrds_metadata(self, channel: str, oldest=None, max_pages=None, on_page=None):
+    def scan_thrds_metadata(self, channel: str, oldest=None, latest=None,
+                            cursor=None, max_pages=None, on_page=None):
         """Scriptable via `scan_returns`; defaults to {} (no sessions found).
 
-        Records the full call (channel + scan bounds) so tests can assert
-        `--oldest-days` / `--max-pages` are forwarded correctly."""
+        Records the full call (channel + scan bounds + resume) so tests can
+        assert flags are forwarded correctly."""
         self.scan_calls.append({
             'channel': channel,
             'oldest': oldest,
+            'latest': latest,
+            'cursor': cursor,
             'max_pages': max_pages,
         })
         if isinstance(self.scan_returns, Exception):
@@ -864,6 +867,8 @@ def test_recover_oldest_days_forwards_unix_ts_to_scan(in_tmp, monkeypatch):
     assert captured[-1].scan_calls == [{
         'channel': 'C_PROD',
         'oldest': 1_000_000.0 - 7 * 86400,
+        'latest': None,
+        'cursor': None,
         'max_pages': 50,   # default
     }]
 
@@ -934,3 +939,79 @@ def test_recover_progress_log_emits_per_page(in_tmp, monkeypatch):
     # is `preamble + threads = 1 + 2 = 3` for this scripted RecoveredSession.
     scan_lines = [l for l in result.stderr.splitlines() if 'scan page' in l]
     assert scan_lines == ['  scan page 1: 3 msgs (total 3)']
+
+
+# --- recover: resume ---
+
+def test_recover_latest_days_forwards_derived_unix_ts(in_tmp, monkeypatch):
+    """`-D 3` translates to `latest=<now - 3*86400>` on the underlying scan call."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered()}
+        s.pull_returns = Doc()
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setattr('thrds.cli.time.time', lambda: 1_000_000.0)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', '-D', '3', 'C_PROD'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert captured[-1].scan_calls[-1]['latest'] == 1_000_000.0 - 3 * 86400
+
+
+def test_recover_cursor_forwards_to_scan(in_tmp, monkeypatch):
+    """`--cursor TOKEN` forwards verbatim to `scan_thrds_metadata`."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered()}
+        s.pull_returns = Doc()
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    CliRunner().invoke(cli, ['recover', '--cursor', 'CURSOR_XYZ', 'C_PROD'])
+    assert captured[-1].scan_calls[-1]['cursor'] == 'CURSOR_XYZ'
+
+
+def test_recover_cursor_and_latest_days_mutually_exclusive(in_tmp, monkeypatch):
+    """--cursor + --latest-days both specify a start point → refuse."""
+    def factory(*, token, channel):
+        return SlackSpy(token=token, channel=channel)
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', '--cursor', 'CX', '-D', '3', 'C_PROD'])
+    assert result.exit_code == 2
+    assert '--cursor and --latest-days are mutually exclusive' in result.stderr
+
+
+def test_recover_scan_cap_reached_prints_next_cursor(in_tmp, monkeypatch):
+    """ScanCapReached with next_cursor → stderr has `next cursor: <token>` line."""
+    from thrds import ScanCapReached
+    exc = ScanCapReached(
+        'scan_thrds_metadata: hit --max-pages=50 on channel C_PROD; '
+        'Reached back to ts=1.234.',
+        next_cursor='RESUME_HERE',
+        oldest_ts_reached='1.234',
+        pages_scanned=50,
+    )
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = exc
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    assert result.exit_code == 2
+    # Cursor is on its own line for easy grep.
+    assert '  next cursor: RESUME_HERE' in result.stderr
+    # And the exception message itself is in the UsageError line.
+    assert 'hit --max-pages=50' in result.stderr

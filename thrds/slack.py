@@ -42,9 +42,29 @@ SLACK_MESSAGE_LIMIT = 4000
 
 class ScanCapReached(RuntimeError):
     """Raised by ``scan_thrds_metadata`` when ``max_pages`` is exhausted
-    before ``has_more`` clears. Signals the caller to widen the window or
-    narrow the time bound; distinct from `RuntimeError` so it can be caught
-    without swallowing real failures."""
+    before ``has_more`` clears.
+
+    Carries the state needed to resume: ``next_cursor`` is the Slack
+    pagination token that would have gone into the next request (opaque
+    string, safe to copy-paste back via ``--cursor``), and
+    ``oldest_ts_reached`` is the min ts seen so far (a decimal string
+    like ``"1784587706.222199"``, usable as a ``latest`` bound for a
+    time-anchored resume). Both are ``None`` if the cap fired before
+    any page returned (e.g. ``max_pages=0`` would never trigger this;
+    it's disabled). Distinct exception type so callers can catch without
+    swallowing real failures.
+    """
+    def __init__(
+        self,
+        message: str,
+        next_cursor: str | None = None,
+        oldest_ts_reached: str | None = None,
+        pages_scanned: int = 0,
+    ):
+        super().__init__(message)
+        self.next_cursor = next_cursor
+        self.oldest_ts_reached = oldest_ts_reached
+        self.pages_scanned = pages_scanned
 
 
 @dataclass
@@ -983,6 +1003,8 @@ class SlackClient:
         self,
         channel: str,
         oldest: float | None = None,
+        latest: float | None = None,
+        cursor: str | None = None,
         max_pages: int | None = None,
         on_page: 'callable | None' = None,
     ) -> dict[str, RecoveredSession]:
@@ -1014,43 +1036,75 @@ class SlackClient:
         as corruption, don't silently pick a side.
 
         Args:
-            oldest: unix timestamp; if given, forwarded to Slack as
-                ``oldest=<ts>`` so scan stops at that lower bound. Cheapest
-                way to bound the scan when the user knows a rough post date.
+            oldest: unix timestamp lower bound; forwarded to Slack as
+                ``oldest=<ts>``. Cheapest way to bound the scan when the
+                user knows a rough post date.
+            latest: unix timestamp upper bound; forwarded as ``latest=<ts>``.
+                Symmetric with ``oldest`` — the pair defines a scan window.
+                Time-anchored resume after a `ScanCapReached`: re-run with
+                ``latest`` set to the exception's ``oldest_ts_reached``.
+            cursor: Slack pagination token to start from. Set on the
+                exception when ``max_pages`` fires; pass it back verbatim
+                for an exact resume (no re-scan of covered pages).
             max_pages: safety cap on pages fetched. If reached before
-                ``has_more`` clears, raise `ScanCapReached` — the caller
-                decides whether to retry with a smaller window or a higher
-                cap. Metadata (like ``search:messages``) is not indexable,
-                so this is the only backstop against runaway scans on busy
-                channels.
+                ``has_more`` clears, raise `ScanCapReached` carrying the
+                next cursor + min ts reached — the caller decides whether
+                to widen the cap, narrow the window, or resume. Metadata is
+                not indexable (no `has_metadata:` search operator), so this
+                is the only backstop against runaway scans on busy channels.
             on_page: called with ``(page_num, msg_count)`` after each page
                 fetch — for progress-log hooks. `page_num` is 1-based.
         """
         # session_id -> mutable working dict; assembled into RecoveredSession at the end
         partial: dict[str, dict] = {}
-        cursor: str | None = None
+        page_cursor: str | None = cursor
         page_num = 0
+        # Track the min ts we've observed across all messages (not just
+        # thrds-tagged ones) so `ScanCapReached` can report where we stopped.
+        min_ts_seen: str | None = None
         while True:
             page_num += 1
             if max_pages is not None and page_num > max_pages:
+                # Report the cursor we WOULD have used next, so a resume
+                # re-issues the same next request.
                 raise ScanCapReached(
                     f'scan_thrds_metadata: hit --max-pages={max_pages} on channel '
                     f'{channel}; scanned ~{max_pages * 200} messages without exhausting history. '
-                    'Pass a larger --max-pages, or narrow with --oldest.'
+                    f'Reached back to ts={min_ts_seen}. '
+                    'Options: widen with `--max-pages N`, narrow with `--oldest-days N`, '
+                    'or resume via `--cursor <token>` (see stderr for the token).',
+                    next_cursor=page_cursor,
+                    oldest_ts_reached=min_ts_seen,
+                    pages_scanned=page_num - 1,
                 )
             params: dict = {
                 'channel': channel,
                 'limit': 200,
                 'include_all_metadata': True,
             }
+            # Slack requires ts bounds as *strings* with >=7 decimal places
+            # — a JSON float, or a string with fewer decimals, silently
+            # returns the wrong result set (empirically: `latest` as float
+            # → 0 msgs; `.6f` → 0 msgs; `.7f` → correct). No idea whether
+            # this is documented or a length-based string-comparison
+            # peculiarity of their server; `.9f` sits comfortably above
+            # the cutoff and matches nanosecond precision.
             if oldest is not None:
-                params['oldest'] = oldest
-            if cursor:
-                params['cursor'] = cursor
+                params['oldest'] = f'{oldest:.9f}'
+            if latest is not None:
+                params['latest'] = f'{latest:.9f}'
+            if page_cursor:
+                params['cursor'] = page_cursor
             result = self._request('conversations.history', params)
             msgs = result.get('messages', [])
             if on_page is not None:
                 on_page(page_num, len(msgs))
+            # Track the min ts across ALL messages (thrds-tagged or not) —
+            # that's the "how far back did we get" datum for a resume prompt.
+            for msg in msgs:
+                ts = msg.get('ts')
+                if ts and (min_ts_seen is None or float(ts) < float(min_ts_seen)):
+                    min_ts_seen = ts
             for msg in msgs:
                 md = msg.get('metadata') or {}
                 if md.get('event_type') != THRDS_METADATA_EVENT_TYPE:
@@ -1090,8 +1144,8 @@ class SlackClient:
                 # kind=='reply' or anything else: no map contribution.
             if not result.get('has_more'):
                 break
-            cursor = (result.get('response_metadata') or {}).get('next_cursor')
-            if not cursor:
+            page_cursor = (result.get('response_metadata') or {}).get('next_cursor')
+            if not page_cursor:
                 break
         return {
             sid: RecoveredSession(

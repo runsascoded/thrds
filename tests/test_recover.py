@@ -237,11 +237,17 @@ def test_scan_requests_include_all_metadata_flag():
 
 # --- scan bounds ---
 
-def test_scan_forwards_oldest_to_slack_when_given():
-    """`oldest=<ts>` becomes `oldest` in the request; omitted when None."""
+def test_scan_forwards_oldest_to_slack_as_string():
+    """`oldest=<float>` is coerced to a 9-decimal string at the wire.
+
+    Slack silently returns wrong results when ts bounds are floats OR
+    strings with too few decimals (empirically <=6 fails; .7f+ works).
+    Formatting at the API boundary means all callers get the same
+    treatment.
+    """
     client = _FakeSlackClient(_single_page([]))
     client.scan_thrds_metadata('C1', oldest=1_700_000_000.0)
-    assert client.calls[0][1]['oldest'] == 1_700_000_000.0
+    assert client.calls[0][1]['oldest'] == '1700000000.000000000'
 
 
 def test_scan_omits_oldest_when_not_given():
@@ -292,3 +298,75 @@ def test_scan_on_page_callback_receives_page_number_and_count():
     client = _FakeSlackClient(handler)
     client.scan_thrds_metadata('C1', on_page=lambda n, c: observed.append((n, c)))
     assert observed == [(1, 2), (2, 1)]
+
+
+# --- scan: resume support ---
+
+def test_scan_forwards_latest_bound_to_slack_as_string():
+    """`latest=<float>` is coerced to a 9-decimal string at the wire (see oldest test)."""
+    client = _FakeSlackClient(_single_page([]))
+    client.scan_thrds_metadata('C1', latest=1_700_000_000.0)
+    assert client.calls[0][1]['latest'] == '1700000000.000000000'
+
+
+def test_scan_forwards_starting_cursor_when_given():
+    """`cursor=TOK` becomes `cursor` on the FIRST page request (resume path)."""
+    client = _FakeSlackClient(_single_page([]))
+    client.scan_thrds_metadata('C1', cursor='RESUME_TOK')
+    assert client.calls[0][1]['cursor'] == 'RESUME_TOK'
+
+
+def test_scan_omits_cursor_on_first_page_when_not_given():
+    """No `cursor=` in the initial page request when the caller didn't pass one."""
+    client = _FakeSlackClient(_single_page([]))
+    client.scan_thrds_metadata('C1')
+    assert 'cursor' not in client.calls[0][1]
+
+
+def test_scan_cap_reached_carries_next_cursor_and_oldest_ts():
+    """When the cap fires, the exception's cursor is what we would have sent next,
+    and `oldest_ts_reached` is the min ts across ALL scanned messages."""
+    # Two pages returned, both `has_more=True`; scan aborts on the 3rd page attempt.
+    pages = [
+        {'messages': [_msg('9.000', kind='op', thread_slug='a'),
+                      _msg('8.000', kind='op', thread_slug='b')],
+         'has_more': True, 'response_metadata': {'next_cursor': 'AFTER_1'}},
+        {'messages': [_msg('7.000', kind='op', thread_slug='c'),
+                      _msg('5.500', kind='op', thread_slug='d')],
+         'has_more': True, 'response_metadata': {'next_cursor': 'AFTER_2'}},
+    ]
+    idx = [0]
+
+    def handler(data):
+        page = pages[idx[0]]
+        idx[0] += 1
+        return page
+
+    client = _FakeSlackClient(handler)
+    with pytest.raises(ScanCapReached) as exc_info:
+        client.scan_thrds_metadata('C1', max_pages=2)
+    exc = exc_info.value
+    assert exc.next_cursor == 'AFTER_2'
+    assert exc.oldest_ts_reached == '5.500'
+    assert exc.pages_scanned == 2
+
+
+def test_scan_cap_reached_before_any_page_carries_none_state():
+    """`max_pages=0` disables the cap, but if we could ever fire pre-fetch, cursor+ts would be None."""
+    # Directly assert on the exception fields via a hand-crafted case: cap=1
+    # with a handler that always returns has_more=True. First page fetches;
+    # cap fires on second-page attempt with the cursor Slack gave us and
+    # min_ts_seen from page 1.
+    def handler(data):
+        return {
+            'messages': [_msg('2.000', kind='op', thread_slug='a')],
+            'has_more': True,
+            'response_metadata': {'next_cursor': 'CURSOR_1'},
+        }
+
+    client = _FakeSlackClient(handler)
+    with pytest.raises(ScanCapReached) as exc_info:
+        client.scan_thrds_metadata('C1', max_pages=1)
+    assert exc_info.value.next_cursor == 'CURSOR_1'
+    assert exc_info.value.oldest_ts_reached == '2.000'
+    assert exc_info.value.pages_scanned == 1

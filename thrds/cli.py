@@ -384,14 +384,18 @@ def open_(prod: bool, staging: bool, no_open: bool):
 
 
 @cli.command()
+@click.option('-c', '--cursor', help='Slack pagination cursor to resume from (printed by a prior `ScanCapReached`).')
 @click.option('-d', '--oldest-days', type=float, help='Only scan messages posted in the last N days (default: unbounded).')
+@click.option('-D', '--latest-days', type=float, help='Skip messages newer than N days ago (Slack `latest` upper bound). Pair with `--oldest-days` to scan a window.')
 @click.option('-i', '--session-id', help='Session ID to recover (required if channel holds >1 session).')
 @click.option('-m', '--max-pages', type=int, default=50, show_default=True, help='Safety cap on `conversations.history` pages fetched (200 msgs/page). Pass 0 to disable.')
 @click.option('-s', '--staging', is_flag=True, help='Route recovered pointers to staging_threads (default: prod_threads[channel]).')
 @click.option('-W', '--no-write-doc', is_flag=True, help='Skip the doc-pull step; write thrds.json only.')
 @click.argument('channel')
 def recover(
+    cursor: str | None,
     oldest_days: float | None,
+    latest_days: float | None,
     session_id: str | None,
     max_pages: int,
     staging: bool,
@@ -422,8 +426,12 @@ def recover(
             f'{STATE_PATH} already exists in {session_dir} — refusing to overwrite. '
             'cd into a fresh session dir before running `thrds recover`.'
         )
+    if cursor is not None and latest_days is not None:
+        raise click.UsageError('--cursor and --latest-days are mutually exclusive (both specify where to start).')
     client = _make_slack_client()
-    oldest_ts = time.time() - oldest_days * 86400 if oldest_days is not None else None
+    now = time.time()
+    oldest_ts = now - oldest_days * 86400 if oldest_days is not None else None
+    latest_ts = now - latest_days * 86400 if latest_days is not None else None
     total_msgs = 0
 
     def on_page(page_num: int, msg_count: int) -> None:
@@ -435,10 +443,16 @@ def recover(
         sessions = client.scan_thrds_metadata(
             channel,
             oldest=oldest_ts,
+            latest=latest_ts,
+            cursor=cursor,
             max_pages=max_pages if max_pages > 0 else None,
             on_page=on_page,
         )
     except ScanCapReached as e:
+        # Surface the resume state on stderr as its own line — makes the
+        # cursor easy to grep out of the surrounding text.
+        if e.next_cursor:
+            err(f'  next cursor: {e.next_cursor}')
         raise click.UsageError(str(e))
     if not sessions:
         raise click.UsageError(
