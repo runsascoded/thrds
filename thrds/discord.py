@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import random
 import subprocess
+import sys
 import time
+import warnings
 
 from .core import EditRateLimited, Message, SyncOptions, SyncResult, Thread, sync
 from .linked import (
@@ -25,6 +27,11 @@ class DiscordClient:
         self.guild_id = guild_id
         self._active_thread_id: str | None = None
         self._suppress_embeds: bool = False
+        # One-shot latch: warn the first time a `Msg` sender override
+        # reaches `post()` on Discord (the bot API cannot override per-
+        # message sender; only webhook execution can, and that's a
+        # separate transport). See `per-message-sender.md`.
+        self._sender_warned: bool = False
 
     _MAX_ATTEMPTS = 4
     _BACKOFF_BASE = 1.0
@@ -145,7 +152,27 @@ class DiscordClient:
             if m.get("type", 0) == 0
         ]
 
-    def post(self, content: str, thread_id: str | None = None) -> Message:
+    def post(
+        self,
+        content: str,
+        thread_id: str | None = None,
+        *,
+        username: str | None = None,
+        icon_url: str | None = None,
+        icon_emoji: str | None = None,
+    ) -> Message:
+        """Sender-override fields accepted but ignored — Discord's bot API
+        cannot override per-message sender. Warns once per client if any
+        override is set. Use a webhook-backed transport (separate spec)
+        for per-message sender on Discord."""
+        if (username or icon_url or icon_emoji) and not self._sender_warned:
+            warnings.warn(
+                "DiscordClient.post: per-message sender overrides (username/"
+                "icon_url/icon_emoji) are not supported by the Discord bot API — "
+                "ignoring. Use a webhook-backed sender if you need this.",
+                stacklevel=2,
+            )
+            self._sender_warned = True
         if len(content) > MESSAGE_LIMIT:
             raise ValueError(f"Message exceeds Discord's {MESSAGE_LIMIT} char limit ({len(content)} chars)")
         channel = thread_id or self._channel

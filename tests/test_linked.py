@@ -218,7 +218,7 @@ def test_linked_thread_end_to_end():
         def list_messages(self, thread_id: str) -> list[Message]:
             return []
 
-        def post(self, content: str, thread_id: str | None = None) -> Message:
+        def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None):
             msg_id = self._new_id()
             self.messages[msg_id] = content
             return Message(id=msg_id, content=content)

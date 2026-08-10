@@ -69,9 +69,61 @@ class Action:
 
 
 @dataclass
+class Msg:
+    """A desired message with an optional per-message sender override.
+
+    Wraps a `str` content plus optional ``username``/``icon_url``/``icon_emoji``
+    overrides that apply on POST (Slack `chat.postMessage` accepts them
+    with the ``chat:write.customize`` scope). Fields left ``None`` fall
+    back to the client-level defaults.
+
+    Sender is a **post-time attribute** — Slack's ``chat.update``
+    silently ignores ``username``/``icon_url``/``icon_emoji`` in an
+    update payload, so an EDIT never changes the live sender. That's
+    the desired behavior: a content tweak on an existing message
+    shouldn't churn its avatar or name.
+
+    Discord's bot API cannot override per-message sender at all;
+    `DiscordClient` warns once and ignores. Bluesky has no sender
+    concept; ignored silently.
+    """
+    content: str
+    username: str | None = None
+    icon_url: str | None = None
+    icon_emoji: str | None = None
+
+
+def _content(entry: str | Msg) -> str:
+    """Extract the content string from a `str | Msg` desired-thread entry."""
+    return entry.content if isinstance(entry, Msg) else entry
+
+
+def _post_kwargs(entry: str | Msg) -> dict:
+    """Extract the per-message sender override kwargs (empty for bare `str`).
+
+    Always includes all three keys (with `None` for unset) so downstream
+    `post()` implementations can uniformly resolve ``msg_override or
+    client_default`` without missing-key gymnastics.
+    """
+    if isinstance(entry, Msg):
+        return {
+            'username': entry.username,
+            'icon_url': entry.icon_url,
+            'icon_emoji': entry.icon_emoji,
+        }
+    return {}
+
+
+@dataclass
 class Thread:
-    """Desired state of a thread."""
-    messages: list[str]
+    """Desired state of a thread.
+
+    ``messages`` accepts bare ``str`` entries (use client defaults for
+    every posted message) or `Msg` wrappers (per-message sender overrides).
+    Mixing both in one thread is fine and common — e.g. an OP with a
+    date-suffixed name plus replies with the plain name.
+    """
+    messages: list[str | Msg]
 
 
 @dataclass
@@ -148,6 +200,11 @@ def sync(
 
     M = len(desired.messages)
     N = len(existing)
+    # Normalize desired entries once at the top: content-strings power the
+    # positional diff (existing[i].content == desired_contents[i]), while
+    # per-message sender kwargs get carried through to POST unchanged. An
+    # EDIT uses content only — sender is a post-time attribute (see `Msg`).
+    desired_contents = [_content(e) for e in desired.messages]
 
     # Phase 1: Delete extras from the end (backwards, OP last)
     if M < N:
@@ -168,12 +225,12 @@ def sync(
     overlap = min(M, N)
     repost_from: int | None = None
     for i in range(overlap):
-        if existing[i].content == desired.messages[i]:
+        if existing[i].content == desired_contents[i]:
             actions.append(Action(
                 type=ActionType.SKIP,
                 index=i,
                 message_id=existing[i].id,
-                content=desired.messages[i],
+                content=desired_contents[i],
             ))
             message_ids.append(existing[i].id)
         else:
@@ -181,7 +238,7 @@ def sync(
                 type=ActionType.EDIT,
                 index=i,
                 message_id=existing[i].id,
-                content=desired.messages[i],
+                content=desired_contents[i],
                 prior_content=existing[i].content,
             )
             actions.append(action)
@@ -190,7 +247,7 @@ def sync(
             else:
                 try:
                     _pace()
-                    result_msg = client.edit(existing[i].id, desired.messages[i])
+                    result_msg = client.edit(existing[i].id, desired_contents[i])
                 except EditRateLimited:
                     # Fall back to delete+repost for this and all remaining messages
                     repost_from = i
@@ -210,12 +267,17 @@ def sync(
             ))
             _pace()
             client.delete(msg.id)
-        # Post replacements (and any new messages beyond overlap)
+        # Post replacements (and any new messages beyond overlap) — sender
+        # kwargs from the desired-entry go with the POST.
         for j in range(repost_from, M):
-            action = Action(type=ActionType.POST, index=j, content=desired.messages[j])
+            action = Action(type=ActionType.POST, index=j, content=desired_contents[j])
             actions.append(action)
             _pace()
-            result_msg = client.post(desired.messages[j], thread_id=thread_id)
+            result_msg = client.post(
+                desired_contents[j],
+                thread_id=thread_id,
+                **_post_kwargs(desired.messages[j]),
+            )
             message_ids.append(result_msg.id)
         return SyncResult(
             thread_id=thread_id or "",
@@ -231,7 +293,7 @@ def sync(
             action = Action(
                 type=ActionType.POST,
                 index=0,
-                content=desired.messages[0],
+                content=desired_contents[0],
             )
             actions.append(action)
             if opts.dry_run:
@@ -239,7 +301,10 @@ def sync(
                 thread_id = "<new>"
             else:
                 _pace()
-                result_msg = client.post(desired.messages[0])
+                result_msg = client.post(
+                    desired_contents[0],
+                    **_post_kwargs(desired.messages[0]),
+                )
                 thread_id = result_msg.id
                 message_ids.append(result_msg.id)
             start = 1
@@ -248,14 +313,18 @@ def sync(
             action = Action(
                 type=ActionType.POST,
                 index=i,
-                content=desired.messages[i],
+                content=desired_contents[i],
             )
             actions.append(action)
             if opts.dry_run:
                 message_ids.append("<new>")
             else:
                 _pace()
-                result_msg = client.post(desired.messages[i], thread_id=thread_id)
+                result_msg = client.post(
+                    desired_contents[i],
+                    thread_id=thread_id,
+                    **_post_kwargs(desired.messages[i]),
+                )
                 message_ids.append(result_msg.id)
 
     return SyncResult(

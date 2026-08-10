@@ -58,8 +58,20 @@ class BskyClient:
                 if hasattr(reply, 'post') and reply.post.author.did == self.did:
                     self._collect_thread(reply, out)
 
-    def post(self, content: str, thread_id: str | None = None) -> Message:
-        """Create a post. If thread_id is given, reply to the root post."""
+    def post(
+        self,
+        content: str,
+        thread_id: str | None = None,
+        *,
+        username: str | None = None,
+        icon_url: str | None = None,
+        icon_emoji: str | None = None,
+    ) -> Message:
+        """Create a post. If thread_id is given, reply to the root post.
+
+        Sender-override fields (username/icon_url/icon_emoji) accepted for
+        signature parity with the `ThreadClient` protocol but ignored —
+        Bluesky has no per-message sender concept."""
         if len(content) > POST_LIMIT:
             raise ValueError(f"Post exceeds Bluesky's {POST_LIMIT} char limit ({len(content)} chars)")
 

@@ -39,7 +39,15 @@ class FixtureClient:
     def list_messages(self, thread_id: str) -> list[Message]:
         return list(self.threads.get(thread_id, []))
 
-    def post(self, content: str, thread_id: str | None = None) -> Message:
+    def post(
+        self,
+        content: str,
+        thread_id: str | None = None,
+        *,
+        username: str | None = None,
+        icon_url: str | None = None,
+        icon_emoji: str | None = None,
+    ) -> Message:
         msg = Message(id=self._new_id(), content=content, editable=True)
         if thread_id is None:
             self.threads[msg.id] = [msg]

@@ -6,7 +6,7 @@ Python surface: `EditRateLimited` exception handling, `Action.format`
 ANSI escapes, `SyncOptions(dry_run=True)` semantics, and the
 `DiscordClient` `Bot ` token prefix.
 """
-from thrds import Action, ActionType, EditRateLimited, Message, SyncOptions, Thread, sync
+from thrds import Action, ActionType, EditRateLimited, Message, Msg, SyncOptions, Thread, sync
 
 
 class MockClient:
@@ -15,6 +15,8 @@ class MockClient:
     def __init__(self, threads: dict[str, list[Message]] | None = None):
         self.threads: dict[str, list[Message]] = threads or {}
         self._next_id = 1
+        # Recorded post() calls for sender-forwarding assertions
+        self.post_calls: list[dict] = []
 
     def _new_id(self) -> str:
         id_ = str(self._next_id)
@@ -24,7 +26,22 @@ class MockClient:
     def list_messages(self, thread_id: str) -> list[Message]:
         return list(self.threads.get(thread_id, []))
 
-    def post(self, content: str, thread_id: str | None = None) -> Message:
+    def post(
+        self,
+        content: str,
+        thread_id: str | None = None,
+        *,
+        username: str | None = None,
+        icon_url: str | None = None,
+        icon_emoji: str | None = None,
+    ) -> Message:
+        self.post_calls.append({
+            'content': content,
+            'thread_id': thread_id,
+            'username': username,
+            'icon_url': icon_url,
+            'icon_emoji': icon_emoji,
+        })
         msg = Message(id=self._new_id(), content=content)
         if thread_id is None:
             self.threads[msg.id] = [msg]
@@ -185,3 +202,72 @@ def test_sync_result_format_preview():
 
     prefixed = result.format_preview(color=False, prefix="t1: ")
     assert prefixed == "t1: SKIP [0] (unchanged)\nt1: EDIT [1]\nt1:   -old\nt1:   +new"
+
+
+# --- Msg wrapper / per-message sender ---
+
+def test_sync_msg_entries_carry_sender_to_post():
+    """A `Msg` entry in `Thread.messages` forwards username/icon_url/icon_emoji to `post()`."""
+    client = MockClient()
+    desired = Thread(messages=[
+        Msg(content="OP text", username="Custom OP", icon_url="https://cdn.example/op.png"),
+        Msg(content="Reply text", username="Custom Reply", icon_emoji=":sparkles:"),
+    ])
+    sync(client, desired)
+    assert client.post_calls == [
+        {'content': 'OP text', 'thread_id': None,
+         'username': 'Custom OP', 'icon_url': 'https://cdn.example/op.png', 'icon_emoji': None},
+        # After the OP is posted, its ID becomes the thread_id for subsequent replies.
+        {'content': 'Reply text', 'thread_id': '1',
+         'username': 'Custom Reply', 'icon_url': None, 'icon_emoji': ':sparkles:'},
+    ]
+
+
+def test_sync_str_entries_send_no_sender_fields():
+    """Bare `str` entries send None for every sender field (client defaults kick in downstream)."""
+    client = MockClient()
+    sync(client, Thread(messages=["OP", "Reply"]))
+    for call in client.post_calls:
+        assert call['username'] is None
+        assert call['icon_url'] is None
+        assert call['icon_emoji'] is None
+
+
+def test_sync_mixed_str_and_msg_entries():
+    """Mixing `str` and `Msg` in one thread is fine — each entry resolves independently."""
+    client = MockClient()
+    desired = Thread(messages=[
+        Msg(content="OP", username="Digest — 2026-08-10"),
+        "Reply 1 (plain str)",
+        Msg(content="Reply 2 (Msg)", username="Digest"),
+    ])
+    sync(client, desired)
+    usernames = [c['username'] for c in client.post_calls]
+    assert usernames == ['Digest — 2026-08-10', None, 'Digest']
+
+
+def test_sync_edit_does_not_carry_sender_fields():
+    """Changing content in a `Msg` triggers EDIT — sender is post-time-only, so
+    the edit path uses `client.edit(id, content)` with NO sender forwarded.
+    (MockClient.edit signature only takes id+content; if sync tried to pass
+    sender kwargs, this would raise TypeError.)"""
+    client = MockClient({"t1": [Message(id="m1", content="original")]})
+    desired = Thread(messages=[
+        Msg(content="edited", username="new-name", icon_url="https://cdn.example/x.png"),
+    ])
+    result = sync(client, desired, thread_id="t1")
+    action_types = [a.type for a in result.actions]
+    assert action_types == [ActionType.EDIT]
+    # No POST calls happened — proves sender fields didn't leak into edit path.
+    assert client.post_calls == []
+
+
+def test_sync_msg_content_powers_positional_diff():
+    """The positional diff compares `Msg.content` (not the whole Msg) — a sender-only
+    change on an unchanged content is a SKIP, not an EDIT."""
+    client = MockClient({"t1": [Message(id="m1", content="same")]})
+    # `Msg(content='same', ...)` has same content as existing → SKIP.
+    desired = Thread(messages=[Msg(content="same", username="new-sender")])
+    result = sync(client, desired, thread_id="t1")
+    assert [a.type for a in result.actions] == [ActionType.SKIP]
+    assert client.post_calls == []

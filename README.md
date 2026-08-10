@@ -146,6 +146,7 @@ Add these under **OAuth & Permissions → User Token Scopes**:
 | `channels:read` | Resolve `#name` → `C…` for public channels (only if pushing/pulling public) |
 | `users:read` | Resolve foreign-author names on `pull` |
 | `emoji:read` | Download custom workspace emoji on `pull` |
+| `chat:write.customize` | Per-message `username` / `icon_url` / `icon_emoji` overrides (via `Msg`) |
 
 Metadata visibility is app-scoped (Slack only returns your app's metadata to your app), so `recover` needs **no** additional scope beyond the ones above.
 

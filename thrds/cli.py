@@ -23,6 +23,10 @@ User Token Scopes):
   push/pull to public channels)
 - ``users:read`` — resolve foreign-author names on ``pull``
 - ``emoji:read`` — download custom workspace emoji on ``pull``
+- ``chat:write.customize`` — per-message sender overrides (`Msg` with
+  ``username`` / ``icon_url`` / ``icon_emoji``); library-level feature,
+  not currently used by any CLI verb. Add only if you use it in library
+  code.
 
 Metadata visibility is app-scoped (Slack only returns your app's
 metadata to your app); no extra scope required for ``recover``.

@@ -92,11 +92,20 @@ class SlackClient:
         token: str,
         channel: str,
         username: str | None = None,
+        icon_url: str | None = None,
         icon_emoji: str | None = None,
     ):
+        """
+        ``username`` / ``icon_url`` / ``icon_emoji`` are the thread-wide
+        defaults; per-message overrides (via `Msg`) take precedence.
+        Custom sender/icon requires the ``chat:write.customize`` scope.
+        ``icon_url`` (a hosted image URL) wins over ``icon_emoji`` if both
+        are set — Slack accepts one or the other on `chat.postMessage`.
+        """
         self.token = token
         self.channel = channel
         self.username = username
+        self.icon_url = icon_url
         self.icon_emoji = icon_emoji
         self._suppress_unfurls: bool = True
         self._metadata_by_content: dict[str, dict] | None = None
@@ -190,7 +199,22 @@ class SlackClient:
             messages = messages[1:]
         return messages
 
-    def post(self, content: str, thread_id: str | None = None) -> Message:
+    def post(
+        self,
+        content: str,
+        thread_id: str | None = None,
+        *,
+        username: str | None = None,
+        icon_url: str | None = None,
+        icon_emoji: str | None = None,
+    ) -> Message:
+        """
+        Sender fields resolve message override → client default → unset.
+        ``icon_url`` beats ``icon_emoji`` when both resolve (Slack accepts
+        one or the other on ``chat.postMessage``). Requires the
+        ``chat:write.customize`` scope on the token for any override to
+        take effect; without it Slack silently ignores the fields.
+        """
         if len(content) > SLACK_MESSAGE_LIMIT:
             raise ValueError(
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
@@ -202,10 +226,26 @@ class SlackClient:
             "unfurl_links": not self._suppress_unfurls,
             "unfurl_media": not self._suppress_unfurls,
         }
-        if self.username is not None:
-            data["username"] = self.username
-        if self.icon_emoji is not None:
-            data["icon_emoji"] = self.icon_emoji
+        resolved_username = username if username is not None else self.username
+        if resolved_username is not None:
+            data["username"] = resolved_username
+        # Icon resolution treats icon_url + icon_emoji as a unit ("the icon"):
+        # if the message sets EITHER, the client's icon is fully replaced —
+        # otherwise the client's icon (either flavor) applies. This matches
+        # the user's implicit intent ("I set icon_* on this msg, use that")
+        # and diverges from the spec's field-by-field draft that would let
+        # a client icon_url quietly override a msg icon_emoji. Within either
+        # source (msg or client), icon_url beats icon_emoji if both are set.
+        if icon_url is not None or icon_emoji is not None:
+            if icon_url is not None:
+                data["icon_url"] = icon_url
+            else:
+                data["icon_emoji"] = icon_emoji
+        elif self.icon_url is not None or self.icon_emoji is not None:
+            if self.icon_url is not None:
+                data["icon_url"] = self.icon_url
+            else:
+                data["icon_emoji"] = self.icon_emoji
         if thread_id is not None:
             data["thread_ts"] = thread_id
         md = self._metadata_for(content)
