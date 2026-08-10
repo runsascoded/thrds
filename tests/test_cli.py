@@ -864,7 +864,7 @@ def test_recover_oldest_days_forwards_unix_ts_to_scan(in_tmp, monkeypatch):
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
     result = CliRunner().invoke(cli, ['recover', '-d', '7', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
-    assert captured[-1].scan_calls == [{
+    assert captured[0].scan_calls == [{
         'channel': 'C_PROD',
         'oldest': 1_000_000.0 - 7 * 86400,
         'latest': None,
@@ -887,7 +887,7 @@ def test_recover_default_max_pages_is_50(in_tmp, monkeypatch):
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
     CliRunner().invoke(cli, ['recover', 'C_PROD'])
-    assert captured[-1].scan_calls[-1]['max_pages'] == 50
+    assert captured[0].scan_calls[-1]['max_pages'] == 50
 
 
 def test_recover_max_pages_zero_disables_cap(in_tmp, monkeypatch):
@@ -904,7 +904,7 @@ def test_recover_max_pages_zero_disables_cap(in_tmp, monkeypatch):
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
     CliRunner().invoke(cli, ['recover', '-m', '0', 'C_PROD'])
-    assert captured[-1].scan_calls[-1]['max_pages'] is None
+    assert captured[0].scan_calls[-1]['max_pages'] is None
 
 
 def test_recover_translates_scan_cap_reached_to_usage_error(in_tmp, monkeypatch):
@@ -959,7 +959,7 @@ def test_recover_latest_days_forwards_derived_unix_ts(in_tmp, monkeypatch):
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
     result = CliRunner().invoke(cli, ['recover', '-D', '3', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
-    assert captured[-1].scan_calls[-1]['latest'] == 1_000_000.0 - 3 * 86400
+    assert captured[0].scan_calls[-1]['latest'] == 1_000_000.0 - 3 * 86400
 
 
 def test_recover_cursor_forwards_to_scan(in_tmp, monkeypatch):
@@ -976,7 +976,7 @@ def test_recover_cursor_forwards_to_scan(in_tmp, monkeypatch):
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
     CliRunner().invoke(cli, ['recover', '--cursor', 'CURSOR_XYZ', 'C_PROD'])
-    assert captured[-1].scan_calls[-1]['cursor'] == 'CURSOR_XYZ'
+    assert captured[0].scan_calls[-1]['cursor'] == 'CURSOR_XYZ'
 
 
 def test_recover_cursor_and_latest_days_mutually_exclusive(in_tmp, monkeypatch):
@@ -1015,3 +1015,101 @@ def test_recover_scan_cap_reached_prints_next_cursor(in_tmp, monkeypatch):
     assert '  next cursor: RESUME_HERE' in result.stderr
     # And the exception message itself is in the UsageError line.
     assert 'hit --max-pages=50' in result.stderr
+
+
+# --- list-sessions ---
+
+def test_list_sessions_prints_table(in_tmp, monkeypatch):
+    """Multi-session channel → header + row per session, newest first, exit 0."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {
+            's-old': _recovered(session_id='s-old', doc_slug='old-doc',
+                                threads={'x': '10.0'}, newest_ts='10.0'),
+            's-new': _recovered(session_id='s-new', doc_slug='new-doc',
+                                threads={'y': '20.0', 'z': '20.5'}, newest_ts='20.5'),
+        }
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['list-sessions', 'C_PROD'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    lines = result.stderr.splitlines()
+    # Header text (there's an intro line first + column header line).
+    assert any('2 sessions in C_PROD' in l for l in lines)
+    assert any('session_id' in l and 'doc_slug' in l and 'threads' in l for l in lines)
+    # Row order: newest_ts=20.5 (s-new) before newest_ts=10.0 (s-old).
+    data_rows = [l for l in lines if 's-old' in l or 's-new' in l]
+    assert 's-new' in data_rows[0]
+    assert 's-old' in data_rows[1]
+
+
+def test_list_sessions_no_sessions_prints_empty_message_and_exits_0(in_tmp, monkeypatch):
+    """Empty channel scan → 'No thrds sessions...' on stderr, exit 0 (not 2)."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {}
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['list-sessions', 'C_PROD'])
+    assert result.exit_code == 0
+    assert 'No thrds-metadata sessions found in C_PROD.' in result.stderr
+
+
+def test_list_sessions_forwards_scan_flags(in_tmp, monkeypatch):
+    """`-d/-D/-c/-m` all reach the scan call, same shape as recover."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {}
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setattr('thrds.cli.time.time', lambda: 1_000_000.0)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, [
+        'list-sessions', '-d', '7', '-m', '100', 'C_PROD',
+    ])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert captured[-1].scan_calls == [{
+        'channel': 'C_PROD',
+        'oldest': 1_000_000.0 - 7 * 86400,
+        'latest': None,
+        'cursor': None,
+        'max_pages': 100,
+    }]
+
+
+def test_list_sessions_writes_no_state_or_doc(in_tmp, monkeypatch):
+    """`list-sessions` is read-only — no thrds.json or .md ever written."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered()}
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['list-sessions', 'C_PROD'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert not (in_tmp / STATE_PATH).exists()
+    assert not (in_tmp / 'trainium.md').exists()
+
+
+def test_list_sessions_singular_when_one_session(in_tmp, monkeypatch):
+    """Header uses 'session' (singular) when exactly one is present."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered()}
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['list-sessions', 'C_PROD'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert '1 session in C_PROD' in result.stderr
+    assert '1 sessions in C_PROD' not in result.stderr

@@ -383,6 +383,97 @@ def open_(prod: bool, staging: bool, no_open: bool):
         webbrowser.open(url)
 
 
+def _scan_bounds(
+    cursor: str | None,
+    oldest_days: float | None,
+    latest_days: float | None,
+    max_pages: int,
+) -> tuple[float | None, float | None, str | None, int | None]:
+    """Validate + resolve the scan-window CLI flags.
+
+    Returns ``(oldest_ts, latest_ts, cursor, effective_max_pages)`` — days
+    are converted to unix timestamps against `time.time()` at call time,
+    `max_pages=0` maps to `None` (uncapped). Raises `UsageError` on invalid
+    combinations (currently just `--cursor` + `--latest-days`).
+    """
+    if cursor is not None and latest_days is not None:
+        raise click.UsageError('--cursor and --latest-days are mutually exclusive (both specify where to start).')
+    now = time.time()
+    oldest_ts = now - oldest_days * 86400 if oldest_days is not None else None
+    latest_ts = now - latest_days * 86400 if latest_days is not None else None
+    return oldest_ts, latest_ts, cursor, (max_pages if max_pages > 0 else None)
+
+
+def _scan_sessions(
+    channel: str,
+    oldest_ts: float | None,
+    latest_ts: float | None,
+    cursor: str | None,
+    max_pages: int | None,
+) -> 'dict[str, object]':
+    """Run `scan_thrds_metadata` with a progress log; translate
+    `ScanCapReached` to a `UsageError` after surfacing the resume cursor
+    on its own stderr line. Shared between `recover` and `list-sessions`.
+    """
+    client = _make_slack_client()
+    total_msgs = 0
+
+    def on_page(page_num: int, msg_count: int) -> None:
+        nonlocal total_msgs
+        total_msgs += msg_count
+        err(f'  scan page {page_num}: {msg_count} msgs (total {total_msgs})')
+
+    try:
+        return client.scan_thrds_metadata(
+            channel,
+            oldest=oldest_ts,
+            latest=latest_ts,
+            cursor=cursor,
+            max_pages=max_pages,
+            on_page=on_page,
+        )
+    except ScanCapReached as e:
+        # Cursor on its own line — easy to grep out of the surrounding text.
+        if e.next_cursor:
+            err(f'  next cursor: {e.next_cursor}')
+        raise click.UsageError(str(e))
+
+
+def _print_sessions_table(sessions: dict, channel: str) -> None:
+    """Emit a newest-first table of `{sid: RecoveredSession}` to stderr.
+
+    Header + rows aligned by fixed-width columns. Used by both the
+    `list-sessions` command (unconditionally) and `recover` (when >1
+    session in the channel forces disambiguation).
+    """
+    err(f'  {"session_id":<40}  {"doc_slug":<24}  threads  newest_ts')
+    for sid, sess in sorted(sessions.items(), key=lambda kv: float(kv[1].newest_ts), reverse=True):
+        err(f'  {sid:<40}  {sess.doc_slug:<24}  {sess.thread_count:>7}  {sess.newest_ts}')
+
+
+@cli.command('list-sessions')
+@click.option('-c', '--cursor', help='Slack pagination cursor to resume from.')
+@click.option('-d', '--oldest-days', type=float, help='Only scan messages posted in the last N days.')
+@click.option('-D', '--latest-days', type=float, help='Skip messages newer than N days ago.')
+@click.option('-m', '--max-pages', type=int, default=50, show_default=True, help='Cap on `conversations.history` pages fetched. Pass 0 to disable.')
+@click.argument('channel')
+def list_sessions(cursor, oldest_days, latest_days, max_pages, channel):
+    """List thrds sessions found in CHANNEL by scanning message metadata.
+
+    Same scan machinery as `thrds recover` (same window / cap / cursor
+    flags), but read-only — never writes state or pulls the doc. Useful
+    to figure out which session_id you actually want before running
+    `recover -i <sid>`, or just to see what's in a channel.
+    """
+    oldest_ts, latest_ts, cur, cap = _scan_bounds(cursor, oldest_days, latest_days, max_pages)
+    sessions = _scan_sessions(channel, oldest_ts, latest_ts, cur, cap)
+    if not sessions:
+        err(f'No thrds-metadata sessions found in {channel}.')
+        return
+    err(f'{len(sessions)} session{"s" if len(sessions) != 1 else ""} in {channel}:')
+    _print_sessions_table(sessions, channel)
+
+
 @cli.command()
 @click.option('-c', '--cursor', help='Slack pagination cursor to resume from (printed by a prior `ScanCapReached`).')
 @click.option('-d', '--oldest-days', type=float, help='Only scan messages posted in the last N days (default: unbounded).')
@@ -426,34 +517,8 @@ def recover(
             f'{STATE_PATH} already exists in {session_dir} — refusing to overwrite. '
             'cd into a fresh session dir before running `thrds recover`.'
         )
-    if cursor is not None and latest_days is not None:
-        raise click.UsageError('--cursor and --latest-days are mutually exclusive (both specify where to start).')
-    client = _make_slack_client()
-    now = time.time()
-    oldest_ts = now - oldest_days * 86400 if oldest_days is not None else None
-    latest_ts = now - latest_days * 86400 if latest_days is not None else None
-    total_msgs = 0
-
-    def on_page(page_num: int, msg_count: int) -> None:
-        nonlocal total_msgs
-        total_msgs += msg_count
-        err(f'  scan page {page_num}: {msg_count} msgs (total {total_msgs})')
-
-    try:
-        sessions = client.scan_thrds_metadata(
-            channel,
-            oldest=oldest_ts,
-            latest=latest_ts,
-            cursor=cursor,
-            max_pages=max_pages if max_pages > 0 else None,
-            on_page=on_page,
-        )
-    except ScanCapReached as e:
-        # Surface the resume state on stderr as its own line — makes the
-        # cursor easy to grep out of the surrounding text.
-        if e.next_cursor:
-            err(f'  next cursor: {e.next_cursor}')
-        raise click.UsageError(str(e))
+    oldest_ts, latest_ts, cur, cap = _scan_bounds(cursor, oldest_days, latest_days, max_pages)
+    sessions = _scan_sessions(channel, oldest_ts, latest_ts, cur, cap)
     if not sessions:
         raise click.UsageError(
             f'No thrds-metadata messages found in {channel}. '
@@ -466,10 +531,7 @@ def recover(
             err(f'Auto-selecting the only session in {channel}: {session_id}')
         else:
             err(f'{len(sessions)} thrds sessions found in {channel}; pass -i/--session-id to pick one:')
-            # Header + rows, newest-session-first (recent activity is usually what you want).
-            err(f'  {"session_id":<40}  {"doc_slug":<24}  threads  newest_ts')
-            for sid, sess in sorted(sessions.items(), key=lambda kv: float(kv[1].newest_ts), reverse=True):
-                err(f'  {sid:<40}  {sess.doc_slug:<24}  {sess.thread_count:>7}  {sess.newest_ts}')
+            _print_sessions_table(sessions, channel)
             raise click.exceptions.Exit(2)
     if session_id not in sessions:
         raise click.UsageError(
@@ -500,6 +562,9 @@ def recover(
     )
     if no_write_doc:
         return
+    # `_scan_sessions` made its own client; make another for the pull.
+    # Cheap (no I/O in `__init__`) and keeps the helper contract clean.
+    client = _make_slack_client()
     doc = (
         client.pull_doc_staging(state, session_dir=session_dir)
         if staging
