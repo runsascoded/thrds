@@ -382,6 +382,91 @@ def open_(prod: bool, staging: bool, no_open: bool):
         webbrowser.open(url)
 
 
+@cli.command()
+@click.option('-i', '--session-id', help='Session ID to recover (required if channel holds >1 session).')
+@click.option('-s', '--staging', is_flag=True, help='Route recovered pointers to staging_threads (default: prod_threads[channel]).')
+@click.option('-W', '--no-write-doc', is_flag=True, help='Skip the doc-pull step; write thrds.json only.')
+@click.argument('channel')
+def recover(session_id: str | None, staging: bool, no_write_doc: bool, channel: str):
+    """Rebuild `thrds.json` (and DOC.md) from Slack metadata in CHANNEL.
+
+    Every ``thrds`` post carries ``event_type='thrds'`` metadata (session_id,
+    doc_slug, thread_slug, kind); ``recover`` scans CHANNEL for those tags
+    and reassembles the local session state — the durability story for the
+    write-through cache in ``thrds.json``.
+
+    Run inside an empty session dir. Refuses to overwrite an existing
+    ``thrds.json`` (that's a live session, not a recovery target).
+
+    Bare invocation lists sessions found in the channel and exits (code 2)
+    if there's more than one — pass ``-i/--session-id`` to pick one; a
+    single-session channel auto-selects.
+    """
+    session_dir = Path.cwd()
+    if (session_dir / STATE_PATH).is_file():
+        raise click.UsageError(
+            f'{STATE_PATH} already exists in {session_dir} — refusing to overwrite. '
+            'cd into a fresh session dir before running `thrds recover`.'
+        )
+    client = _make_slack_client()
+    sessions = client.scan_thrds_metadata(channel)
+    if not sessions:
+        raise click.UsageError(
+            f'No thrds-metadata messages found in {channel}. '
+            "Either the channel has no thrds posts, or a different token/app "
+            'made the posts (Slack only returns metadata to the posting app).'
+        )
+    if session_id is None:
+        if len(sessions) == 1:
+            session_id = next(iter(sessions))
+            err(f'Auto-selecting the only session in {channel}: {session_id}')
+        else:
+            err(f'{len(sessions)} thrds sessions found in {channel}; pass -i/--session-id to pick one:')
+            # Header + rows, newest-session-first (recent activity is usually what you want).
+            err(f'  {"session_id":<40}  {"doc_slug":<24}  threads  newest_ts')
+            for sid, sess in sorted(sessions.items(), key=lambda kv: float(kv[1].newest_ts), reverse=True):
+                err(f'  {sid:<40}  {sess.doc_slug:<24}  {sess.thread_count:>7}  {sess.newest_ts}')
+            raise click.exceptions.Exit(2)
+    if session_id not in sessions:
+        raise click.UsageError(
+            f'Session {session_id!r} not found in {channel}. '
+            f'Available: {sorted(sessions)}'
+        )
+    recovered = sessions[session_id]
+    # Assemble SessionState from the metadata trail. session_id is preserved
+    # (not freshly minted) — that's the whole point of recovery.
+    state = SessionState(
+        session_id=recovered.session_id,
+        doc_path=f'{recovered.doc_slug}.md',
+    )
+    if staging:
+        state.staging_channel = channel
+        state.staging_preamble_ts = recovered.preamble_ts
+        state.staging_threads = dict(recovered.thread_ts_by_slug)
+    else:
+        state.prod_channel = channel
+        if recovered.preamble_ts is not None:
+            state.prod_preamble_ts[channel] = recovered.preamble_ts
+        state.prod_threads[channel] = dict(recovered.thread_ts_by_slug)
+    state.save(session_dir)
+    err(
+        f'wrote {STATE_PATH} for session {session_id} '
+        f'(doc_slug={recovered.doc_slug!r}, {recovered.thread_count} threads'
+        f'{", preamble" if recovered.preamble_ts else ""})'
+    )
+    if no_write_doc:
+        return
+    doc = (
+        client.pull_doc_staging(state, session_dir=session_dir)
+        if staging
+        else client.pull_doc_prod(state, session_dir=session_dir)
+    )
+    text = serialize_doc(doc)
+    doc_path = session_dir / f'{recovered.doc_slug}.md'
+    doc_path.write_text(text)
+    err(f'wrote pulled doc to {doc_path.name}')
+
+
 def _channel_url(channel_id: str) -> str:
     """Build the Slack workspace URL for a channel from its ID.
 

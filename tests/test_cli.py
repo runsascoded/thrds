@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from thrds import Doc, DocMessage, DocSyncResult, DocThread, SessionState
+from thrds import Doc, DocMessage, DocSyncResult, DocThread, RecoveredSession, SessionState
 from thrds.cli import SLACK_TOKEN_ENV, cli
 from thrds.state import STATE_PATH
 
@@ -37,7 +37,9 @@ class SlackSpy:
         self.push_calls = []
         self.pull_calls = []
         self.archive_calls = []
+        self.scan_calls: list[str] = []
         self.pull_returns = None
+        self.scan_returns: dict[str, RecoveredSession] | None = None
         self.sync_returns_channel = "C_STAGING"
 
     def _sync_result(self, channel: str) -> DocSyncResult:
@@ -80,6 +82,11 @@ class SlackSpy:
 
     def archive_channel(self, channel: str):
         self.archive_calls.append(channel)
+
+    def scan_thrds_metadata(self, channel: str) -> dict[str, RecoveredSession]:
+        """Scriptable via `scan_returns`; defaults to {} (no sessions found)."""
+        self.scan_calls.append(channel)
+        return self.scan_returns or {}
 
     def _request(self, api_method, data, **_kw):
         """Minimal `_request` shim so `cli._channel_url` can call `auth.test`."""
@@ -627,3 +634,196 @@ def test_open_prod_and_staging_mutually_exclusive(in_tmp, monkeypatch):
     result = CliRunner().invoke(cli, ['open', '-s', '-p'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == 'Error: --prod and --staging are mutually exclusive.'
+
+
+# --- recover ---
+
+def _recovered(session_id='s-1', doc_slug='trainium', preamble_ts=None,
+               threads=None, oldest_ts='1.0', newest_ts='2.0') -> RecoveredSession:
+    """Compact `RecoveredSession` builder for tests."""
+    return RecoveredSession(
+        session_id=session_id,
+        doc_slug=doc_slug,
+        preamble_ts=preamble_ts,
+        thread_ts_by_slug=threads or {'a': '1.001', 'b': '1.002'},
+        oldest_ts=oldest_ts,
+        newest_ts=newest_ts,
+    )
+
+
+def test_recover_writes_state_and_doc_from_scan(in_tmp, monkeypatch, spy):
+    """Single-session channel → auto-select → thrds.json + doc written; prod routing."""
+    spy_pull_doc = Doc(
+        preamble='hello',
+        threads=[
+            DocThread(slug='a', messages=[DocMessage(content='OP a.')]),
+            DocThread(slug='b', messages=[DocMessage(content='OP b.')]),
+        ],
+    )
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {
+            's-1': _recovered(
+                session_id='s-1', doc_slug='trainium',
+                preamble_ts='1.000',
+                threads={'a': '1.001', 'b': '1.002'},
+                oldest_ts='1.000', newest_ts='1.002',
+            ),
+        }
+        s.pull_returns = spy_pull_doc
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+
+    # thrds.json shape
+    state = SessionState.load()
+    assert state.session_id == 's-1'
+    assert state.doc_path == 'trainium.md'
+    assert state.prod_channel == 'C_PROD'
+    assert state.prod_preamble_ts == {'C_PROD': '1.000'}
+    assert state.prod_threads == {'C_PROD': {'a': '1.001', 'b': '1.002'}}
+    # No staging routing on default (--prod) recovery
+    assert state.staging_channel is None
+    assert state.staging_threads == {}
+    # Doc content pulled + written
+    assert (in_tmp / 'trainium.md').is_file()
+
+
+def test_recover_staging_flag_routes_to_staging_fields(in_tmp, monkeypatch):
+    """`-s` puts pointers on staging_* fields, not prod_*."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered(preamble_ts='1.000')}
+        s.pull_returns = Doc()
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', '-s', 'C_STAGING'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    state = SessionState.load()
+    assert state.staging_channel == 'C_STAGING'
+    assert state.staging_preamble_ts == '1.000'
+    assert state.staging_threads == {'a': '1.001', 'b': '1.002'}
+    assert state.prod_channel is None
+    assert state.prod_threads == {}
+
+
+def test_recover_lists_sessions_when_multiple_and_no_id(in_tmp, monkeypatch):
+    """>1 session in channel + no `-i` → prints table, exits 2, writes nothing."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {
+            's-old': _recovered(session_id='s-old', doc_slug='old-doc',
+                                threads={'x': '10.0'}, oldest_ts='10.0', newest_ts='10.0'),
+            's-new': _recovered(session_id='s-new', doc_slug='new-doc',
+                                threads={'y': '20.0'}, oldest_ts='20.0', newest_ts='20.0'),
+        }
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    assert result.exit_code == 2
+    # Table ordering: newest first (s-new before s-old)
+    lines = [l for l in result.stderr.splitlines() if l.startswith('  ') and 's-' in l]
+    # First data row is newest
+    assert 's-new' in lines[0]
+    assert 's-old' in lines[1]
+    # State file not written
+    assert not (in_tmp / STATE_PATH).exists()
+
+
+def test_recover_with_session_id_selects_specific(in_tmp, monkeypatch):
+    """`-i s-old` picks that session even when others are present."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {
+            's-old': _recovered(session_id='s-old', doc_slug='old-doc',
+                                threads={'x': '10.0'}),
+            's-new': _recovered(session_id='s-new', doc_slug='new-doc',
+                                threads={'y': '20.0'}),
+        }
+        s.pull_returns = Doc()
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', '-i', 's-old', 'C_PROD'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    state = SessionState.load()
+    assert state.session_id == 's-old'
+    assert state.doc_path == 'old-doc.md'
+    assert state.prod_threads == {'C_PROD': {'x': '10.0'}}
+
+
+def test_recover_unknown_session_id_errors(in_tmp, monkeypatch):
+    """`-i` with an id that isn't in scan results → clear error, no state written."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered()}
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', '-i', 'nope', 'C_PROD'])
+    assert result.exit_code == 2
+    assert "Session 'nope' not found in C_PROD" in result.stderr
+    assert not (in_tmp / STATE_PATH).exists()
+
+
+def test_recover_no_sessions_found_errors(in_tmp, monkeypatch):
+    """Empty scan → clear error, no state written."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {}
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    assert result.exit_code == 2
+    assert 'No thrds-metadata messages found in C_PROD' in result.stderr
+    assert not (in_tmp / STATE_PATH).exists()
+
+
+def test_recover_refuses_to_overwrite_existing_state(in_tmp, monkeypatch):
+    """Preexisting thrds.json in CWD → refuse (recover is for empty session dirs)."""
+    _init_session(in_tmp, monkeypatch)   # leaves a thrds.json in CWD via chdir
+    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    assert result.exit_code == 2
+    assert 'refusing to overwrite' in result.stderr
+
+
+def test_recover_no_write_doc_skips_pull(in_tmp, monkeypatch):
+    """`-W` writes state.json but not the .md; pull is not invoked."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'s-1': _recovered(doc_slug='trainium')}
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', '-W', 'C_PROD'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert (in_tmp / STATE_PATH).is_file()
+    assert not (in_tmp / 'trainium.md').exists()
+
+
+def test_recover_preserves_session_id_from_metadata(in_tmp, monkeypatch):
+    """Recovered SessionState.session_id equals the metadata's session_id (not fresh UUID)."""
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.scan_returns = {'a-specific-uuid': _recovered(session_id='a-specific-uuid')}
+        s.pull_returns = Doc()
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
+    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert SessionState.load().session_id == 'a-specific-uuid'

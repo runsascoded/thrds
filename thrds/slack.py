@@ -5,6 +5,7 @@ import random
 import re
 import time
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -37,6 +38,25 @@ from .state import SessionState
 THRDS_METADATA_EVENT_TYPE = 'thrds'
 
 SLACK_MESSAGE_LIMIT = 4000
+
+
+@dataclass
+class RecoveredSession:
+    """A thrds session discovered in a channel via metadata scan (``recover`` verb).
+
+    ``thread_ts_by_slug`` is sorted by ``ts`` (channel post-order) so downstream
+    consumers see a stable iteration order.
+    """
+    session_id: str
+    doc_slug: str
+    preamble_ts: str | None
+    thread_ts_by_slug: dict[str, str]
+    oldest_ts: str
+    newest_ts: str
+
+    @property
+    def thread_count(self) -> int:
+        return len(self.thread_ts_by_slug)
 
 
 class SlackClient:
@@ -951,6 +971,103 @@ class SlackClient:
             return Doc(preamble=preamble, threads=threads)
         finally:
             self.channel = prev_channel
+
+    def scan_thrds_metadata(self, channel: str) -> dict[str, RecoveredSession]:
+        """Scan ``channel``'s history for messages carrying thrds metadata.
+
+        Backs the ``thrds recover`` verb: every ``chat.postMessage`` /
+        ``chat.update`` this client makes stamps ``event_type='thrds'`` +
+        ``event_payload={session_id, doc_slug, thread_slug, kind}`` on the
+        message (see ``_thrds_metadata``). This method reverses that: it
+        walks ``conversations.history`` (with ``include_all_metadata``) and
+        groups matching messages by ``session_id`` into `RecoveredSession`s
+        that carry enough info to rebuild `SessionState.{staging,prod}_*`.
+
+        Only top-level messages contribute to the returned map because
+        ``conversations.history`` returns thread parents only. `kind='op'`
+        messages populate ``thread_ts_by_slug`` (slug → OP ts) and
+        ``kind='preamble'`` messages set ``preamble_ts``. `kind='reply'`
+        messages live under an OP and would only surface via
+        ``conversations.replies`` — but they don't influence the map,
+        so we don't fetch them.
+
+        Metadata is only visible to the app that posted the message
+        (Slack API contract), so ``recover`` only works with the same
+        token/app that authored the original posts. Cross-token recovery
+        would need a workspace-admin API and is out of scope.
+
+        Raises `ValueError` on metadata-shape inconsistency (two messages
+        with the same session_id disagreeing on ``doc_slug``) — treat that
+        as corruption, don't silently pick a side.
+        """
+        # session_id -> mutable working dict; assembled into RecoveredSession at the end
+        partial: dict[str, dict] = {}
+        cursor: str | None = None
+        while True:
+            params: dict = {
+                'channel': channel,
+                'limit': 200,
+                'include_all_metadata': True,
+            }
+            if cursor:
+                params['cursor'] = cursor
+            result = self._request('conversations.history', params)
+            for msg in result.get('messages', []):
+                md = msg.get('metadata') or {}
+                if md.get('event_type') != THRDS_METADATA_EVENT_TYPE:
+                    continue
+                payload = md.get('event_payload') or {}
+                session_id = payload.get('session_id')
+                doc_slug = payload.get('doc_slug')
+                kind = payload.get('kind')
+                if not (session_id and doc_slug and kind):
+                    # Malformed thrds metadata — skip rather than crash the whole scan.
+                    continue
+                ts = msg['ts']
+                sess = partial.setdefault(session_id, {
+                    'doc_slug': doc_slug,
+                    'preamble_ts': None,
+                    'threads': {},
+                    'oldest_ts': ts,
+                    'newest_ts': ts,
+                })
+                if sess['doc_slug'] != doc_slug:
+                    raise ValueError(
+                        f'Inconsistent doc_slug for session {session_id}: '
+                        f'{sess["doc_slug"]!r} vs {doc_slug!r} (ts={ts}). '
+                        'Metadata trail is corrupt.'
+                    )
+                # ts is a decimal string like "1784587706.222199"; compare numerically.
+                if float(ts) < float(sess['oldest_ts']):
+                    sess['oldest_ts'] = ts
+                if float(ts) > float(sess['newest_ts']):
+                    sess['newest_ts'] = ts
+                if kind == 'preamble':
+                    sess['preamble_ts'] = ts
+                elif kind == 'op':
+                    thread_slug = payload.get('thread_slug')
+                    if thread_slug:
+                        sess['threads'][thread_slug] = ts
+                # kind=='reply' or anything else: no map contribution.
+            if not result.get('has_more'):
+                break
+            cursor = (result.get('response_metadata') or {}).get('next_cursor')
+            if not cursor:
+                break
+        return {
+            sid: RecoveredSession(
+                session_id=sid,
+                doc_slug=d['doc_slug'],
+                preamble_ts=d['preamble_ts'],
+                # Sort by ts numerically so consumers see channel post-order.
+                thread_ts_by_slug=dict(sorted(
+                    d['threads'].items(), key=lambda kv: float(kv[1]),
+                )),
+                oldest_ts=d['oldest_ts'],
+                newest_ts=d['newest_ts'],
+            )
+            for sid, d in partial.items()
+        }
 
     def fetch_workspace_emoji(self) -> dict[str, str]:
         """Fetch this workspace's custom emoji map (name → URL).
