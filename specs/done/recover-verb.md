@@ -1,6 +1,21 @@
 # Spec: `thrds recover` verb
 
-**Status:** in-progress. Closes the last outstanding item from `multi-thread-posts-and-capture.md` — the durability story the metadata trail was designed for.
+**Status:** done (2026-08-10, commits `bde5a3f` + `583aee1`). Closes the last outstanding item from `multi-thread-posts-and-capture.md` — the durability story the metadata trail was designed for.
+
+## Implementation summary
+
+Landed:
+- **`SlackClient.scan_thrds_metadata(channel, *, oldest, max_pages, on_page)`** in `slack.py`: paginates `conversations.history` with `include_all_metadata=True`, filters `event_type='thrds'`, groups by `session_id`, returns `{sid: RecoveredSession}`. Raises `ValueError` on within-session `doc_slug` disagreement (corruption).
+- **`RecoveredSession`** dataclass — the summary tuple exported at package level (via `thrds.RecoveredSession`) so downstream tools can consume the scan output directly.
+- **`ScanCapReached`** exception (extends `RuntimeError`) — raised by scan when `max_pages` exhausts before `has_more` clears; distinct type so callers can catch without swallowing real failures.
+- **`thrds recover CHANNEL`** CLI verb with flags `-i/--session-id`, `-s/--staging`, `-W/--no-write-doc`, `-d/--oldest-days N`, `-m/--max-pages N` (default 50).
+- **12 scan-side unit tests** (`tests/test_recover.py`) + **14 CLI tests** (`tests/test_cli.py`). Full suite: 285 passed, 2 skipped, 0 failures.
+- **Live-verified**: recovered trainium session (`C0BNK26CASV`) byte-identically — both `thrds.json` and `trainium-2026-07-31.md` (including custom emoji).
+
+Divergences from the design body below (preserved as historical record):
+
+- **Scan caps beyond the design.** The original spec's "algorithm" section paginated unboundedly. Added `--oldest-days` / `--max-pages` / `on_page` progress log because Slack does not index metadata (there is no `has_metadata:` search operator), so scan cost on busy prod channels is a real concern. Default cap: 50 pages (~10k messages); user narrows with `--oldest-days` when they know a rough post date.
+- **`--session-id` is a flag, not a filter.** Bare `recover CHANNEL` on a single-session channel auto-selects; on a multi-session channel prints a table and exits 2 (per the spec). Explicit `-i SID` overrides both. No separate `list-sessions` subcommand yet (see follow-ups).
 
 ## Why
 
