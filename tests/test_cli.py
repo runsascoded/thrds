@@ -1276,3 +1276,41 @@ def test_push_prod_channel_flag_resolves_name(in_tmp, monkeypatch):
     # The captured `sync_doc_prod` call should carry the RESOLVED ID.
     prod_calls = [c for c in captured[-1].push_calls if c['mode'] == 'prod']
     assert prod_calls[0]['channel'] == 'C08FOO001'
+
+
+def test_pull_prod_channel_flag_resolves_name(in_tmp, monkeypatch):
+    """`pull --prod --channel #foo` resolves to `C08FOO001` before pull_doc_prod."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.channels_by_name = {'foo': 'C08FOO001'}
+        s.pull_returns = Doc()
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    _init_session(in_tmp, monkeypatch)
+    result = CliRunner().invoke(cli, ['pull', '--prod', '--channel', '#foo'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    prod_pulls = [c for c in captured[-1].pull_calls if c['mode'] == 'prod']
+    assert prod_pulls[0]['channel'] == 'C08FOO001'
+
+
+def test_diff_prod_channel_flag_resolves_name(in_tmp, monkeypatch):
+    """`diff --prod --channel #foo` resolves before pull_doc_prod (used by diff)."""
+    captured: list[SlackSpy] = []
+
+    def factory(*, token, channel):
+        s = SlackSpy(token=token, channel=channel)
+        s.channels_by_name = {'foo': 'C08FOO001'}
+        s.pull_returns = Doc()
+        captured.append(s)
+        return s
+
+    monkeypatch.setattr('thrds.cli.SlackClient', factory)
+    _init_session(in_tmp, monkeypatch)
+    result = CliRunner().invoke(cli, ['diff', '--prod', '--channel', '#foo'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    prod_pulls = [c for c in captured[-1].pull_calls if c['mode'] == 'prod']
+    assert prod_pulls[0]['channel'] == 'C08FOO001'
