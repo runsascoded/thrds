@@ -146,22 +146,25 @@ thrds slack permalink #foo 1783.1        # get workspace permalink URL
 
 [raw-spec]: specs/done/raw-mrkdwn-passthrough.md
 
-### Slack app scopes
+### Slack tokens + scopes
 
-The CLI needs a **user token** (`xoxp-`, exposed as `SLACK_THRDS_USER_TOKEN`) — `chat.update` only edits messages authored by the token's owner, so a bot token can't edit human-typed drafts, which is the whole point.
+The CLI reads the Slack token from `THRDS_SLACK_TOKEN` (a deprecated alias `SLACK_THRDS_USER_TOKEN` still works with a one-time warning). Which token type you need depends on which verbs you use:
 
-Add these under **OAuth & Permissions → User Token Scopes**:
+- **User token** (`xoxp-…`) — needed for the **session verbs** (`init` / `push` / `pull` / `diff` / `archive` / `list-sessions` / `recover` / `open`). The session workflow's whole point is "draft locally in `.md`, sync to a staging PC, tweak the posts in Slack (as you), pull back, push again"; because those in-Slack tweaks are your Slack user's own posts, only a token you own can `chat.update` them.
+- **Bot token** (`xoxb-…`) — sufficient for the **`slack` CRUD subgroup** (`history` / `thread` / `rm` / `post` / `edit` / `permalink`) as long as the bot is only editing / deleting its own posts. Also sufficient for programmatic `SlackClient.sync()` / `sync_linked()` when the bot owns the content lifecycle end-to-end (bot renders, bot posts, bot reconciles).
 
-| Scope | Needed for |
-| --- | --- |
-| `chat:write` | Post + edit messages (all sync verbs) |
-| `groups:write` | Create + archive staging private channels (`init`, `push`, `archive`) |
-| `groups:read` | Read private channel history + resolve `#name` → `C…` for private channels |
-| `channels:read` | Resolve `#name` → `C…` for public channels (only if pushing/pulling public) |
-| `users:read` | Resolve foreign-author names on `pull` |
-| `emoji:read` | Download custom workspace emoji on `pull` |
-| `chat:write.customize` | Per-message `username` / `icon_url` / `icon_emoji` overrides (via `Msg`) |
-| `reactions:read` | `SenderChangePolicy` pre-flight (`sync` aborts if a target of a sender-change repost has reactions) |
+Add scopes under **OAuth & Permissions** — under **User Token Scopes** for a user token, **Bot Token Scopes** for a bot token. All scopes have the same name in both places.
+
+| Scope | Needed for | Session verbs | CRUD / `sync()` |
+| --- | --- | :---: | :---: |
+| `chat:write` | Post / edit / delete messages | ✓ | ✓ |
+| `groups:write` | Create + archive staging PCs | ✓ (`init`, `push`, `archive`) | — |
+| `groups:read` | Read + resolve `#name` for private channels | ✓ | ✓ |
+| `channels:read` | Resolve `#name` for public channels | ✓ (if pushing/pulling public) | ✓ (public channels) |
+| `users:read` | Resolve foreign-author names on `pull` | ✓ (`pull`) | — |
+| `emoji:read` | Download custom workspace emoji on `pull` | ✓ (`pull`) | — |
+| `chat:write.customize` | Per-message `username` / `icon_url` / `icon_emoji` | If used | If used (`slack post -u`/`-i`/`-e`) |
+| `reactions:read` | `SenderChangePolicy` pre-flight (library) | — | If using aggressive-mode `sync` |
 
 Metadata visibility is app-scoped (Slack only returns your app's metadata to your app), so `recover` needs **no** additional scope beyond the ones above.
 

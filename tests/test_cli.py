@@ -571,13 +571,42 @@ def test_archive_is_a_no_op_when_no_staging_channel(in_tmp, monkeypatch, spy):
 # --- error paths ---
 
 def test_push_requires_slack_token_env(in_tmp, monkeypatch):
+    from thrds.cli import SLACK_TOKEN_ENV_DEPRECATED
     _init_session(in_tmp, monkeypatch)
+    # Delete both the canonical env var and the deprecated alias — either would
+    # satisfy `_make_slack_client`, and the deprecated one may leak in from the
+    # outer test environment.
     monkeypatch.delenv(SLACK_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(SLACK_TOKEN_ENV_DEPRECATED, raising=False)
     result = CliRunner().invoke(cli, ['push'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        f"Error: {SLACK_TOKEN_ENV} not set — add a `xoxp-` user token to your env."
+        f"Error: {SLACK_TOKEN_ENV} not set — add a `xoxp-` (user) or `xoxb-` "
+        f"(bot) Slack token to your env. Session verbs (init/push/pull/…) "
+        f"need a user token; the `slack` CRUD subgroup accepts either."
     )
+
+
+def test_deprecated_env_var_still_works_with_warning(in_tmp, monkeypatch, spy):
+    """Setting only `SLACK_THRDS_USER_TOKEN` (the deprecated name) still runs
+    the command; a one-time deprecation warning fires on stderr."""
+    from thrds.cli import SLACK_TOKEN_ENV_DEPRECATED
+    # Reset the module-level warn-once latch so the warning fires within THIS test.
+    import thrds.cli as cli_mod
+    monkeypatch.setattr(cli_mod, '_deprecated_env_warned', False)
+    _init_session(in_tmp, monkeypatch)
+    monkeypatch.delenv(SLACK_TOKEN_ENV, raising=False)
+    monkeypatch.setenv(SLACK_TOKEN_ENV_DEPRECATED, 'xoxp-legacy')
+    result = CliRunner().invoke(cli, ['push', '--dry-run'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # The token gets through to the spy (proving the deprecated var was read).
+    assert spy.token == 'xoxp-legacy'
+    # And the deprecation notice fired on stderr.
+    warning_lines = [
+        line for line in result.stderr.splitlines()
+        if 'deprecated' in line and SLACK_TOKEN_ENV_DEPRECATED in line
+    ]
+    assert len(warning_lines) == 1
 
 
 def test_push_requires_state_json(in_tmp, spy):

@@ -1,32 +1,52 @@
 """Command-line interface for `thrds` sessions.
 
 Wraps the `Doc` / `SessionState` / `SlackClient` primitives into
-init/push/pull/diff/archive/open subcommands. Each session lives in its own
-directory (ghpr-style: ``<git-root-or-cwd>/thrds/<slug>/``) with its
-own private git repo (nested `.git/` is invisible to any surrounding
-project's git). A secret gist created at init becomes the ``g`` remote;
-state-mutating verbs (`push`, `pull --write`, `archive`) auto-commit +
-push, so the mirror always reflects the current session state.
+init/push/pull/diff/archive/open subcommands, plus a low-level
+``slack …`` CRUD subgroup (see `specs/done/slack-crud-cli.md`). Each
+session lives in its own directory (ghpr-style:
+``<git-root-or-cwd>/thrds/<slug>/``) with its own private git repo
+(nested `.git/` is invisible to any surrounding project's git). A
+secret gist created at init becomes the ``g`` remote; state-mutating
+verbs (`push`, `pull --write`, `archive`) auto-commit + push, so the
+mirror always reflects the current session state.
 
-Slack access requires ``SLACK_THRDS_USER_TOKEN`` — a **user-scoped**
-``xoxp-`` token (see `multi-thread-posts-and-capture.md` for why user
-scope is load-bearing: `chat.update` only edits messages authored by
-the token's owner, so a bot token can't edit human-typed drafts).
+Slack access is via **either** token type, set in ``THRDS_SLACK_TOKEN``
+(``SLACK_THRDS_USER_TOKEN`` is a deprecated alias, still honored with a
+one-time warning). The token type determines which verbs are usable:
 
-Required scopes (add all in the Slack app's OAuth & Permissions →
-User Token Scopes):
+- **User token** (``xoxp-…``) — required for the **session verbs**
+  (``init`` / ``push`` / ``pull`` / ``diff`` / ``archive`` /
+  ``list-sessions`` / ``recover`` / ``open``). The session workflow's
+  point is "draft locally in `.md`, sync to a staging PC, tweak the
+  posts in Slack (as you), pull back, push again"; because those
+  in-Slack tweaks are your Slack user's own posts, only a token owned
+  by you can ``chat.update`` them. See
+  `multi-thread-posts-and-capture.md`.
+- **Bot token** (``xoxb-…``) — sufficient for the ``slack`` CRUD
+  subgroup (``history`` / ``thread`` / ``rm`` / ``post`` / ``edit`` /
+  ``permalink``) whenever the bot is only editing / deleting its own
+  posts (Slack lets ``chat.update`` / ``chat.delete`` touch a bot's
+  own messages fine). Also sufficient for programmatic
+  ``SlackClient.sync()`` / ``sync_linked()`` when the bot owns the
+  content lifecycle end-to-end (the watchy shape: bot renders mrkdwn,
+  bot posts, bot reconciles later).
 
-- ``chat:write`` — post + edit messages
-- ``groups:write`` — create + archive staging private channels
+Required scopes (add under **OAuth & Permissions** — under **User Token
+Scopes** for a user token, **Bot Token Scopes** for a bot token):
+
+- ``chat:write`` — post + edit + delete messages (all sync + CRUD verbs)
+- ``groups:write`` — create + archive staging private channels (``init``,
+  ``push``, ``archive``); session-verb-only
 - ``groups:read`` — read private channel history + resolve names to IDs
 - ``channels:read`` — resolve public channel names to IDs (only if you
   push/pull to public channels)
-- ``users:read`` — resolve foreign-author names on ``pull``
-- ``emoji:read`` — download custom workspace emoji on ``pull``
-- ``chat:write.customize`` — per-message sender overrides (`Msg` with
-  ``username`` / ``icon_url`` / ``icon_emoji``); library-level feature,
-  not currently used by any CLI verb. Add only if you use it in library
-  code.
+- ``users:read`` — resolve foreign-author names on ``pull``;
+  session-verb-only
+- ``emoji:read`` — download custom workspace emoji on ``pull``;
+  session-verb-only
+- ``chat:write.customize`` — per-message sender overrides (``Msg`` with
+  ``username`` / ``icon_url`` / ``icon_emoji``, or the CRUD ``post``
+  verb's ``-u`` / ``-i`` / ``-e`` flags). Add if you use them.
 - ``reactions:read`` — `SenderChangePolicy` pre-flight (`sync` aborts a
   sender-change repost if a target has reactions and
   ``lose_reactions_ok=False``); library-level, not used by any CLI verb.
@@ -57,20 +77,42 @@ def err(*msg):
     click.echo(" ".join(str(m) for m in msg), err=True)
 
 
-SLACK_TOKEN_ENV = 'SLACK_THRDS_USER_TOKEN'
+SLACK_TOKEN_ENV = 'THRDS_SLACK_TOKEN'
+SLACK_TOKEN_ENV_DEPRECATED = 'SLACK_THRDS_USER_TOKEN'
+
+_deprecated_env_warned = False
 
 
 def _make_slack_client() -> SlackClient:
-    """Instantiate a `SlackClient` from ``SLACK_THRDS_USER_TOKEN``.
+    """Instantiate a `SlackClient` from ``THRDS_SLACK_TOKEN`` (or the
+    deprecated ``SLACK_THRDS_USER_TOKEN`` alias, with a one-time warning).
+
+    Either a user token (``xoxp-…``) or a bot token (``xoxb-…``) works;
+    the session verbs require a user token because they edit human-typed
+    posts in Slack, while the ``slack`` CRUD subgroup and programmatic
+    ``SlackClient.sync()`` are fine with either token type (bot fine as
+    long as the bot owns the content it's editing / deleting). See the
+    module docstring for the full breakdown.
 
     ``channel`` is initialized to ``""`` — every doc-level method
     (``sync_doc_*``, ``pull_doc_*``) swaps ``self.channel`` internally per
     operation, so the init value doesn't matter.
     """
+    global _deprecated_env_warned
     token = os.environ.get(SLACK_TOKEN_ENV)
     if not token:
+        token = os.environ.get(SLACK_TOKEN_ENV_DEPRECATED)
+        if token and not _deprecated_env_warned:
+            err(
+                f"warning: {SLACK_TOKEN_ENV_DEPRECATED} is deprecated; "
+                f"rename to {SLACK_TOKEN_ENV}. Both are honored for now."
+            )
+            _deprecated_env_warned = True
+    if not token:
         raise click.UsageError(
-            f"{SLACK_TOKEN_ENV} not set — add a `xoxp-` user token to your env."
+            f"{SLACK_TOKEN_ENV} not set — add a `xoxp-` (user) or `xoxb-` "
+            f"(bot) Slack token to your env. Session verbs (init/push/pull/…) "
+            f"need a user token; the `slack` CRUD subgroup accepts either."
         )
     return SlackClient(token=token, channel="")
 

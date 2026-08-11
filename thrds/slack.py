@@ -1435,7 +1435,7 @@ class SlackClient:
                         print(
                             f"warning: `emoji.list` denied ({msg.strip()}). "
                             f"Custom emoji ({sorted(unknown)}) will pass through as `:name:` text — "
-                            f"add `emoji:read` to `SLACK_THRDS_USER_TOKEN` to inline them as images.",
+                            f"add `emoji:read` to `THRDS_SLACK_TOKEN` to inline them as images.",
                             file=__import__('sys').stderr,
                         )
                     else:
