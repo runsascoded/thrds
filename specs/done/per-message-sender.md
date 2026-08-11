@@ -1,6 +1,6 @@
 # Spec: per-message custom sender (name + avatar)
 
-**Status:** baseline implemented 2026-08-10; "aggressive sender-change reposts" (see §Aggressive-mode extension) still open. Motivated by dogfooding in the OA **GCS-usage daily digest** (`marin-gcs-usage`), where a thread wants *different* senders on its OP vs. its replies, and a **custom hosted avatar** (`icon_url`) that thrds can't set at all today.
+**Status:** fully implemented 2026-08-10 (baseline + aggressive-mode `SenderChangePolicy`). Motivated by dogfooding in the OA **GCS-usage daily digest** (`marin-gcs-usage`), where a thread wants *different* senders on its OP vs. its replies, and a **custom hosted avatar** (`icon_url`) that thrds can't set at all today.
 
 ## Divergences from this draft when implemented
 
