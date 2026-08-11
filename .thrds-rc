@@ -9,3 +9,11 @@ alias thrdsop='thrds open -p'        # prod channel
 # `list-sessions` / `recover`: long command names + likely-repeated flags
 alias thrdsls='thrds list-sessions'  # what sessions exist in a channel
 alias thrdsr='thrds recover'         # rebuild state from Slack metadata
+
+# `slack` CRUD (raw-by-default): shave the `thrds slack ` prefix
+alias tsh='thrds slack history'      # last N messages in a channel
+alias tst='thrds slack thread'       # OP + replies for a thread ts
+alias tsr='thrds slack rm'           # delete msg(s) by ts (+ `-f` orphans_ok)
+alias tsp='thrds slack post'         # post raw mrkdwn (+ `-m` for md→mrkdwn)
+alias tse='thrds slack edit'         # edit msg by ts (raw by default)
+alias tspl='thrds slack permalink'   # get permalink URL

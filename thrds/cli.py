@@ -660,6 +660,210 @@ def _channel_url(channel_id: str) -> str:
     return f'{workspace_url}/archives/{channel_id}'
 
 
+# --- Low-level Slack CRUD subgroup (`thrds slack …`) ---
+#
+# Motivation + full design in `specs/done/slack-crud-cli.md`. Six verbs that
+# wrap `SlackClient` primitives one-to-one for scripting and ad-hoc CRUD, so
+# throwaway `_request` heredocs stop reappearing. Deliberate divergence from
+# the session verbs: `post`/`edit` default to **raw mrkdwn** (no `to_slack()`
+# md→mrkdwn conversion), with `-m/--markdown` to opt into the session-verb
+# behavior. See `specs/done/raw-mrkdwn-passthrough.md` for the underlying
+# `raw=` kwarg.
+
+_CRUD_TS_MAX_TEXT = 100
+
+
+def _crud_client(channel_ref: str) -> SlackClient:
+    """Build a `SlackClient` with `self.channel` resolved from ``channel_ref``.
+
+    Every CRUD verb ends up making at least one call that reads
+    ``self.channel`` (delete / post / edit / permalink); centralize the
+    resolve + assignment so each verb stays a one-liner.
+    """
+    client = _make_slack_client()
+    client.channel = _resolve_channel(client, channel_ref)
+    return client
+
+
+def _crud_sender(msg: dict) -> str:
+    """Compact "sender" column for `slack history` / `slack thread` display.
+
+    Preference order: explicit ``username`` (per-message override, e.g. a
+    ``chat.postMessage`` with ``username=…``) → ``user`` (Slack user ID
+    ``U…``) → ``bot_id`` (``B…`` for bot-authored posts). Falls back to
+    ``?`` if none present (should be rare). No `users.info` resolution
+    here — the CRUD CLI is a low-level view; ``-j/--json`` gives the full
+    dict if the caller wants the resolved name.
+    """
+    return (
+        msg.get("username")
+        or msg.get("user")
+        or msg.get("bot_id")
+        or "?"
+    )
+
+
+def _crud_first_line(text: str) -> str:
+    """Return the first non-empty line of ``text`` truncated to a display width.
+
+    The ``history`` / ``thread`` tables show one line per message; long
+    messages get elided with ``…`` at ``_CRUD_TS_MAX_TEXT`` chars. Empty
+    messages (image-only / edited-to-empty) render as an empty string
+    so the row still lines up.
+    """
+    for line in text.splitlines():
+        stripped = line.rstrip()
+        if stripped:
+            if len(stripped) > _CRUD_TS_MAX_TEXT:
+                return stripped[: _CRUD_TS_MAX_TEXT - 1] + "…"
+            return stripped
+    return ""
+
+
+def _crud_render_messages(msgs: list[dict]) -> str:
+    """Render a table of ``ts  sender  text`` lines from raw Slack msg dicts.
+
+    Sender column is left-padded to the max sender width seen this call,
+    so rows align without depending on a fixed magic number (channels
+    with only long custom sender names look OK; bot-heavy channels stay
+    tight).
+    """
+    if not msgs:
+        return ""
+    senders = [_crud_sender(m) for m in msgs]
+    sender_w = max(len(s) for s in senders)
+    lines = []
+    for m, sender in zip(msgs, senders):
+        ts = m.get("ts", "?")
+        text = _crud_first_line(m.get("text", "") or "")
+        lines.append(f"{ts}  {sender:<{sender_w}}  {text}")
+    return "\n".join(lines)
+
+
+@cli.group("slack")
+def slack_cli():
+    """Low-level Slack CRUD verbs (history, thread, rm, post, edit, permalink).
+
+    Wraps `SlackClient` methods one-to-one; every verb takes a CHANNEL
+    (accepts ``#name`` or ``C…`` id, resolved via the token). ``post`` /
+    ``edit`` default to **raw mrkdwn** (send verbatim); pass ``-m`` to
+    opt into local markdown → Slack mrkdwn conversion — the reverse of
+    the session verbs' default. See `specs/done/slack-crud-cli.md`.
+    """
+    pass
+
+
+@slack_cli.command("history")
+@click.option("-j", "--json", "as_json", is_flag=True, help="Emit raw message dicts as JSON.")
+@click.option("-n", "--limit", type=int, default=20, help="Max messages to fetch (default 20).")
+@click.argument("channel")
+def slack_history(as_json: bool, limit: int, channel: str):
+    """List the last N messages in CHANNEL (default 20)."""
+    client = _crud_client(channel)
+    msgs = client.list_channel_history(client.channel, limit=limit)
+    if as_json:
+        import json as _json
+        click.echo(_json.dumps(msgs, indent=2))
+    else:
+        rendered = _crud_render_messages(msgs)
+        if rendered:
+            click.echo(rendered)
+
+
+@slack_cli.command("thread")
+@click.option("-j", "--json", "as_json", is_flag=True, help="Emit raw message dicts as JSON.")
+@click.argument("channel")
+@click.argument("ts")
+def slack_thread(as_json: bool, channel: str, ts: str):
+    """Show OP + replies for the thread rooted at TS in CHANNEL."""
+    client = _crud_client(channel)
+    msgs = client.list_thread_raw(client.channel, ts)
+    if as_json:
+        import json as _json
+        click.echo(_json.dumps(msgs, indent=2))
+    else:
+        rendered = _crud_render_messages(msgs)
+        if rendered:
+            click.echo(rendered)
+
+
+@slack_cli.command("rm")
+@click.option("-f", "--force", is_flag=True, help="Delete even if the message has thread replies (`orphans_ok=True`).")
+@click.argument("channel")
+@click.argument("tss", nargs=-1, required=True, metavar="TS...")
+def slack_rm(force: bool, channel: str, tss: tuple[str, ...]):
+    """Delete one or more messages from CHANNEL by ts."""
+    from .core import OrphanedRepliesError
+    client = _crud_client(channel)
+    any_failed = False
+    for ts in tss:
+        try:
+            client.delete(ts, orphans_ok=force)
+            click.echo(f"{ts}: ok")
+        except OrphanedRepliesError as e:
+            any_failed = True
+            click.echo(f"{ts}: {e} — pass --force to delete anyway", err=True)
+        except RuntimeError as e:
+            any_failed = True
+            click.echo(f"{ts}: {e}", err=True)
+    if any_failed:
+        raise click.exceptions.Exit(1)
+
+
+@slack_cli.command("post")
+@click.option("-e", "--icon-emoji", help="Per-message `icon_emoji` override (requires `chat:write.customize`).")
+@click.option("-i", "--icon-url", help="Per-message `icon_url` override (requires `chat:write.customize`).")
+@click.option("-m", "--markdown", "as_markdown", is_flag=True, help="Convert local markdown → Slack mrkdwn (default: send TEXT verbatim).")
+@click.option("-t", "--thread-ts", help="Reply to the thread rooted at this ts.")
+@click.option("-u", "--username", help="Per-message `username` override (requires `chat:write.customize`).")
+@click.argument("channel")
+@click.argument("text")
+def slack_post(
+    icon_emoji: str | None,
+    icon_url: str | None,
+    as_markdown: bool,
+    thread_ts: str | None,
+    username: str | None,
+    channel: str,
+    text: str,
+):
+    """Post TEXT to CHANNEL; print the new message ts to stdout.
+
+    TEXT is sent verbatim as wire mrkdwn by default (raw). Pass -m to run
+    it through the local-md → Slack-mrkdwn conversion first.
+    """
+    client = _crud_client(channel)
+    msg = client.post(
+        text,
+        thread_id=thread_ts,
+        username=username,
+        icon_url=icon_url,
+        icon_emoji=icon_emoji,
+        raw=not as_markdown,
+    )
+    click.echo(msg.id)
+
+
+@slack_cli.command("edit")
+@click.option("-m", "--markdown", "as_markdown", is_flag=True, help="Convert local markdown → Slack mrkdwn (default: send TEXT verbatim).")
+@click.argument("channel")
+@click.argument("ts")
+@click.argument("text")
+def slack_edit(as_markdown: bool, channel: str, ts: str, text: str):
+    """Edit the message at TS in CHANNEL to TEXT (raw by default)."""
+    client = _crud_client(channel)
+    client.edit(ts, text, raw=not as_markdown)
+
+
+@slack_cli.command("permalink")
+@click.argument("channel")
+@click.argument("ts")
+def slack_permalink(channel: str, ts: str):
+    """Print the permalink URL for the message at TS in CHANNEL."""
+    client = _crud_client(channel)
+    click.echo(client.permalink(ts))
+
+
 def main():
     cli()
 

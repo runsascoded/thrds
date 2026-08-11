@@ -132,6 +132,20 @@ thrds list-sessions #foo         # what thrds sessions exist in #foo
 thrds recover -i <sid> #foo      # rebuild a lost session from Slack metadata
 ```
 
+`thrds slack …` is a low-level CRUD subgroup for ad-hoc Slack operations (finding a message's ts, deleting a test post, posting one-off mrkdwn) — a first-class alternative to hand-rolled `chat.*` heredocs. All verbs default to **raw mrkdwn** (send verbatim); pass `-m` to opt into local-md → Slack-mrkdwn conversion (the opposite of the session verbs' default — see [`raw-mrkdwn-passthrough`][raw-spec]).
+
+```bash
+thrds slack history #foo -n 10           # last 10 messages (ts, sender, text)
+thrds slack thread  #foo 1783.1          # OP + replies as a table (`-j` = JSON)
+thrds slack rm      #foo 1783.1 1783.2   # delete msg(s); `-f` = orphans_ok
+thrds slack post    #foo '*bold*'        # raw mrkdwn (`-m` = convert md first)
+thrds slack post    #foo 'hi' -u 'Bot' -i https://cdn.example/a.png -t 1783.0
+thrds slack edit    #foo 1783.1 'new'    # edit; raw by default
+thrds slack permalink #foo 1783.1        # get workspace permalink URL
+```
+
+[raw-spec]: specs/done/raw-mrkdwn-passthrough.md
+
 ### Slack app scopes
 
 The CLI needs a **user token** (`xoxp-`, exposed as `SLACK_THRDS_USER_TOKEN`) — `chat.update` only edits messages authored by the token's owner, so a bot token can't edit human-typed drafts, which is the whole point.

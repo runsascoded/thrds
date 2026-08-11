@@ -202,6 +202,46 @@ class SlackClient:
             return None
         return self._metadata_by_content.get(content)
 
+    def list_channel_history(
+        self,
+        channel: str,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Fetch the last ``limit`` messages from ``channel`` as raw Slack dicts.
+
+        Low-level accessor for CRUD/scripting (``thrds slack history``) —
+        returns unwrapped dicts (``ts`` / ``user`` / ``bot_id`` / ``username``
+        / ``text`` / …) rather than typed `Message`s. ``text`` is the wire
+        mrkdwn as Slack returns it (no ``to_markdown`` roundtrip); this
+        matches the "raw by default" ethos of the CRUD verbs. Takes
+        ``channel`` explicitly (like `scan_thrds_metadata`) so it can be
+        called without stomping ``self.channel``.
+        """
+        result = self._request("conversations.history", {
+            "channel": channel,
+            "limit": limit,
+        }, method="GET")
+        return result.get("messages", [])
+
+    def list_thread_raw(
+        self,
+        channel: str,
+        thread_ts: str,
+    ) -> list[dict]:
+        """Fetch a thread (``thread_ts`` OP + replies) as raw Slack dicts.
+
+        Parallel to `list_channel_history` — returns unwrapped dicts (no
+        typed `Message` wrapping, no ``to_markdown`` conversion on wire text)
+        for CRUD/scripting via ``thrds slack thread``. The typed
+        `list_messages` counterpart is what `sync()` consumes and
+        converts back to local markdown.
+        """
+        result = self._request("conversations.replies", {
+            "channel": channel,
+            "ts": thread_ts,
+        }, method="GET")
+        return result.get("messages", [])
+
     def list_messages(self, thread_id: str) -> list[Message]:
         result = self._request("conversations.replies", {
             "channel": self.channel,
