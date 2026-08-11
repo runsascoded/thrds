@@ -113,6 +113,7 @@ class SlackClient:
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
+        raw: bool = False,
     ):
         """
         ``username`` / ``icon_url`` / ``icon_emoji`` are the thread-wide
@@ -120,12 +121,22 @@ class SlackClient:
         Custom sender/icon requires the ``chat:write.customize`` scope.
         ``icon_url`` (a hosted image URL) wins over ``icon_emoji`` if both
         are set — Slack accepts one or the other on `chat.postMessage`.
+
+        ``raw`` is the client-wide default for skipping the local-markdown →
+        Slack-mrkdwn conversion on ``post`` / ``edit``. False (the default)
+        preserves today's behavior — ``[text](url)`` becomes ``<url|text>``,
+        ``**bold**`` becomes ``*bold*``, etc. True sends ``content`` as the
+        wire ``text`` verbatim, which is what consumers already emitting
+        Slack mrkdwn want (e.g. watchy's CFW renderer). Per-call override on
+        ``post(..., raw=)`` / ``edit(..., raw=)`` takes precedence over this
+        default; see `specs/done/raw-mrkdwn-passthrough.md`.
         """
         self.token = token
         self.channel = channel
         self.username = username
         self.icon_url = icon_url
         self.icon_emoji = icon_emoji
+        self.raw = raw
         self._suppress_unfurls: bool = True
         self._metadata_by_content: dict[str, dict] | None = None
         self._skip_op: bool = False
@@ -249,6 +260,7 @@ class SlackClient:
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
+        raw: bool | None = None,
     ) -> Message:
         """
         Sender fields resolve message override → client default → unset.
@@ -256,12 +268,19 @@ class SlackClient:
         one or the other on ``chat.postMessage``). Requires the
         ``chat:write.customize`` scope on the token for any override to
         take effect; without it Slack silently ignores the fields.
+
+        ``raw`` follows the same override → default precedence: ``None``
+        (the default) inherits ``self.raw``; ``True`` / ``False`` overrides.
+        When resolved to ``True``, ``content`` is sent verbatim as wire
+        ``text`` (no ``to_slack()`` md→mrkdwn conversion) — for consumers
+        already emitting Slack mrkdwn. See `specs/done/raw-mrkdwn-passthrough.md`.
         """
         if len(content) > SLACK_MESSAGE_LIMIT:
             raise ValueError(
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
             )
-        wire = _md_to_slack(content)
+        resolved_raw = raw if raw is not None else self.raw
+        wire = content if resolved_raw else _md_to_slack(content)
         data: dict = {
             "channel": self.channel,
             "text": wire,
@@ -298,12 +317,26 @@ class SlackClient:
         # of truth, and callers (state.py, tests) compare against it directly.
         return Message(id=result["ts"], content=content)
 
-    def edit(self, message_id: str, content: str) -> Message:
+    def edit(
+        self,
+        message_id: str,
+        content: str,
+        *,
+        raw: bool | None = None,
+    ) -> Message:
+        """Edit ``message_id``'s text to ``content``.
+
+        ``raw`` matches `post()`'s semantics: ``None`` inherits ``self.raw``,
+        else the boolean overrides. When resolved to ``True``, ``content``
+        is sent as wire ``text`` verbatim (no ``to_slack()`` conversion).
+        See `specs/done/raw-mrkdwn-passthrough.md`.
+        """
         if len(content) > SLACK_MESSAGE_LIMIT:
             raise ValueError(
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
             )
-        wire = _md_to_slack(content)
+        resolved_raw = raw if raw is not None else self.raw
+        wire = content if resolved_raw else _md_to_slack(content)
         data: dict = {
             "channel": self.channel,
             "ts": message_id,
