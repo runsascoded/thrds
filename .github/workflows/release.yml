@@ -38,15 +38,23 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # npm CLI ≥ 11.5.1 + Node ≥ 22.14 are required for automatic OIDC
+          # token exchange with the trusted publisher (npm docs). Node 22
+          # ships with npm 10.9; the `npm i -g npm@latest` step below bumps it.
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
           cache: "pnpm"
+      # `pnpm publish` doesn't do the npm trusted-publisher OIDC exchange
+      # reliably (pnpm/pnpm#11513 — regression in 11.0.8; even post-fix the
+      # code path is fragile). Provenance signing succeeds via sigstore, but
+      # the actual `PUT /@scope/pkg` goes out unauthenticated and npm returns
+      # a misleading 404. Using `npm publish` directly avoids the whole issue.
+      - run: npm install -g npm@latest
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      # Uses npm trusted publishing (OIDC) via the `id-token: write`
-      # permission — no NPM_TOKEN secret needed once the trusted publisher
-      # is configured on npmjs.com for this package + workflow.
-      - run: pnpm publish --provenance --access public --no-git-checks
+      # `--provenance` is technically optional now (npm CLI enables it by
+      # default under trusted publishing) but keeping it explicit for clarity.
+      - run: npm publish --provenance --access public
       - name: Get tag message
         id: tag
         run: |
