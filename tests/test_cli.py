@@ -169,14 +169,14 @@ def _write_doc(tmp: Path, name: str = 'trainium.md', text: str = "=== a\n\nOP a.
 
 def _init_session(in_tmp: Path, monkeypatch, doc_name: str = 'trainium.md',
                   doc_text: str = "=== a\n\nOP a.\n") -> Path:
-    """Write the doc, run `thrds init --no-gist <doc>`, chdir to session dir.
+    """Write the doc, run `thrds slack init --no-gist <doc>`, chdir to session dir.
 
     Returns the session dir path (=``in_tmp / 'thrds' / <slug>``). Every
     test that needs a live session uses this helper; init-specific tests
     call `init` directly and inspect the target dir.
     """
     _write_doc(in_tmp, doc_name, doc_text)
-    result = CliRunner().invoke(cli, ['init', '--no-gist', doc_name])
+    result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', doc_name])
     assert result.exit_code == 0, (result.output, result.stderr)
     slug = Path(doc_name).stem
     session_dir = in_tmp / 'thrds' / slug
@@ -188,7 +188,7 @@ def _init_session(in_tmp: Path, monkeypatch, doc_name: str = 'trainium.md',
 
 def test_init_creates_session_subdir_with_state_json_and_doc(in_tmp):
     _write_doc(in_tmp)
-    result = CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
     session = in_tmp / 'thrds' / 'trainium'
     assert (session / STATE_PATH).is_file()
@@ -202,7 +202,7 @@ def test_init_creates_session_subdir_with_state_json_and_doc(in_tmp):
 
 def test_init_creates_git_repo_with_initial_commit(in_tmp):
     _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     session = in_tmp / 'thrds' / 'trainium'
     assert (session / '.git').is_dir()
     log = subprocess.run(
@@ -214,7 +214,7 @@ def test_init_creates_git_repo_with_initial_commit(in_tmp):
 
 def test_init_records_prefix_override(in_tmp):
     _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', '--no-gist', '-p', 'rw-', 'trainium.md'])
+    CliRunner().invoke(cli, ['slack', 'init', '--no-gist', '-p', 'rw-', 'trainium.md'])
     state = SessionState.load(in_tmp / 'thrds' / 'trainium')
     assert state.channel_prefix == 'rw-'
 
@@ -222,8 +222,8 @@ def test_init_records_prefix_override(in_tmp):
 def test_init_refuses_second_run_with_no_gist(in_tmp):
     """Second `--no-gist` init on the same target: nothing to do; clean refusal."""
     _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
-    result = CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
+    result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
         f"Error: Target session dir already exists (no-gist mode): {in_tmp / 'thrds' / 'trainium'}"
@@ -231,14 +231,14 @@ def test_init_refuses_second_run_with_no_gist(in_tmp):
 
 
 def test_init_resumes_partial_when_gist_id_null_and_gist_flag_set(in_tmp, monkeypatch):
-    """After a --no-gist init, running `thrds init` (without --no-gist) resumes the gist step.
+    """After a --no-gist init, running `thrds slack init` (without --no-gist) resumes the gist step.
 
     (Simulates the real recovery flow: user's earlier init failed at gist
     creation, leaving state.json with gist_id=None; a re-run picks up.)
     """
     _write_doc(in_tmp)
     # First init: no gist, leaves state.json with gist_id=None.
-    r1 = CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    r1 = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     assert r1.exit_code == 0, (r1.output, r1.stderr)
     session = in_tmp / 'thrds' / 'trainium'
     assert SessionState.load(session).gist_id is None
@@ -255,7 +255,7 @@ def test_init_resumes_partial_when_gist_id_null_and_gist_flag_set(in_tmp, monkey
                         lambda session_dir, remote='g', branch='main': calls.append('push'))
 
     # Second init: no --no-gist → auto-resumes the gist step.
-    r2 = CliRunner().invoke(cli, ['init', 'trainium.md'])
+    r2 = CliRunner().invoke(cli, ['slack', 'init', 'trainium.md'])
     assert r2.exit_code == 0, (r2.output, r2.stderr)
     assert r2.stderr.splitlines()[0].startswith('Resuming partial init at ')
 
@@ -271,7 +271,7 @@ def test_init_resumes_partial_when_gist_id_null_and_gist_flag_set(in_tmp, monkey
 
 
 def test_init_refuses_when_already_fully_initialized(in_tmp, monkeypatch):
-    """Second `thrds init` on a session that already has gist_id → refuses cleanly."""
+    """Second `thrds slack init` on a session that already has gist_id → refuses cleanly."""
     _write_doc(in_tmp)
     # First init with mocked gist so it fully succeeds.
     from thrds import mirror as mirror_mod
@@ -279,10 +279,10 @@ def test_init_refuses_when_already_fully_initialized(in_tmp, monkeypatch):
                         lambda session_dir, description, files: ('fully_done', 'git@gist.github.com:fully_done.git'))
     monkeypatch.setattr(mirror_mod, 'align_to_remote', lambda *a, **k: None)
     monkeypatch.setattr(mirror_mod, 'push', lambda *a, **k: None)
-    r1 = CliRunner().invoke(cli, ['init', 'trainium.md'])
+    r1 = CliRunner().invoke(cli, ['slack', 'init', 'trainium.md'])
     assert r1.exit_code == 0
 
-    r2 = CliRunner().invoke(cli, ['init', 'trainium.md'])
+    r2 = CliRunner().invoke(cli, ['slack', 'init', 'trainium.md'])
     assert r2.exit_code == 2
     session = in_tmp / 'thrds' / 'trainium'
     assert r2.stderr.splitlines()[-2] == (
@@ -294,7 +294,7 @@ def test_init_refuses_when_target_dir_exists_without_state_json(in_tmp):
     """Existing target dir without a thrds.json — refuse (not our dir)."""
     _write_doc(in_tmp)
     (in_tmp / 'thrds' / 'trainium').mkdir(parents=True)
-    result = CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
         f"Error: Target dir exists but has no thrds.json — not a thrds session dir: {in_tmp / 'thrds' / 'trainium'}"
@@ -303,7 +303,7 @@ def test_init_refuses_when_target_dir_exists_without_state_json(in_tmp):
 
 def test_init_creates_empty_doc_when_source_absent(in_tmp):
     """If DOC_PATH doesn't exist in CWD, init creates it empty in the session dir."""
-    result = CliRunner().invoke(cli, ['init', '--no-gist', 'brandnew.md'])
+    result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'brandnew.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
     dest = in_tmp / 'thrds' / 'brandnew' / 'brandnew.md'
     assert dest.read_text() == ""
@@ -311,7 +311,7 @@ def test_init_creates_empty_doc_when_source_absent(in_tmp):
 
 def test_init_state_json_is_valid_pretty_printed(in_tmp):
     _write_doc(in_tmp)
-    CliRunner().invoke(cli, ['init', '--no-gist', 'trainium.md'])
+    CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     text = (in_tmp / 'thrds' / 'trainium' / STATE_PATH).read_text()
     data = json.loads(text)
     assert data['doc_path'] == 'trainium.md'
@@ -346,7 +346,7 @@ def test_init_gist_flow_calls_create_gist_aligns_and_records_gist_id(in_tmp, mon
     monkeypatch.setattr(mirror_mod, 'align_to_remote', fake_align)
     monkeypatch.setattr(mirror_mod, 'push', fake_push)  # commit_and_push routes through mirror.push
 
-    result = CliRunner().invoke(cli, ['init', 'trainium.md'])
+    result = CliRunner().invoke(cli, ['slack', 'init', 'trainium.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
 
     session_dir = in_tmp / 'thrds' / 'trainium'
@@ -371,7 +371,7 @@ def test_init_gist_flow_calls_create_gist_aligns_and_records_gist_id(in_tmp, mon
 
 def test_push_staging_delegates_to_sync_doc_staging(in_tmp, monkeypatch, spy):
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['push'])
+    result = CliRunner().invoke(cli, ['slack', 'push'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert [c['mode'] for c in spy.push_calls] == ['staging']
     assert spy.push_calls[0]['dry_run'] is False
@@ -380,7 +380,7 @@ def test_push_staging_delegates_to_sync_doc_staging(in_tmp, monkeypatch, spy):
 
 def test_push_prod_delegates_to_sync_doc_prod_with_keep_staging(in_tmp, monkeypatch, spy):
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['push', '--prod', '--keep-staging', '-c', 'C_OARL'])
+    result = CliRunner().invoke(cli, ['slack', 'push', '--prod', '--keep-staging', '-c', 'C_OARL'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert spy.push_calls == [{
         'mode': 'prod',
@@ -393,21 +393,21 @@ def test_push_prod_delegates_to_sync_doc_prod_with_keep_staging(in_tmp, monkeypa
 
 def test_push_dry_run_propagates_flag(in_tmp, monkeypatch, spy):
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['push', '-n'])
+    result = CliRunner().invoke(cli, ['slack', 'push', '-n'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert spy.push_calls[0]['dry_run'] is True
 
 
 def test_push_rejects_channel_without_prod(in_tmp, monkeypatch, spy):
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['push', '-c', 'C_X'])
+    result = CliRunner().invoke(cli, ['slack', 'push', '-c', 'C_X'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == "Error: --channel requires --prod."
 
 
 def test_push_rejects_keep_staging_without_prod(in_tmp, monkeypatch, spy):
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['push', '-k'])
+    result = CliRunner().invoke(cli, ['slack', 'push', '-k'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == "Error: --keep-staging requires --prod."
 
@@ -417,7 +417,7 @@ def test_push_uses_explicit_doc_path_over_state(in_tmp, monkeypatch, spy):
     session = _init_session(in_tmp, monkeypatch)
     # Add a second doc in the session dir; push at it explicitly.
     (session / 'other.md').write_text("=== b\n\nOP b.\n")
-    result = CliRunner().invoke(cli, ['push', 'other.md'])
+    result = CliRunner().invoke(cli, ['slack', 'push', 'other.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert spy.push_calls[0]['doc'].threads[0].slug == 'b'
 
@@ -425,7 +425,7 @@ def test_push_uses_explicit_doc_path_over_state(in_tmp, monkeypatch, spy):
 def test_push_autocommits_state_and_doc(in_tmp, monkeypatch, spy):
     """A successful non-dry-run push commits state.json + doc.md to the session git."""
     session = _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['push'])
+    result = CliRunner().invoke(cli, ['slack', 'push'])
     assert result.exit_code == 0, (result.output, result.stderr)
     log = subprocess.run(
         ['git', 'log', '--format=%s'],
@@ -437,7 +437,7 @@ def test_push_autocommits_state_and_doc(in_tmp, monkeypatch, spy):
 def test_push_dry_run_does_not_autocommit(in_tmp, monkeypatch, spy):
     """Dry-run push adds no commit."""
     session = _init_session(in_tmp, monkeypatch)
-    CliRunner().invoke(cli, ['push', '-n'])
+    CliRunner().invoke(cli, ['slack', 'push', '-n'])
     log = subprocess.run(
         ['git', 'log', '--format=%s'],
         cwd=session, capture_output=True, text=True, check=True,
@@ -456,7 +456,7 @@ def test_pull_writes_to_disk_with_write_flag(in_tmp, monkeypatch):
         return s
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
 
-    result = CliRunner().invoke(cli, ['pull', '-w'])
+    result = CliRunner().invoke(cli, ['slack', 'pull', '-w'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert (session / 'trainium.md').read_text() == "=== x\n\nPulled OP.\n"
 
@@ -471,7 +471,7 @@ def test_pull_write_autocommits_doc(in_tmp, monkeypatch):
         return s
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
 
-    CliRunner().invoke(cli, ['pull', '-w'])
+    CliRunner().invoke(cli, ['slack', 'pull', '-w'])
     log = subprocess.run(
         ['git', 'log', '--format=%s'],
         cwd=session, capture_output=True, text=True, check=True,
@@ -487,14 +487,14 @@ def test_pull_prints_to_stdout_without_write(in_tmp, monkeypatch):
         s.pull_returns = Doc(threads=[DocThread(slug='x', messages=[DocMessage('Pulled OP.')])])
         return s
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
-    result = CliRunner().invoke(cli, ['pull'])
+    result = CliRunner().invoke(cli, ['slack', 'pull'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert result.output == "=== x\n\nPulled OP.\n"
 
 
 def test_pull_prod_passes_channel(in_tmp, monkeypatch, spy):
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['pull', '--prod', '-c', 'C_OTHER'])
+    result = CliRunner().invoke(cli, ['slack', 'pull', '--prod', '-c', 'C_OTHER'])
     assert result.exit_code == 0, (result.output, result.stderr)
     # session_dir is CWD (the session dir _init_session chdir'd into) — plumbed
     # so pull_doc_* can download custom emoji into the session.
@@ -516,7 +516,7 @@ def test_diff_compares_local_against_pulled(in_tmp, monkeypatch):
         return s
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
 
-    result = CliRunner().invoke(cli, ['diff'])
+    result = CliRunner().invoke(cli, ['slack', 'diff'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert result.output.splitlines() == [
         "--- local",
@@ -537,7 +537,7 @@ def test_archive_calls_slack_archive_and_flips_flag(in_tmp, monkeypatch, spy):
     state.staging_channel = "C_STAGE_TO_ARCHIVE"
     state.save(session)
 
-    result = CliRunner().invoke(cli, ['archive'])
+    result = CliRunner().invoke(cli, ['slack', 'archive'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert spy.archive_calls == ["C_STAGE_TO_ARCHIVE"]
     assert SessionState.load(session).staging_archived is True
@@ -550,7 +550,7 @@ def test_archive_is_idempotent_when_already_archived(in_tmp, monkeypatch, spy):
     state.staging_archived = True
     state.save(session)
 
-    result = CliRunner().invoke(cli, ['archive'])
+    result = CliRunner().invoke(cli, ['slack', 'archive'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert result.stderr.splitlines() == ["Already archived: C_STAGE"]
     # spy proxy would raise if SlackClient was constructed → verifies no API call.
@@ -561,7 +561,7 @@ def test_archive_is_idempotent_when_already_archived(in_tmp, monkeypatch, spy):
 def test_archive_is_a_no_op_when_no_staging_channel(in_tmp, monkeypatch, spy):
     """No staging_channel in state → early return, no SlackClient constructed."""
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['archive'])
+    result = CliRunner().invoke(cli, ['slack', 'archive'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert result.stderr.splitlines() == ["No staging PC to archive."]
     with pytest.raises(AttributeError, match="No SlackClient was constructed"):
@@ -578,12 +578,12 @@ def test_push_requires_slack_token_env(in_tmp, monkeypatch):
     # outer test environment.
     monkeypatch.delenv(SLACK_TOKEN_ENV, raising=False)
     monkeypatch.delenv(SLACK_TOKEN_ENV_DEPRECATED, raising=False)
-    result = CliRunner().invoke(cli, ['push'])
+    result = CliRunner().invoke(cli, ['slack', 'push'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
         f"Error: {SLACK_TOKEN_ENV} not set — add a `xoxp-` (user) or `xoxb-` "
         f"(bot) Slack token to your env. Session verbs (init/push/pull/…) "
-        f"need a user token; the `slack` CRUD subgroup accepts either."
+        f"need a user token; the `slack` CRUD verbs accept either."
     )
 
 
@@ -597,7 +597,7 @@ def test_deprecated_env_var_still_works_with_warning(in_tmp, monkeypatch, spy):
     _init_session(in_tmp, monkeypatch)
     monkeypatch.delenv(SLACK_TOKEN_ENV, raising=False)
     monkeypatch.setenv(SLACK_TOKEN_ENV_DEPRECATED, 'xoxp-legacy')
-    result = CliRunner().invoke(cli, ['push', '--dry-run'])
+    result = CliRunner().invoke(cli, ['slack', 'push', '--dry-run'])
     assert result.exit_code == 0, (result.output, result.stderr)
     # The token gets through to the spy (proving the deprecated var was read).
     assert spy.token == 'xoxp-legacy'
@@ -612,17 +612,17 @@ def test_deprecated_env_var_still_works_with_warning(in_tmp, monkeypatch, spy):
 def test_push_requires_state_json(in_tmp, spy):
     """Push before init → clear error, no Slack call."""
     _write_doc(in_tmp)
-    result = CliRunner().invoke(cli, ['push'])
+    result = CliRunner().invoke(cli, ['slack', 'push'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        "Error: No thrds session state at thrds.json; run `thrds init` first."
+        "Error: No thrds session state at thrds.json; run `thrds <platform> init` first."
     )
 
 
 # --- open ---
 
 def test_open_gist_default_prints_and_launches(in_tmp, monkeypatch):
-    """`thrds open` (no flag) opens the gist URL — no Slack call needed."""
+    """`thrds slack open` (no flag) opens the gist URL — no Slack call needed."""
     _init_session(in_tmp, monkeypatch)
     # Simulate init that ran with a gist by stamping gist_id into state.
     state = SessionState.load()
@@ -630,7 +630,7 @@ def test_open_gist_default_prints_and_launches(in_tmp, monkeypatch):
     state.save()
     opened: list[str] = []
     monkeypatch.setattr('thrds.cli.webbrowser.open', lambda url: opened.append(url))
-    result = CliRunner().invoke(cli, ['open'])
+    result = CliRunner().invoke(cli, ['slack', 'open'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert opened == ['https://gist.github.com/abc123']
     assert result.stderr.rstrip() == 'Opening gist abc123: https://gist.github.com/abc123'
@@ -644,16 +644,16 @@ def test_open_gist_no_open_flag_prints_only(in_tmp, monkeypatch):
     state.save()
     opened: list[str] = []
     monkeypatch.setattr('thrds.cli.webbrowser.open', lambda url: opened.append(url))
-    result = CliRunner().invoke(cli, ['open', '-U'])
+    result = CliRunner().invoke(cli, ['slack', 'open', '-U'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert opened == []
 
 
 def test_open_gist_errors_when_no_gist_id(in_tmp, monkeypatch):
-    """--no-gist init leaves gist_id=null; `thrds open` says so instead of crashing."""
+    """--no-gist init leaves gist_id=null; `thrds slack open` says so instead of crashing."""
     _init_session(in_tmp, monkeypatch)
     # State from _init_session already has gist_id=None (init used --no-gist).
-    result = CliRunner().invoke(cli, ['open'])
+    result = CliRunner().invoke(cli, ['slack', 'open'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
         "Error: No gist recorded — session was init'd with --no-gist."
@@ -668,7 +668,7 @@ def test_open_staging_uses_workspace_url(in_tmp, monkeypatch, spy):
     state.save()
     opened: list[str] = []
     monkeypatch.setattr('thrds.cli.webbrowser.open', lambda url: opened.append(url))
-    result = CliRunner().invoke(cli, ['open', '-s'])
+    result = CliRunner().invoke(cli, ['slack', 'open', '-s'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert opened == ['https://openathena.slack.com/archives/C_STAGING']
 
@@ -676,17 +676,17 @@ def test_open_staging_uses_workspace_url(in_tmp, monkeypatch, spy):
 def test_open_staging_errors_when_no_staging_channel(in_tmp, monkeypatch):
     """Never pushed → no staging_channel → clear error."""
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['open', '-s'])
+    result = CliRunner().invoke(cli, ['slack', 'open', '-s'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        'Error: No staging channel — run `thrds push` first to create one.'
+        'Error: No staging channel — run `thrds slack push` first to create one.'
     )
 
 
 def test_open_prod_and_staging_mutually_exclusive(in_tmp, monkeypatch):
     """`-p` + `-s` together → clear usage error."""
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['open', '-s', '-p'])
+    result = CliRunner().invoke(cli, ['slack', 'open', '-s', '-p'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == 'Error: --prod and --staging are mutually exclusive.'
 
@@ -731,7 +731,7 @@ def test_recover_writes_state_and_doc_from_scan(in_tmp, monkeypatch, spy):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
 
     # thrds.json shape
@@ -758,7 +758,7 @@ def test_recover_staging_flag_routes_to_staging_fields(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', '-s', 'C_STAGING'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', '-s', 'C_STAGING'])
     assert result.exit_code == 0, (result.output, result.stderr)
     state = SessionState.load()
     assert state.staging_channel == 'C_STAGING'
@@ -782,7 +782,7 @@ def test_recover_lists_sessions_when_multiple_and_no_id(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', 'C_PROD'])
     assert result.exit_code == 2
     # Table ordering: newest first (s-new before s-old)
     lines = [l for l in result.stderr.splitlines() if l.startswith('  ') and 's-' in l]
@@ -808,7 +808,7 @@ def test_recover_with_session_id_selects_specific(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', '-i', 's-old', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', '-i', 's-old', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
     state = SessionState.load()
     assert state.session_id == 's-old'
@@ -825,7 +825,7 @@ def test_recover_unknown_session_id_errors(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', '-i', 'nope', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', '-i', 'nope', 'C_PROD'])
     assert result.exit_code == 2
     assert "Session 'nope' not found in C_PROD" in result.stderr
     assert not (in_tmp / STATE_PATH).exists()
@@ -840,7 +840,7 @@ def test_recover_no_sessions_found_errors(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', 'C_PROD'])
     assert result.exit_code == 2
     assert 'No thrds-metadata messages found in C_PROD' in result.stderr
     assert not (in_tmp / STATE_PATH).exists()
@@ -849,7 +849,7 @@ def test_recover_no_sessions_found_errors(in_tmp, monkeypatch):
 def test_recover_refuses_to_overwrite_existing_state(in_tmp, monkeypatch):
     """Preexisting thrds.json in CWD → refuse (recover is for empty session dirs)."""
     _init_session(in_tmp, monkeypatch)   # leaves a thrds.json in CWD via chdir
-    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', 'C_PROD'])
     assert result.exit_code == 2
     assert 'refusing to overwrite' in result.stderr
 
@@ -863,7 +863,7 @@ def test_recover_no_write_doc_skips_pull(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', '-W', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', '-W', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert (in_tmp / STATE_PATH).is_file()
     assert not (in_tmp / 'trainium.md').exists()
@@ -879,7 +879,7 @@ def test_recover_preserves_session_id_from_metadata(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert SessionState.load().session_id == 'a-specific-uuid'
 
@@ -901,7 +901,7 @@ def test_recover_oldest_days_forwards_unix_ts_to_scan(in_tmp, monkeypatch):
     # Freeze time so the derived `oldest` is deterministic.
     monkeypatch.setattr('thrds.cli.time.time', lambda: 1_000_000.0)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', '-d', '7', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', '-d', '7', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert captured[0].scan_calls == [{
         'channel': 'C_PROD',
@@ -925,7 +925,7 @@ def test_recover_default_max_pages_is_50(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    CliRunner().invoke(cli, ['slack', 'recover', 'C_PROD'])
     assert captured[0].scan_calls[-1]['max_pages'] == 50
 
 
@@ -942,7 +942,7 @@ def test_recover_max_pages_zero_disables_cap(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    CliRunner().invoke(cli, ['recover', '-m', '0', 'C_PROD'])
+    CliRunner().invoke(cli, ['slack', 'recover', '-m', '0', 'C_PROD'])
     assert captured[0].scan_calls[-1]['max_pages'] is None
 
 
@@ -957,7 +957,7 @@ def test_recover_translates_scan_cap_reached_to_usage_error(in_tmp, monkeypatch)
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', 'C_PROD'])
     assert result.exit_code == 2
     assert 'hit --max-pages=50 on channel C_PROD' in result.stderr
 
@@ -972,7 +972,7 @@ def test_recover_progress_log_emits_per_page(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
     # SlackSpy.scan_thrds_metadata simulates a single page whose msg count
     # is `preamble + threads = 1 + 2 = 3` for this scripted RecoveredSession.
@@ -996,7 +996,7 @@ def test_recover_latest_days_forwards_derived_unix_ts(in_tmp, monkeypatch):
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setattr('thrds.cli.time.time', lambda: 1_000_000.0)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', '-D', '3', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', '-D', '3', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert captured[0].scan_calls[-1]['latest'] == 1_000_000.0 - 3 * 86400
 
@@ -1014,7 +1014,7 @@ def test_recover_cursor_forwards_to_scan(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    CliRunner().invoke(cli, ['recover', '--cursor', 'CURSOR_XYZ', 'C_PROD'])
+    CliRunner().invoke(cli, ['slack', 'recover', '--cursor', 'CURSOR_XYZ', 'C_PROD'])
     assert captured[0].scan_calls[-1]['cursor'] == 'CURSOR_XYZ'
 
 
@@ -1025,7 +1025,7 @@ def test_recover_cursor_and_latest_days_mutually_exclusive(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', '--cursor', 'CX', '-D', '3', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', '--cursor', 'CX', '-D', '3', 'C_PROD'])
     assert result.exit_code == 2
     assert '--cursor and --latest-days are mutually exclusive' in result.stderr
 
@@ -1048,7 +1048,7 @@ def test_recover_scan_cap_reached_prints_next_cursor(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['recover', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'recover', 'C_PROD'])
     assert result.exit_code == 2
     # Cursor is on its own line for easy grep.
     assert '  next cursor: RESUME_HERE' in result.stderr
@@ -1072,7 +1072,7 @@ def test_list_sessions_prints_table(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['list-sessions', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'list-sessions', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
     lines = result.stderr.splitlines()
     # Header text (there's an intro line first + column header line).
@@ -1093,7 +1093,7 @@ def test_list_sessions_no_sessions_prints_empty_message_and_exits_0(in_tmp, monk
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['list-sessions', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'list-sessions', 'C_PROD'])
     assert result.exit_code == 0
     assert 'No thrds-metadata sessions found in C_PROD.' in result.stderr
 
@@ -1112,7 +1112,7 @@ def test_list_sessions_forwards_scan_flags(in_tmp, monkeypatch):
     monkeypatch.setattr('thrds.cli.time.time', lambda: 1_000_000.0)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
     result = CliRunner().invoke(cli, [
-        'list-sessions', '-d', '7', '-m', '100', 'C_PROD',
+        'slack', 'list-sessions', '-d', '7', '-m', '100', 'C_PROD',
     ])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert captured[-1].scan_calls == [{
@@ -1133,7 +1133,7 @@ def test_list_sessions_writes_no_state_or_doc(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['list-sessions', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'list-sessions', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert not (in_tmp / STATE_PATH).exists()
     assert not (in_tmp / 'trainium.md').exists()
@@ -1148,7 +1148,7 @@ def test_list_sessions_singular_when_one_session(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['list-sessions', 'C_PROD'])
+    result = CliRunner().invoke(cli, ['slack', 'list-sessions', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert '1 session in C_PROD' in result.stderr
     assert '1 sessions in C_PROD' not in result.stderr
@@ -1168,7 +1168,7 @@ def test_channel_id_passthrough_avoids_list_channels_api_call(in_tmp, monkeypatc
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['list-sessions', 'C08XYZ001'])
+    result = CliRunner().invoke(cli, ['slack', 'list-sessions', 'C08XYZ001'])
     assert result.exit_code == 0, (result.output, result.stderr)
     # No `conversations.list` calls — passthrough hit.
     assert captured[0].list_channels_calls == 0
@@ -1189,7 +1189,7 @@ def test_channel_name_hash_prefix_resolves_via_list_channels(in_tmp, monkeypatch
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['list-sessions', '#foo'])
+    result = CliRunner().invoke(cli, ['slack', 'list-sessions', '#foo'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert captured[0].list_channels_calls == 1
     assert captured[0].scan_calls[-1]['channel'] == 'C08FOO001'
@@ -1208,7 +1208,7 @@ def test_channel_bare_name_resolves_via_list_channels(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['list-sessions', 'foo'])
+    result = CliRunner().invoke(cli, ['slack', 'list-sessions', 'foo'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert captured[0].scan_calls[-1]['channel'] == 'C08FOO001'
 
@@ -1226,7 +1226,7 @@ def test_channel_hash_uppercase_still_resolves_via_lookup(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['list-sessions', '#FOO'])
+    result = CliRunner().invoke(cli, ['slack', 'list-sessions', '#FOO'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert captured[0].list_channels_calls == 1
     assert captured[0].scan_calls[-1]['channel'] == 'C08FOO001'
@@ -1250,7 +1250,7 @@ def test_channel_uppercase_no_hash_passes_through_as_id(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['list-sessions', 'FOO'])
+    result = CliRunner().invoke(cli, ['slack', 'list-sessions', 'FOO'])
     assert result.exit_code == 0, (result.output, result.stderr)
     # Passthrough hit, no lookup.
     assert captured[0].list_channels_calls == 0
@@ -1266,7 +1266,7 @@ def test_channel_name_not_found_shows_available_hint(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['list-sessions', '#does-not-exist'])
+    result = CliRunner().invoke(cli, ['slack', 'list-sessions', '#does-not-exist'])
     assert result.exit_code == 2
     assert "Channel '#does-not-exist' not found" in result.stderr
     # Preview shows first 5 sorted names.
@@ -1282,7 +1282,7 @@ def test_channel_name_missing_scope_error_is_helpful(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     monkeypatch.setenv(SLACK_TOKEN_ENV, 'xoxp-fake')
-    result = CliRunner().invoke(cli, ['list-sessions', '#foo'])
+    result = CliRunner().invoke(cli, ['slack', 'list-sessions', '#foo'])
     assert result.exit_code == 2
     assert 'channels:read' in result.stderr
     assert 'groups:read' in result.stderr
@@ -1300,7 +1300,7 @@ def test_push_prod_channel_flag_resolves_name(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['push', '--prod', '--channel', '#foo'])
+    result = CliRunner().invoke(cli, ['slack', 'push', '--prod', '--channel', '#foo'])
     assert result.exit_code == 0, (result.output, result.stderr)
     # The captured `sync_doc_prod` call should carry the RESOLVED ID.
     prod_calls = [c for c in captured[-1].push_calls if c['mode'] == 'prod']
@@ -1320,7 +1320,7 @@ def test_pull_prod_channel_flag_resolves_name(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['pull', '--prod', '--channel', '#foo'])
+    result = CliRunner().invoke(cli, ['slack', 'pull', '--prod', '--channel', '#foo'])
     assert result.exit_code == 0, (result.output, result.stderr)
     prod_pulls = [c for c in captured[-1].pull_calls if c['mode'] == 'prod']
     assert prod_pulls[0]['channel'] == 'C08FOO001'
@@ -1339,7 +1339,7 @@ def test_diff_prod_channel_flag_resolves_name(in_tmp, monkeypatch):
 
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
     _init_session(in_tmp, monkeypatch)
-    result = CliRunner().invoke(cli, ['diff', '--prod', '--channel', '#foo'])
+    result = CliRunner().invoke(cli, ['slack', 'diff', '--prod', '--channel', '#foo'])
     assert result.exit_code == 0, (result.output, result.stderr)
     prod_pulls = [c for c in captured[-1].pull_calls if c['mode'] == 'prod']
     assert prod_pulls[0]['channel'] == 'C08FOO001'

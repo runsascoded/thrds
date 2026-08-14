@@ -1,19 +1,32 @@
-# thrds - multi-thread Slack post drafting (https://github.com/runsascoded/thrds)
+# thrds - multi-thread post drafting (https://github.com/runsascoded/thrds)
 # Sample rc file; source from your dotfiles (or via `~/.private/.thrds-rc`).
+#
+# Naming: `ts*` = slack subgroup, `tc*` = capture subgroup. Session verbs get
+# the single-letter slot (used more than CRUD in practice); the two CRUD verbs
+# that would collide with session names (`tsp`=push vs post, `tsr`=recover vs
+# rm) get 2-letter suffixes (`tspo`, `tsrm`).
 
-# `open`: browse a session's gist / staging PC / prod channel
-alias thrdso='thrds open'            # gist (default)
-alias thrdsos='thrds open -s'        # staging PC
-alias thrdsop='thrds open -p'        # prod channel
+# --- thrds slack (session verbs) ---
+alias tsi='thrds slack init'            # init a session for a doc
+alias tsp='thrds slack push'            # sync doc → staging PC (+ `-p` for prod)
+alias tsl='thrds slack pull'            # pull doc from Slack (+ `-w` to write back)
+alias tsd='thrds slack diff'            # local vs Slack
+alias tsa='thrds slack archive'         # archive the staging PC
+alias tso='thrds slack open'            # browse gist (default)
+alias tsos='thrds slack open -s'        # browse staging PC
+alias tsop='thrds slack open -p'        # browse prod channel
+alias tsls='thrds slack list-sessions'  # what sessions exist in a channel
+alias tsr='thrds slack recover'         # rebuild state from Slack metadata
 
-# `list-sessions` / `recover`: long command names + likely-repeated flags
-alias thrdsls='thrds list-sessions'  # what sessions exist in a channel
-alias thrdsr='thrds recover'         # rebuild state from Slack metadata
+# --- thrds slack (CRUD, raw-mrkdwn by default) ---
+alias tsh='thrds slack history'         # last N messages in a channel
+alias tst='thrds slack thread'          # OP + replies for a thread ts
+alias tsrm='thrds slack rm'             # delete msg(s) by ts (+ `-f` orphans_ok)
+alias tspo='thrds slack post'           # post raw mrkdwn (+ `-m` for md→mrkdwn)
+alias tse='thrds slack edit'            # edit msg by ts (raw by default)
+alias tspl='thrds slack permalink'      # get permalink URL
 
-# `slack` CRUD (raw-by-default): shave the `thrds slack ` prefix
-alias tsh='thrds slack history'      # last N messages in a channel
-alias tst='thrds slack thread'       # OP + replies for a thread ts
-alias tsr='thrds slack rm'           # delete msg(s) by ts (+ `-f` orphans_ok)
-alias tsp='thrds slack post'         # post raw mrkdwn (+ `-m` for md→mrkdwn)
-alias tse='thrds slack edit'         # edit msg by ts (raw by default)
-alias tspl='thrds slack permalink'   # get permalink URL
+# --- thrds capture (gist-only trajectory, no platform target) ---
+alias tci='thrds capture init'          # init a capture-only session
+alias tcp='thrds capture push'          # commit + push to gist
+alias tco='thrds capture open'          # browse the gist

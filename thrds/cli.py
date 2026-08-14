@@ -1,29 +1,40 @@
 """Command-line interface for `thrds` sessions.
 
-Wraps the `Doc` / `SessionState` / `SlackClient` primitives into
-init/push/pull/diff/archive/open subcommands, plus a low-level
-``slack …`` CRUD subgroup (see `specs/done/slack-crud-cli.md`). Each
-session lives in its own directory (ghpr-style:
-``<git-root-or-cwd>/thrds/<slug>/``) with its own private git repo
-(nested `.git/` is invisible to any surrounding project's git). A
-secret gist created at init becomes the ``g`` remote; state-mutating
-verbs (`push`, `pull --write`, `archive`) auto-commit + push, so the
-mirror always reflects the current session state.
+Two platform subgroups today:
+
+- ``thrds slack …`` — the primary workflow: draft locally in `.md`, sync to
+  a Slack staging PC, tweak in-Slack, pull back. Session verbs
+  (`init`/`push`/`pull`/`diff`/`archive`/`open`/`list-sessions`/`recover`)
+  plus low-level CRUD verbs
+  (`history`/`thread`/`rm`/`post`/`edit`/`permalink`).
+- ``thrds capture …`` — capture-only sessions: git + gist trajectory, no
+  platform target. For drafting posts you'll paste into a channel manually
+  (Discord, elsewhere) while still capturing iteration history to a gist.
+
+Each session lives in its own directory (ghpr-style:
+``<git-root-or-cwd>/thrds/<slug>/``) with its own private git repo (nested
+`.git/` is invisible to any surrounding project's git). A secret gist created
+at init becomes the ``g`` remote; state-mutating verbs auto-commit + push, so
+the mirror always reflects the current session state.
+
+Platform is stamped into ``thrds.json`` at init and every subsequent verb
+guards on it: running `thrds slack push` inside a capture-inited session
+errors with a clear message rather than blowing up deep inside Slack code.
 
 Slack access is via **either** token type, set in ``THRDS_SLACK_TOKEN``
 (``SLACK_THRDS_USER_TOKEN`` is a deprecated alias, still honored with a
 one-time warning). The token type determines which verbs are usable:
 
 - **User token** (``xoxp-…``) — required for the **session verbs**
-  (``init`` / ``push`` / ``pull`` / ``diff`` / ``archive`` /
+  (``slack init`` / ``push`` / ``pull`` / ``diff`` / ``archive`` /
   ``list-sessions`` / ``recover`` / ``open``). The session workflow's
   point is "draft locally in `.md`, sync to a staging PC, tweak the
   posts in Slack (as you), pull back, push again"; because those
   in-Slack tweaks are your Slack user's own posts, only a token owned
   by you can ``chat.update`` them. See
   `multi-thread-posts-and-capture.md`.
-- **Bot token** (``xoxb-…``) — sufficient for the ``slack`` CRUD
-  subgroup (``history`` / ``thread`` / ``rm`` / ``post`` / ``edit`` /
+- **Bot token** (``xoxb-…``) — sufficient for the ``slack`` CRUD verbs
+  (``history`` / ``thread`` / ``rm`` / ``post`` / ``edit`` /
   ``permalink``) whenever the bot is only editing / deleting its own
   posts (Slack lets ``chat.update`` / ``chat.delete`` touch a bot's
   own messages fine). Also sufficient for programmatic
@@ -35,7 +46,7 @@ Required scopes (add under **OAuth & Permissions** — under **User Token
 Scopes** for a user token, **Bot Token Scopes** for a bot token):
 
 - ``chat:write`` — post + edit + delete messages (all sync + CRUD verbs)
-- ``groups:write`` — create + archive staging private channels (``init``,
+- ``groups:write`` — create + archive staging private channels (``slack init``,
   ``push``, ``archive``); session-verb-only
 - ``groups:read`` — read private channel history + resolve names to IDs
 - ``channels:read`` — resolve public channel names to IDs (only if you
@@ -52,7 +63,7 @@ Scopes** for a user token, **Bot Token Scopes** for a bot token):
   ``lose_reactions_ok=False``); library-level, not used by any CLI verb.
 
 Metadata visibility is app-scoped (Slack only returns your app's
-metadata to your app); no extra scope required for ``recover``.
+metadata to your app); no extra scope required for ``slack recover``.
 """
 from __future__ import annotations
 
@@ -89,7 +100,7 @@ def _make_slack_client() -> SlackClient:
 
     Either a user token (``xoxp-…``) or a bot token (``xoxb-…``) works;
     the session verbs require a user token because they edit human-typed
-    posts in Slack, while the ``slack`` CRUD subgroup and programmatic
+    posts in Slack, while the ``slack`` CRUD verbs and programmatic
     ``SlackClient.sync()`` are fine with either token type (bot fine as
     long as the bot owns the content it's editing / deleting). See the
     module docstring for the full breakdown.
@@ -112,17 +123,30 @@ def _make_slack_client() -> SlackClient:
         raise click.UsageError(
             f"{SLACK_TOKEN_ENV} not set — add a `xoxp-` (user) or `xoxb-` "
             f"(bot) Slack token to your env. Session verbs (init/push/pull/…) "
-            f"need a user token; the `slack` CRUD subgroup accepts either."
+            f"need a user token; the `slack` CRUD verbs accept either."
         )
     return SlackClient(token=token, channel="")
 
 
-def _load_state() -> SessionState:
-    """Load ``thrds.json`` from CWD or exit clearly."""
+def _load_state(expected_platform: str | None = None) -> SessionState:
+    """Load ``thrds.json`` from CWD or exit clearly.
+
+    ``expected_platform`` (set by every platform-group verb to its own name)
+    catches mis-platforming — running ``thrds slack push`` inside a session
+    that was inited via ``thrds capture init`` errors immediately with a
+    clear message, instead of blowing up deep inside slack-specific code.
+    """
     try:
-        return SessionState.load()
+        state = SessionState.load()
     except FileNotFoundError as e:
         raise click.UsageError(str(e))
+    if expected_platform is not None and state.platform != expected_platform:
+        raise click.UsageError(
+            f"This session was inited for platform {state.platform!r}; "
+            f"use `thrds {state.platform} <verb>` instead of "
+            f"`thrds {expected_platform} <verb>`."
+        )
+    return state
 
 
 def _resolve_doc_path(state: SessionState, arg: str | None) -> str:
@@ -130,7 +154,7 @@ def _resolve_doc_path(state: SessionState, arg: str | None) -> str:
     path = arg if arg is not None else state.doc_path
     if path is None:
         raise click.UsageError(
-            "No doc path — pass DOC_PATH or run `thrds init <doc.md>` first."
+            "No doc path — pass DOC_PATH or run `thrds <platform> init <doc.md>` first."
         )
     return path
 
@@ -156,7 +180,7 @@ def _autocommit(session_root: Path, paths: list[str], message: str) -> None:
     """Commit ``paths`` (relative to session_root) and push to gist if configured.
 
     No-op if ``session_root`` isn't a git repo (rare — only if user manually
-    removed `.git/`). No-op if there's no `g` remote (``thrds init --no-gist``).
+    removed `.git/`). No-op if there's no `g` remote (``thrds <p> init --no-gist``).
     """
     if not mirror.is_git_repo(session_root):
         return
@@ -164,12 +188,6 @@ def _autocommit(session_root: Path, paths: list[str], message: str) -> None:
         mirror.commit_and_push(session_root, paths, message)
     except mirror.MirrorError as e:
         err(f"warning: mirror commit/push failed: {e}")
-
-
-@click.group()
-def cli():
-    """`thrds`: draft multi-thread posts locally, sync to Slack (staging + prod)."""
-    pass
 
 
 def _do_gist_init(target: Path, state: SessionState, slug: str) -> str:
@@ -188,7 +206,7 @@ def _do_gist_init(target: Path, state: SessionState, slug: str) -> str:
     except mirror.MirrorError as e:
         raise click.UsageError(
             f"gist creation failed:\n{e}\n\n"
-            "Re-run `thrds init` with `--no-gist` to skip the gist mirror."
+            "Re-run `thrds <platform> init` with `--no-gist` to skip the gist mirror."
         )
     mirror.add_remote(target, state.gist_remote, git_url)
     mirror.align_to_remote(target, remote=state.gist_remote)
@@ -203,21 +221,21 @@ def _do_gist_init(target: Path, state: SessionState, slug: str) -> str:
     return gist_id
 
 
-@cli.command()
-@click.option('-G', '--no-gist', is_flag=True, help='Skip gist creation; local git repo only.')
-@click.option('-p', '--prefix', help='Staging PC channel-name prefix override (else `THRDS_CHANNEL_PREFIX` env, else empty).')
-@click.argument('doc_path')
-def init(no_gist: bool, prefix: str | None, doc_path: str):
-    """Initialize a `thrds` session for DOC_PATH (a `.md` file).
+def _do_init(
+    doc_path: str,
+    no_gist: bool,
+    channel_prefix: str | None,
+    platform: str,
+) -> tuple[Path, SessionState, bool]:
+    """Shared init flow for every platform's `init` verb.
 
-    Creates ``<git-root-or-cwd>/thrds/<slug>/`` (ghpr-style), copies or
-    creates the doc there, `git init`s the session dir, and by default
-    creates a secret gist and adds it as the ``g`` remote.
+    Handles slug derivation, target-dir resolution, auto-resume of a partial
+    init (matching platform required), fresh-init doc copy/create, `git init`,
+    state save, and gist creation (unless ``no_gist``).
 
-    Auto-resume: if the target dir already exists and holds a valid
-    ``thrds.json`` with ``gist_id: null``, finishes the gist-creation
-    step instead of refusing (recovers from an earlier init that failed
-    at the gist step — e.g. network hiccup, `gh` unauth'd).
+    Returns ``(target, state, was_resume)`` — callers use ``was_resume`` to
+    decide which completion hints to print. The resume path itself prints
+    only ``Gist created: …`` to stderr and does no other output.
     """
     doc_p = Path(doc_path)
     slug = doc_p.stem
@@ -235,10 +253,15 @@ def init(no_gist: bool, prefix: str | None, doc_path: str):
             existing = SessionState.load(target)
         except Exception as e:
             raise click.UsageError(f"Target session dir has an invalid {STATE_PATH}: {e}")
+        if existing.platform != platform:
+            raise click.UsageError(
+                f"Target session dir was inited for platform {existing.platform!r}; "
+                f"use `thrds {existing.platform} init` (or delete the dir to reset)."
+            )
         if existing.gist_id is not None:
             raise click.UsageError(
                 f"Target session dir already fully initialized (gist_id={existing.gist_id}): {target}\n"
-                f"Use `thrds open` to browse, or delete the dir and re-run to reset."
+                f"Use `thrds {platform} open` to browse, or delete the dir and re-run to reset."
             )
         if no_gist:
             # gist_id=None + --no-gist = re-running the same intent; nothing to do.
@@ -248,7 +271,7 @@ def init(no_gist: bool, prefix: str | None, doc_path: str):
         err(f"Resuming partial init at {target} (gist step)...")
         gist_id = _do_gist_init(target, existing, slug)
         err(f"Gist created: https://gist.github.com/{gist_id}")
-        return
+        return target, existing, True
 
     target.mkdir(parents=True)
 
@@ -259,12 +282,16 @@ def init(no_gist: bool, prefix: str | None, doc_path: str):
         # Empty placeholder — user edits before first push.
         dest_md.write_text('')
 
-    state = SessionState.new(doc_path=f'{slug}.md', channel_prefix=prefix)
+    state = SessionState.new(
+        doc_path=f'{slug}.md',
+        channel_prefix=channel_prefix,
+        platform=platform,
+    )
     mirror.init_repo(target)
     # Save state.json BEFORE anything that can fail (gist creation, network,
     # `gh` auth). If a subsequent step blows up, the target dir has a
     # detectable "partial init" marker (state.json with gist_id=None) that
-    # a re-run of `thrds init` picks up as resumable.
+    # a re-run of `thrds <platform> init` picks up as resumable.
     state.save(target)
 
     if no_gist:
@@ -276,180 +303,21 @@ def init(no_gist: bool, prefix: str | None, doc_path: str):
         # This way local and gist share the same history from commit 1.
         _do_gist_init(target, state, slug)
 
+    return target, state, False
+
+
+def _print_init_completion(target: Path, state: SessionState, extra_hint: str | None = None) -> None:
+    """Standard end-of-fresh-init stderr hints: session id, optional
+    platform-specific line, cd hint. Not called on resume."""
     err(f"Initialized session {state.session_id} at {target}")
-    err(f"Staging PC name (on first push): {state.staging_channel_name()}")
+    if extra_hint:
+        err(extra_hint)
     try:
         rel = target.relative_to(Path.cwd())
         err(f"cd {rel} to work on this doc")
     except ValueError:
         # target isn't under cwd (git-root was above cwd). Print absolute.
         err(f"cd {target} to work on this doc")
-
-
-@cli.command()
-@click.option('-c', '--channel', help='Prod channel override (only with --prod).')
-@click.option('-k', '--keep-staging', is_flag=True, help='Do not auto-archive the staging PC after --prod.')
-@click.option('-n', '--dry-run', is_flag=True, help='Show plan without side effects.')
-@click.option('-p', '--prod', is_flag=True, help='Push to prod (additive) instead of staging (terraform).')
-@click.argument('doc_path', required=False)
-def push(channel: str | None, keep_staging: bool, dry_run: bool, prod: bool, doc_path: str | None):
-    """Push DOC_PATH to Slack. Default: staging PC (terraform)."""
-    state = _load_state()
-    doc = _load_doc(state, doc_path)
-    if not prod and channel is not None:
-        raise click.UsageError('--channel requires --prod.')
-    if not prod and keep_staging:
-        raise click.UsageError('--keep-staging requires --prod.')
-    client = _make_slack_client()
-    if channel is not None:
-        channel = _resolve_channel(client, channel)
-    if prod:
-        result = client.sync_doc_prod(
-            doc, state,
-            channel=channel,
-            keep_staging=keep_staging,
-            dry_run=dry_run,
-        )
-        mode = 'prod'
-    else:
-        result = client.sync_doc_staging(doc, state, dry_run=dry_run)
-        mode = 'staging'
-    _print_sync_summary(f'pushed to {mode}' + (' (dry-run)' if dry_run else ''), result)
-    if prod and not dry_run and not keep_staging and state.staging_channel is not None:
-        err(f"  archived staging PC: {state.staging_channel}")
-    if not dry_run:
-        doc_rel = _resolve_doc_path(state, doc_path)
-        _autocommit(
-            Path.cwd(),
-            [doc_rel, str(STATE_PATH)],
-            f'thrds: push {mode}',
-        )
-
-
-@cli.command()
-@click.option('-c', '--channel', help='Prod channel override (only with --prod).')
-@click.option('-p', '--prod', is_flag=True, help='Pull from prod channel.')
-@click.option('-w', '--write', is_flag=True, help='Write the pulled doc back to DOC_PATH.')
-@click.argument('doc_path', required=False)
-def pull(channel: str | None, prod: bool, write: bool, doc_path: str | None):
-    """Pull the doc's current state from Slack. Default: staging PC.
-
-    Without ``--write`` the doc is printed to stdout (frontmatter omitted).
-    With ``--write``, DOC_PATH is overwritten and (if the session is a git
-    repo) auto-committed + pushed to the gist mirror.
-    """
-    state = _load_state()
-    if not prod and channel is not None:
-        raise click.UsageError('--channel requires --prod.')
-    client = _make_slack_client()
-    if channel is not None:
-        channel = _resolve_channel(client, channel)
-    session_dir = Path.cwd()
-    doc = (
-        client.pull_doc_prod(state, channel=channel, session_dir=session_dir)
-        if prod
-        else client.pull_doc_staging(state, session_dir=session_dir)
-    )
-    text = serialize_doc(doc)
-    if write:
-        path = _resolve_doc_path(state, doc_path)
-        Path(path).write_text(text)
-        # Persist any new custom emoji entries pulled into state.workspace_emoji.
-        state.save()
-        err(f"wrote pulled doc to {path}")
-        mode = 'prod' if prod else 'staging'
-        # Emoji files (`emoji-*.<ext>`) newly-downloaded by pull_doc_* land at
-        # session root; add them to the auto-commit so the gist mirror carries them.
-        emoji_paths = [p.name for p in session_dir.glob('emoji-*') if p.is_file()]
-        _autocommit(session_dir, [path, str(STATE_PATH), *emoji_paths], f'thrds: pull {mode} → {path}')
-    else:
-        click.echo(text, nl=False)
-
-
-@cli.command()
-@click.option('-c', '--channel', help='Prod channel override (only with --prod).')
-@click.option('-p', '--prod', is_flag=True, help='Diff against prod channel.')
-@click.argument('doc_path', required=False)
-def diff(channel: str | None, prod: bool, doc_path: str | None):
-    """Diff local DOC_PATH against Slack's current state. Default: staging PC."""
-    state = _load_state()
-    if not prod and channel is not None:
-        raise click.UsageError('--channel requires --prod.')
-    local_doc = _load_doc(state, doc_path)
-    client = _make_slack_client()
-    if channel is not None:
-        channel = _resolve_channel(client, channel)
-    session_dir = Path.cwd()
-    slack_doc = (
-        client.pull_doc_prod(state, channel=channel, session_dir=session_dir)
-        if prod
-        else client.pull_doc_staging(state, session_dir=session_dir)
-    )
-    click.echo(diff_docs(local_doc, slack_doc, from_label='local', to_label='slack'), nl=False)
-
-
-@cli.command()
-def archive():
-    """Archive this session's staging PC (reversible via Slack UI/API `unarchive`).
-
-    Idempotent — subsequent invocations no-op via the ``state.staging_archived``
-    flag. Auto-commits + pushes the flag change to the gist mirror.
-    """
-    state = _load_state()
-    if state.staging_channel is None:
-        err("No staging PC to archive.")
-        return
-    if state.staging_archived:
-        err(f"Already archived: {state.staging_channel}")
-        return
-    client = _make_slack_client()
-    client.archive_channel(state.staging_channel)
-    state.staging_archived = True
-    state.save()
-    err(f"archived staging PC: {state.staging_channel}")
-    _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: archive {state.staging_channel}')
-
-
-@cli.command('open')
-@click.option('-p', '--prod', is_flag=True, help='Open the prod channel (default: gist).')
-@click.option('-s', '--staging', is_flag=True, help='Open the staging PC (default: gist).')
-@click.option('-U', '--no-open', is_flag=True, help='Print the URL, do not launch browser.')
-def open_(prod: bool, staging: bool, no_open: bool):
-    """Open this session's gist (default), staging PC, or prod channel in the browser.
-
-    Mirrors ``ghpr open [-g]`` — with three targets instead of two, since a
-    thrds session tracks a gist + a staging channel + (once pushed) a prod
-    channel. Pass ``-U`` to just print the URL (useful in scripts).
-    """
-    if prod and staging:
-        raise click.UsageError('--prod and --staging are mutually exclusive.')
-    state = _load_state()
-
-    if staging:
-        if state.staging_channel is None:
-            raise click.UsageError(
-                'No staging channel — run `thrds push` first to create one.'
-            )
-        url = _channel_url(state.staging_channel)
-        label = f'staging PC {state.staging_channel}'
-    elif prod:
-        if state.prod_channel is None:
-            raise click.UsageError(
-                'No prod channel recorded on this session.'
-            )
-        url = _channel_url(state.prod_channel)
-        label = f'prod channel {state.prod_channel}'
-    else:
-        if state.gist_id is None:
-            raise click.UsageError(
-                'No gist recorded — session was init\'d with --no-gist.'
-            )
-        url = f'https://gist.github.com/{state.gist_id}'
-        label = f'gist {state.gist_id}'
-
-    err(f'Opening {label}: {url}')
-    if not no_open:
-        webbrowser.open(url)
 
 
 def _scan_bounds(
@@ -526,131 +394,6 @@ def _print_sessions_table(sessions: dict, channel: str) -> None:
         err(f'  {sid:<40}  {sess.doc_slug:<24}  {sess.thread_count:>7}  {sess.newest_ts}')
 
 
-@cli.command('list-sessions')
-@click.option('-c', '--cursor', help='Slack pagination cursor to resume from.')
-@click.option('-d', '--oldest-days', type=float, help='Only scan messages posted in the last N days.')
-@click.option('-D', '--latest-days', type=float, help='Skip messages newer than N days ago.')
-@click.option('-m', '--max-pages', type=int, default=50, show_default=True, help='Cap on `conversations.history` pages fetched. Pass 0 to disable.')
-@click.argument('channel')
-def list_sessions(cursor, oldest_days, latest_days, max_pages, channel):
-    """List thrds sessions found in CHANNEL by scanning message metadata.
-
-    Same scan machinery as `thrds recover` (same window / cap / cursor
-    flags), but read-only — never writes state or pulls the doc. Useful
-    to figure out which session_id you actually want before running
-    `recover -i <sid>`, or just to see what's in a channel.
-    """
-    oldest_ts, latest_ts, cur, cap = _scan_bounds(cursor, oldest_days, latest_days, max_pages)
-    sessions, channel = _scan_sessions(channel, oldest_ts, latest_ts, cur, cap)
-    if not sessions:
-        err(f'No thrds-metadata sessions found in {channel}.')
-        return
-    err(f'{len(sessions)} session{"s" if len(sessions) != 1 else ""} in {channel}:')
-    _print_sessions_table(sessions, channel)
-
-
-@cli.command()
-@click.option('-c', '--cursor', help='Slack pagination cursor to resume from (printed by a prior `ScanCapReached`).')
-@click.option('-d', '--oldest-days', type=float, help='Only scan messages posted in the last N days (default: unbounded).')
-@click.option('-D', '--latest-days', type=float, help='Skip messages newer than N days ago (Slack `latest` upper bound). Pair with `--oldest-days` to scan a window.')
-@click.option('-i', '--session-id', help='Session ID to recover (required if channel holds >1 session).')
-@click.option('-m', '--max-pages', type=int, default=50, show_default=True, help='Safety cap on `conversations.history` pages fetched (200 msgs/page). Pass 0 to disable.')
-@click.option('-s', '--staging', is_flag=True, help='Route recovered pointers to staging_threads (default: prod_threads[channel]).')
-@click.option('-W', '--no-write-doc', is_flag=True, help='Skip the doc-pull step; write thrds.json only.')
-@click.argument('channel')
-def recover(
-    cursor: str | None,
-    oldest_days: float | None,
-    latest_days: float | None,
-    session_id: str | None,
-    max_pages: int,
-    staging: bool,
-    no_write_doc: bool,
-    channel: str,
-):
-    """Rebuild `thrds.json` (and DOC.md) from Slack metadata in CHANNEL.
-
-    Every ``thrds`` post carries ``event_type='thrds'`` metadata (session_id,
-    doc_slug, thread_slug, kind); ``recover`` scans CHANNEL for those tags
-    and reassembles the local session state — the durability story for the
-    write-through cache in ``thrds.json``.
-
-    Run inside an empty session dir. Refuses to overwrite an existing
-    ``thrds.json`` (that's a live session, not a recovery target).
-
-    Bare invocation lists sessions found in the channel and exits (code 2)
-    if there's more than one — pass ``-i/--session-id`` to pick one; a
-    single-session channel auto-selects.
-
-    Scan cost: Slack does not index message metadata, so scanning is the
-    only path. Default cap is 50 pages (10k messages). For busy channels,
-    narrow with ``-d/--oldest-days N`` — the cheapest lever.
-    """
-    session_dir = Path.cwd()
-    if (session_dir / STATE_PATH).is_file():
-        raise click.UsageError(
-            f'{STATE_PATH} already exists in {session_dir} — refusing to overwrite. '
-            'cd into a fresh session dir before running `thrds recover`.'
-        )
-    oldest_ts, latest_ts, cur, cap = _scan_bounds(cursor, oldest_days, latest_days, max_pages)
-    sessions, channel = _scan_sessions(channel, oldest_ts, latest_ts, cur, cap)
-    if not sessions:
-        raise click.UsageError(
-            f'No thrds-metadata messages found in {channel}. '
-            "Either the channel has no thrds posts, or a different token/app "
-            'made the posts (Slack only returns metadata to the posting app).'
-        )
-    if session_id is None:
-        if len(sessions) == 1:
-            session_id = next(iter(sessions))
-            err(f'Auto-selecting the only session in {channel}: {session_id}')
-        else:
-            err(f'{len(sessions)} thrds sessions found in {channel}; pass -i/--session-id to pick one:')
-            _print_sessions_table(sessions, channel)
-            raise click.exceptions.Exit(2)
-    if session_id not in sessions:
-        raise click.UsageError(
-            f'Session {session_id!r} not found in {channel}. '
-            f'Available: {sorted(sessions)}'
-        )
-    recovered = sessions[session_id]
-    # Assemble SessionState from the metadata trail. session_id is preserved
-    # (not freshly minted) — that's the whole point of recovery.
-    state = SessionState(
-        session_id=recovered.session_id,
-        doc_path=f'{recovered.doc_slug}.md',
-    )
-    if staging:
-        state.staging_channel = channel
-        state.staging_preamble_ts = recovered.preamble_ts
-        state.staging_threads = dict(recovered.thread_ts_by_slug)
-    else:
-        state.prod_channel = channel
-        if recovered.preamble_ts is not None:
-            state.prod_preamble_ts[channel] = recovered.preamble_ts
-        state.prod_threads[channel] = dict(recovered.thread_ts_by_slug)
-    state.save(session_dir)
-    err(
-        f'wrote {STATE_PATH} for session {session_id} '
-        f'(doc_slug={recovered.doc_slug!r}, {recovered.thread_count} threads'
-        f'{", preamble" if recovered.preamble_ts else ""})'
-    )
-    if no_write_doc:
-        return
-    # `_scan_sessions` made its own client; make another for the pull.
-    # Cheap (no I/O in `__init__`) and keeps the helper contract clean.
-    client = _make_slack_client()
-    doc = (
-        client.pull_doc_staging(state, session_dir=session_dir)
-        if staging
-        else client.pull_doc_prod(state, session_dir=session_dir)
-    )
-    text = serialize_doc(doc)
-    doc_path = session_dir / f'{recovered.doc_slug}.md'
-    doc_path.write_text(text)
-    err(f'wrote pulled doc to {doc_path.name}')
-
-
 def _resolve_channel(client, ref: str) -> str:
     """Resolve a channel reference to a Slack channel ID (``C…``).
 
@@ -702,7 +445,7 @@ def _channel_url(channel_id: str) -> str:
     return f'{workspace_url}/archives/{channel_id}'
 
 
-# --- Low-level Slack CRUD subgroup (`thrds slack …`) ---
+# --- Low-level Slack CRUD helpers (shared by `slack {history,thread,rm,post,edit,permalink}`) ---
 #
 # Motivation + full design in `specs/done/slack-crud-cli.md`. Six verbs that
 # wrap `SlackClient` primitives one-to-one for scripting and ad-hoc CRUD, so
@@ -782,17 +525,354 @@ def _crud_render_messages(msgs: list[dict]) -> str:
     return "\n".join(lines)
 
 
-@cli.group("slack")
-def slack_cli():
-    """Low-level Slack CRUD verbs (history, thread, rm, post, edit, permalink).
+@click.group()
+def cli():
+    """`thrds`: draft multi-thread posts locally; sync to Slack, or capture-only.
 
-    Wraps `SlackClient` methods one-to-one; every verb takes a CHANNEL
-    (accepts ``#name`` or ``C…`` id, resolved via the token). ``post`` /
-    ``edit`` default to **raw mrkdwn** (send verbatim); pass ``-m`` to
-    opt into local markdown → Slack mrkdwn conversion — the reverse of
-    the session verbs' default. See `specs/done/slack-crud-cli.md`.
+    Subgroups: ``slack`` (Slack session + CRUD verbs), ``capture`` (gist-only
+    trajectory, no platform target). Every session's platform is stamped
+    into `thrds.json` at init and enforced on subsequent verbs.
     """
     pass
+
+
+# ============================================================================
+# `thrds slack …` subgroup — session verbs + low-level CRUD.
+# ============================================================================
+
+
+@cli.group("slack")
+def slack_cli():
+    """Slack workflow: `init`/`push`/`pull`/`diff`/`archive`/`open`/`list-sessions`/`recover`
+    plus low-level CRUD (`history`/`thread`/`rm`/`post`/`edit`/`permalink`).
+
+    Session verbs draft locally in `.md`, sync to a staging PC in Slack, let
+    you tweak in-Slack, pull back. CRUD verbs wrap `SlackClient` primitives
+    one-to-one (post/edit default to raw mrkdwn; pass `-m` to opt into local
+    md → mrkdwn conversion — reverse of the session verbs' default).
+    """
+    pass
+
+
+@slack_cli.command("init")
+@click.option('-G', '--no-gist', is_flag=True, help='Skip gist creation; local git repo only.')
+@click.option('-p', '--prefix', help='Staging PC channel-name prefix override (else `THRDS_CHANNEL_PREFIX` env, else empty).')
+@click.argument('doc_path')
+def slack_init(no_gist: bool, prefix: str | None, doc_path: str):
+    """Initialize a `thrds slack` session for DOC_PATH (a `.md` file).
+
+    Creates ``<git-root-or-cwd>/thrds/<slug>/`` (ghpr-style), copies or
+    creates the doc there, `git init`s the session dir, and by default
+    creates a secret gist and adds it as the ``g`` remote.
+
+    Auto-resume: if the target dir already exists and holds a valid
+    ``thrds.json`` (matching platform) with ``gist_id: null``, finishes
+    the gist-creation step instead of refusing (recovers from an earlier
+    init that failed at the gist step — e.g. network hiccup, `gh` unauth'd).
+    """
+    target, state, was_resume = _do_init(doc_path, no_gist, prefix, platform='slack')
+    if was_resume:
+        return
+    _print_init_completion(
+        target, state,
+        extra_hint=f"Staging PC name (on first push): {state.staging_channel_name()}",
+    )
+
+
+@slack_cli.command("push")
+@click.option('-c', '--channel', help='Prod channel override (only with --prod).')
+@click.option('-k', '--keep-staging', is_flag=True, help='Do not auto-archive the staging PC after --prod.')
+@click.option('-n', '--dry-run', is_flag=True, help='Show plan without side effects.')
+@click.option('-p', '--prod', is_flag=True, help='Push to prod (additive) instead of staging (terraform).')
+@click.argument('doc_path', required=False)
+def slack_push(channel: str | None, keep_staging: bool, dry_run: bool, prod: bool, doc_path: str | None):
+    """Push DOC_PATH to Slack. Default: staging PC (terraform)."""
+    state = _load_state(expected_platform='slack')
+    doc = _load_doc(state, doc_path)
+    if not prod and channel is not None:
+        raise click.UsageError('--channel requires --prod.')
+    if not prod and keep_staging:
+        raise click.UsageError('--keep-staging requires --prod.')
+    client = _make_slack_client()
+    if channel is not None:
+        channel = _resolve_channel(client, channel)
+    if prod:
+        result = client.sync_doc_prod(
+            doc, state,
+            channel=channel,
+            keep_staging=keep_staging,
+            dry_run=dry_run,
+        )
+        mode = 'prod'
+    else:
+        result = client.sync_doc_staging(doc, state, dry_run=dry_run)
+        mode = 'staging'
+    _print_sync_summary(f'pushed to {mode}' + (' (dry-run)' if dry_run else ''), result)
+    if prod and not dry_run and not keep_staging and state.staging_channel is not None:
+        err(f"  archived staging PC: {state.staging_channel}")
+    if not dry_run:
+        doc_rel = _resolve_doc_path(state, doc_path)
+        _autocommit(
+            Path.cwd(),
+            [doc_rel, str(STATE_PATH)],
+            f'thrds: push {mode}',
+        )
+
+
+@slack_cli.command("pull")
+@click.option('-c', '--channel', help='Prod channel override (only with --prod).')
+@click.option('-p', '--prod', is_flag=True, help='Pull from prod channel.')
+@click.option('-w', '--write', is_flag=True, help='Write the pulled doc back to DOC_PATH.')
+@click.argument('doc_path', required=False)
+def slack_pull(channel: str | None, prod: bool, write: bool, doc_path: str | None):
+    """Pull the doc's current state from Slack. Default: staging PC.
+
+    Without ``--write`` the doc is printed to stdout (frontmatter omitted).
+    With ``--write``, DOC_PATH is overwritten and (if the session is a git
+    repo) auto-committed + pushed to the gist mirror.
+    """
+    state = _load_state(expected_platform='slack')
+    if not prod and channel is not None:
+        raise click.UsageError('--channel requires --prod.')
+    client = _make_slack_client()
+    if channel is not None:
+        channel = _resolve_channel(client, channel)
+    session_dir = Path.cwd()
+    doc = (
+        client.pull_doc_prod(state, channel=channel, session_dir=session_dir)
+        if prod
+        else client.pull_doc_staging(state, session_dir=session_dir)
+    )
+    text = serialize_doc(doc)
+    if write:
+        path = _resolve_doc_path(state, doc_path)
+        Path(path).write_text(text)
+        # Persist any new custom emoji entries pulled into state.workspace_emoji.
+        state.save()
+        err(f"wrote pulled doc to {path}")
+        mode = 'prod' if prod else 'staging'
+        # Emoji files (`emoji-*.<ext>`) newly-downloaded by pull_doc_* land at
+        # session root; add them to the auto-commit so the gist mirror carries them.
+        emoji_paths = [p.name for p in session_dir.glob('emoji-*') if p.is_file()]
+        _autocommit(session_dir, [path, str(STATE_PATH), *emoji_paths], f'thrds: pull {mode} → {path}')
+    else:
+        click.echo(text, nl=False)
+
+
+@slack_cli.command("diff")
+@click.option('-c', '--channel', help='Prod channel override (only with --prod).')
+@click.option('-p', '--prod', is_flag=True, help='Diff against prod channel.')
+@click.argument('doc_path', required=False)
+def slack_diff(channel: str | None, prod: bool, doc_path: str | None):
+    """Diff local DOC_PATH against Slack's current state. Default: staging PC."""
+    state = _load_state(expected_platform='slack')
+    if not prod and channel is not None:
+        raise click.UsageError('--channel requires --prod.')
+    local_doc = _load_doc(state, doc_path)
+    client = _make_slack_client()
+    if channel is not None:
+        channel = _resolve_channel(client, channel)
+    session_dir = Path.cwd()
+    slack_doc = (
+        client.pull_doc_prod(state, channel=channel, session_dir=session_dir)
+        if prod
+        else client.pull_doc_staging(state, session_dir=session_dir)
+    )
+    click.echo(diff_docs(local_doc, slack_doc, from_label='local', to_label='slack'), nl=False)
+
+
+@slack_cli.command("archive")
+def slack_archive():
+    """Archive this session's staging PC (reversible via Slack UI/API `unarchive`).
+
+    Idempotent — subsequent invocations no-op via the ``state.staging_archived``
+    flag. Auto-commits + pushes the flag change to the gist mirror.
+    """
+    state = _load_state(expected_platform='slack')
+    if state.staging_channel is None:
+        err("No staging PC to archive.")
+        return
+    if state.staging_archived:
+        err(f"Already archived: {state.staging_channel}")
+        return
+    client = _make_slack_client()
+    client.archive_channel(state.staging_channel)
+    state.staging_archived = True
+    state.save()
+    err(f"archived staging PC: {state.staging_channel}")
+    _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: archive {state.staging_channel}')
+
+
+@slack_cli.command("open")
+@click.option('-p', '--prod', is_flag=True, help='Open the prod channel (default: gist).')
+@click.option('-s', '--staging', is_flag=True, help='Open the staging PC (default: gist).')
+@click.option('-U', '--no-open', is_flag=True, help='Print the URL, do not launch browser.')
+def slack_open(prod: bool, staging: bool, no_open: bool):
+    """Open this session's gist (default), staging PC, or prod channel in the browser.
+
+    Mirrors ``ghpr open [-g]`` — with three targets instead of two, since a
+    thrds session tracks a gist + a staging channel + (once pushed) a prod
+    channel. Pass ``-U`` to just print the URL (useful in scripts).
+    """
+    if prod and staging:
+        raise click.UsageError('--prod and --staging are mutually exclusive.')
+    state = _load_state(expected_platform='slack')
+
+    if staging:
+        if state.staging_channel is None:
+            raise click.UsageError(
+                'No staging channel — run `thrds slack push` first to create one.'
+            )
+        url = _channel_url(state.staging_channel)
+        label = f'staging PC {state.staging_channel}'
+    elif prod:
+        if state.prod_channel is None:
+            raise click.UsageError(
+                'No prod channel recorded on this session.'
+            )
+        url = _channel_url(state.prod_channel)
+        label = f'prod channel {state.prod_channel}'
+    else:
+        if state.gist_id is None:
+            raise click.UsageError(
+                'No gist recorded — session was init\'d with --no-gist.'
+            )
+        url = f'https://gist.github.com/{state.gist_id}'
+        label = f'gist {state.gist_id}'
+
+    err(f'Opening {label}: {url}')
+    if not no_open:
+        webbrowser.open(url)
+
+
+@slack_cli.command('list-sessions')
+@click.option('-c', '--cursor', help='Slack pagination cursor to resume from.')
+@click.option('-d', '--oldest-days', type=float, help='Only scan messages posted in the last N days.')
+@click.option('-D', '--latest-days', type=float, help='Skip messages newer than N days ago.')
+@click.option('-m', '--max-pages', type=int, default=50, show_default=True, help='Cap on `conversations.history` pages fetched. Pass 0 to disable.')
+@click.argument('channel')
+def slack_list_sessions(cursor, oldest_days, latest_days, max_pages, channel):
+    """List thrds sessions found in CHANNEL by scanning message metadata.
+
+    Same scan machinery as `thrds slack recover` (same window / cap / cursor
+    flags), but read-only — never writes state or pulls the doc. Useful
+    to figure out which session_id you actually want before running
+    `slack recover -i <sid>`, or just to see what's in a channel.
+    """
+    oldest_ts, latest_ts, cur, cap = _scan_bounds(cursor, oldest_days, latest_days, max_pages)
+    sessions, channel = _scan_sessions(channel, oldest_ts, latest_ts, cur, cap)
+    if not sessions:
+        err(f'No thrds-metadata sessions found in {channel}.')
+        return
+    err(f'{len(sessions)} session{"s" if len(sessions) != 1 else ""} in {channel}:')
+    _print_sessions_table(sessions, channel)
+
+
+@slack_cli.command("recover")
+@click.option('-c', '--cursor', help='Slack pagination cursor to resume from (printed by a prior `ScanCapReached`).')
+@click.option('-d', '--oldest-days', type=float, help='Only scan messages posted in the last N days (default: unbounded).')
+@click.option('-D', '--latest-days', type=float, help='Skip messages newer than N days ago (Slack `latest` upper bound). Pair with `--oldest-days` to scan a window.')
+@click.option('-i', '--session-id', help='Session ID to recover (required if channel holds >1 session).')
+@click.option('-m', '--max-pages', type=int, default=50, show_default=True, help='Safety cap on `conversations.history` pages fetched (200 msgs/page). Pass 0 to disable.')
+@click.option('-s', '--staging', is_flag=True, help='Route recovered pointers to staging_threads (default: prod_threads[channel]).')
+@click.option('-W', '--no-write-doc', is_flag=True, help='Skip the doc-pull step; write thrds.json only.')
+@click.argument('channel')
+def slack_recover(
+    cursor: str | None,
+    oldest_days: float | None,
+    latest_days: float | None,
+    session_id: str | None,
+    max_pages: int,
+    staging: bool,
+    no_write_doc: bool,
+    channel: str,
+):
+    """Rebuild `thrds.json` (and DOC.md) from Slack metadata in CHANNEL.
+
+    Every ``thrds`` post carries ``event_type='thrds'`` metadata (session_id,
+    doc_slug, thread_slug, kind); ``recover`` scans CHANNEL for those tags
+    and reassembles the local session state — the durability story for the
+    write-through cache in ``thrds.json``.
+
+    Run inside an empty session dir. Refuses to overwrite an existing
+    ``thrds.json`` (that's a live session, not a recovery target).
+
+    Bare invocation lists sessions found in the channel and exits (code 2)
+    if there's more than one — pass ``-i/--session-id`` to pick one; a
+    single-session channel auto-selects.
+
+    Scan cost: Slack does not index message metadata, so scanning is the
+    only path. Default cap is 50 pages (10k messages). For busy channels,
+    narrow with ``-d/--oldest-days N`` — the cheapest lever.
+    """
+    session_dir = Path.cwd()
+    if (session_dir / STATE_PATH).is_file():
+        raise click.UsageError(
+            f'{STATE_PATH} already exists in {session_dir} — refusing to overwrite. '
+            'cd into a fresh session dir before running `thrds slack recover`.'
+        )
+    oldest_ts, latest_ts, cur, cap = _scan_bounds(cursor, oldest_days, latest_days, max_pages)
+    sessions, channel = _scan_sessions(channel, oldest_ts, latest_ts, cur, cap)
+    if not sessions:
+        raise click.UsageError(
+            f'No thrds-metadata messages found in {channel}. '
+            "Either the channel has no thrds posts, or a different token/app "
+            'made the posts (Slack only returns metadata to the posting app).'
+        )
+    if session_id is None:
+        if len(sessions) == 1:
+            session_id = next(iter(sessions))
+            err(f'Auto-selecting the only session in {channel}: {session_id}')
+        else:
+            err(f'{len(sessions)} thrds sessions found in {channel}; pass -i/--session-id to pick one:')
+            _print_sessions_table(sessions, channel)
+            raise click.exceptions.Exit(2)
+    if session_id not in sessions:
+        raise click.UsageError(
+            f'Session {session_id!r} not found in {channel}. '
+            f'Available: {sorted(sessions)}'
+        )
+    recovered = sessions[session_id]
+    # Assemble SessionState from the metadata trail. session_id is preserved
+    # (not freshly minted) — that's the whole point of recovery. platform
+    # defaults to 'slack' since this is `thrds slack recover`.
+    state = SessionState(
+        session_id=recovered.session_id,
+        doc_path=f'{recovered.doc_slug}.md',
+        platform='slack',
+    )
+    if staging:
+        state.staging_channel = channel
+        state.staging_preamble_ts = recovered.preamble_ts
+        state.staging_threads = dict(recovered.thread_ts_by_slug)
+    else:
+        state.prod_channel = channel
+        if recovered.preamble_ts is not None:
+            state.prod_preamble_ts[channel] = recovered.preamble_ts
+        state.prod_threads[channel] = dict(recovered.thread_ts_by_slug)
+    state.save(session_dir)
+    err(
+        f'wrote {STATE_PATH} for session {session_id} '
+        f'(doc_slug={recovered.doc_slug!r}, {recovered.thread_count} threads'
+        f'{", preamble" if recovered.preamble_ts else ""})'
+    )
+    if no_write_doc:
+        return
+    # `_scan_sessions` made its own client; make another for the pull.
+    # Cheap (no I/O in `__init__`) and keeps the helper contract clean.
+    client = _make_slack_client()
+    doc = (
+        client.pull_doc_staging(state, session_dir=session_dir)
+        if staging
+        else client.pull_doc_prod(state, session_dir=session_dir)
+    )
+    text = serialize_doc(doc)
+    doc_path = session_dir / f'{recovered.doc_slug}.md'
+    doc_path.write_text(text)
+    err(f'wrote pulled doc to {doc_path.name}')
+
+
+# --- Slack CRUD verbs (`slack {history,thread,rm,post,edit,permalink}`) ---
 
 
 @slack_cli.command("history")
@@ -904,6 +984,72 @@ def slack_permalink(channel: str, ts: str):
     """Print the permalink URL for the message at TS in CHANNEL."""
     client = _crud_client(channel)
     click.echo(client.permalink(ts))
+
+
+# ============================================================================
+# `thrds capture …` subgroup — gist-only trajectory, no platform target.
+# ============================================================================
+
+
+@cli.group("capture")
+def capture_cli():
+    """Capture-only sessions: git + gist trajectory, no platform posting.
+
+    Same on-disk shape as slack sessions (session dir under
+    ``<git-root-or-cwd>/thrds/<slug>/``, git-tracked, gist-mirrored) minus
+    any Slack/Discord/etc. plumbing. Useful for drafting posts you'll
+    paste manually (Discord in a channel the bot can't reach, arbitrary
+    forum, etc.) while still capturing iteration history to a gist.
+    """
+    pass
+
+
+@capture_cli.command("init")
+@click.option('-G', '--no-gist', is_flag=True, help='Skip gist creation; local git repo only.')
+@click.argument('doc_path')
+def capture_init(no_gist: bool, doc_path: str):
+    """Initialize a capture-only session for DOC_PATH (no platform target).
+
+    Same auto-resume semantics as `slack init`: if the target dir has a
+    partial init (matching platform, gist_id=None), the gist step is
+    completed on re-run.
+    """
+    target, state, was_resume = _do_init(doc_path, no_gist, channel_prefix=None, platform='capture')
+    if was_resume:
+        return
+    hint = None if state.gist_id is None else f"Gist: https://gist.github.com/{state.gist_id}"
+    _print_init_completion(target, state, extra_hint=hint)
+
+
+@capture_cli.command("push")
+def capture_push():
+    """Commit any local doc changes and push to the gist mirror.
+
+    Capture-only sessions have no platform target — "push" here means
+    the gist mirror step alone. No-op if the session was inited with
+    `--no-gist` (nothing to push to).
+    """
+    state = _load_state(expected_platform='capture')
+    session_dir = Path.cwd()
+    doc_path = _resolve_doc_path(state, None)
+    _autocommit(session_dir, [doc_path, str(STATE_PATH)], f'thrds: capture push')
+    if state.gist_id is None:
+        err("(no gist configured — commit only)")
+
+
+@capture_cli.command("open")
+@click.option('-U', '--no-open', is_flag=True, help='Print the URL, do not launch browser.')
+def capture_open(no_open: bool):
+    """Open this session's gist in the browser (or print with -U)."""
+    state = _load_state(expected_platform='capture')
+    if state.gist_id is None:
+        raise click.UsageError(
+            'No gist recorded — session was init\'d with --no-gist.'
+        )
+    url = f'https://gist.github.com/{state.gist_id}'
+    err(f'Opening gist {state.gist_id}: {url}')
+    if not no_open:
+        webbrowser.open(url)
 
 
 def main():

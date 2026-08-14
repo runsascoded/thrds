@@ -119,20 +119,22 @@ Foreign (non-editable) messages — e.g. human replies in a bot thread — are a
 
 ## CLI
 
-`thrds` also ships a CLI for drafting multi-thread Slack posts locally + syncing them to a staging private channel + promoting to a real prod channel. One session per `.md` file lives in `<git-root-or-cwd>/thrds/<slug>/` with its own private git repo and (default) a secret gist mirror for version history.
+`thrds` ships a CLI split into platform subgroups. Today: `thrds slack …` (the primary workflow) and `thrds capture …` (gist-only trajectory, no platform target — for drafting posts you'll paste manually while still capturing iteration history). One session per `.md` file lives in `<git-root-or-cwd>/thrds/<slug>/` with its own private git repo and (default) a secret gist mirror.
+
+**`thrds slack …`** — draft multi-thread Slack posts locally, sync to a staging private channel, promote to a real prod channel:
 
 ```bash
-thrds init draft.md              # scaffold session dir + gist mirror
-thrds push                       # sync to staging PC (terraform)
-thrds pull --write               # pull edits back → .md
-thrds push --prod --channel #foo # sync to prod (additive)
-thrds diff --prod --channel #foo # see what would change
-thrds archive                    # archive the staging PC
-thrds list-sessions #foo         # what thrds sessions exist in #foo
-thrds recover -i <sid> #foo      # rebuild a lost session from Slack metadata
+thrds slack init draft.md              # scaffold session dir + gist mirror
+thrds slack push                       # sync to staging PC (terraform)
+thrds slack pull --write               # pull edits back → .md
+thrds slack push --prod --channel #foo # sync to prod (additive)
+thrds slack diff --prod --channel #foo # see what would change
+thrds slack archive                    # archive the staging PC
+thrds slack list-sessions #foo         # what thrds sessions exist in #foo
+thrds slack recover -i <sid> #foo      # rebuild a lost session from Slack metadata
 ```
 
-`thrds slack …` is a low-level CRUD subgroup for ad-hoc Slack operations (finding a message's ts, deleting a test post, posting one-off mrkdwn) — a first-class alternative to hand-rolled `chat.*` heredocs. All verbs default to **raw mrkdwn** (send verbatim); pass `-m` to opt into local-md → Slack-mrkdwn conversion (the opposite of the session verbs' default — see [`raw-mrkdwn-passthrough`][raw-spec]).
+`thrds slack …` also exposes low-level CRUD verbs for ad-hoc operations (finding a message's ts, deleting a test post, posting one-off mrkdwn) — a first-class alternative to hand-rolled `chat.*` heredocs. All CRUD verbs default to **raw mrkdwn** (send verbatim); pass `-m` to opt into local-md → Slack-mrkdwn conversion (the opposite of the session verbs' default — see [`raw-mrkdwn-passthrough`][raw-spec]).
 
 ```bash
 thrds slack history #foo -n 10           # last 10 messages (ts, sender, text)
@@ -144,21 +146,32 @@ thrds slack edit    #foo 1783.1 'new'    # edit; raw by default
 thrds slack permalink #foo 1783.1        # get workspace permalink URL
 ```
 
+**`thrds capture …`** — capture-only sessions: same on-disk shape (git repo + gist mirror), no platform posting. Useful when the destination is somewhere `thrds` doesn't (yet) integrate with — Discord, an arbitrary forum, an email draft — but you still want the doc's iteration history captured to a gist:
+
+```bash
+thrds capture init draft.md      # scaffold session dir + gist mirror (no channel)
+# ... edit draft.md ...
+thrds capture push               # commit doc changes and push to the gist
+thrds capture open               # browse the gist
+```
+
+Every session's `platform` is stamped into `thrds.json` at init and guarded on every subsequent verb — running `thrds slack push` inside a capture-inited session errors immediately with a clear message rather than trying and failing halfway through.
+
 [raw-spec]: specs/done/raw-mrkdwn-passthrough.md
 
 ### Slack tokens + scopes
 
 The CLI reads the Slack token from `THRDS_SLACK_TOKEN` (a deprecated alias `SLACK_THRDS_USER_TOKEN` still works with a one-time warning). Which token type you need depends on which verbs you use:
 
-- **User token** (`xoxp-…`) — needed for the **session verbs** (`init` / `push` / `pull` / `diff` / `archive` / `list-sessions` / `recover` / `open`). The session workflow's whole point is "draft locally in `.md`, sync to a staging PC, tweak the posts in Slack (as you), pull back, push again"; because those in-Slack tweaks are your Slack user's own posts, only a token you own can `chat.update` them.
-- **Bot token** (`xoxb-…`) — sufficient for the **`slack` CRUD subgroup** (`history` / `thread` / `rm` / `post` / `edit` / `permalink`) as long as the bot is only editing / deleting its own posts. Also sufficient for programmatic `SlackClient.sync()` / `sync_linked()` when the bot owns the content lifecycle end-to-end (bot renders, bot posts, bot reconciles).
+- **User token** (`xoxp-…`) — needed for the **session verbs** (`slack init` / `push` / `pull` / `diff` / `archive` / `list-sessions` / `recover` / `open`). The session workflow's whole point is "draft locally in `.md`, sync to a staging PC, tweak the posts in Slack (as you), pull back, push again"; because those in-Slack tweaks are your Slack user's own posts, only a token you own can `chat.update` them.
+- **Bot token** (`xoxb-…`) — sufficient for the **`slack` CRUD verbs** (`history` / `thread` / `rm` / `post` / `edit` / `permalink`) as long as the bot is only editing / deleting its own posts. Also sufficient for programmatic `SlackClient.sync()` / `sync_linked()` when the bot owns the content lifecycle end-to-end (bot renders, bot posts, bot reconciles).
 
 Add scopes under **OAuth & Permissions** — under **User Token Scopes** for a user token, **Bot Token Scopes** for a bot token. All scopes have the same name in both places.
 
 | Scope | Needed for | Session verbs | CRUD / `sync()` |
 | --- | --- | :---: | :---: |
 | `chat:write` | Post / edit / delete messages | ✓ | ✓ |
-| `groups:write` | Create + archive staging PCs | ✓ (`init`, `push`, `archive`) | — |
+| `groups:write` | Create + archive staging PCs | ✓ (`slack init`, `push`, `archive`) | — |
 | `groups:read` | Read + resolve `#name` for private channels | ✓ | ✓ |
 | `channels:read` | Resolve `#name` for public channels | ✓ (if pushing/pulling public) | ✓ (public channels) |
 | `users:read` | Resolve foreign-author names on `pull` | ✓ (`pull`) | — |
@@ -166,7 +179,7 @@ Add scopes under **OAuth & Permissions** — under **User Token Scopes** for a u
 | `chat:write.customize` | Per-message `username` / `icon_url` / `icon_emoji` | If used | If used (`slack post -u`/`-i`/`-e`) |
 | `reactions:read` | `SenderChangePolicy` pre-flight (library) | — | If using aggressive-mode `sync` |
 
-Metadata visibility is app-scoped (Slack only returns your app's metadata to your app), so `recover` needs **no** additional scope beyond the ones above.
+Metadata visibility is app-scoped (Slack only returns your app's metadata to your app), so `slack recover` needs **no** additional scope beyond the ones above.
 
 ## Used by
 

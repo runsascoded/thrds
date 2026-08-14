@@ -48,7 +48,7 @@ def test_list_channels_uses_GET_not_JSON_post():
 
 def test_list_channels_requests_public_private_and_mpim_types():
     """`types` param must include private_channel so we can resolve
-    the staging PCs `thrds init` creates."""
+    the staging PCs `thrds slack init` creates."""
     client = _FakeSlackClient(_single_page([]))
     client.list_channels_by_name()
     _, data, _ = client.calls[0]

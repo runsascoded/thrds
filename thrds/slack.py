@@ -1084,7 +1084,7 @@ class SlackClient:
         """Rewrite `[text](permalink)` back to `[text](#slug)` for our own threads.
 
         The push path resolved `[text](#slug)` → `[text](<slack-permalink>)`;
-        this reverses it so a `thrds pull --write` writes doc content the
+        this reverses it so a `thrds slack pull --write` writes doc content the
         `push` codepath can consume again as source. Without this, `pull`
         would clobber every cross-ref with a permalink and a subsequent
         push would send the URL literally (bypassing ref resolution).
@@ -1166,7 +1166,7 @@ class SlackClient:
     ) -> dict[str, RecoveredSession]:
         """Scan ``channel``'s history for messages carrying thrds metadata.
 
-        Backs the ``thrds recover`` verb: every ``chat.postMessage`` /
+        Backs the ``thrds slack recover`` verb: every ``chat.postMessage`` /
         ``chat.update`` this client makes stamps ``event_type='thrds'`` +
         ``event_payload={session_id, doc_slug, thread_slug, kind}`` on the
         message (see ``_thrds_metadata``). This method reverses that: it
