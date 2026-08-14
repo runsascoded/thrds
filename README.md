@@ -155,7 +155,7 @@ thrds capture push               # commit doc changes and push to the gist
 thrds capture open               # browse the gist
 ```
 
-**`thrds discord …`** — capture + MD-compat lint for Discord. Discord asymmetry: prod delivery is copy-paste (self-bots are ToS-prohibited), so there's no `push`. `render` prints the doc to stdout (idiomatic: `thrds discord render | pbcopy`) and auto-runs `lint` alongside (masked links, tables, raw `@name` — three constructs Discord's user-message renderer drops on the floor):
+**`thrds discord …`** — capture + MD-compat lint for Discord. Discord asymmetry: prod delivery is copy-paste (self-bots are ToS-prohibited), so there's no `push`. `render` prints the doc to stdout (idiomatic: `thrds discord render | pbcopy`) and auto-runs `lint` alongside (tables and raw `@name` — two constructs Discord's user-message renderer drops on the floor; masked links `[text](url)` do render in normal user messages since Discord's 2023 markdown update):
 
 ```bash
 thrds discord init draft.md      # scaffold session dir + gist (no channel/bot)

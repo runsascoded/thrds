@@ -12,36 +12,21 @@ def _blint(text: str) -> list[LintIssue]:
     return BskyLinter().lint(text).issues
 
 
-# --- masked links ---
+# --- masked links (Discord renders them fine since 2023; no rule) ---
 
-def test_masked_link_flagged():
+def test_masked_link_not_flagged():
+    """Discord's 2023 markdown update made `[text](url)` render as a hyperlink
+    in normal user messages (with click-through warning for untrusted domains).
+    The `discord/masked-link` rule was removed — see
+    `specs/done/discord-masked-links-render.md`."""
     text = "See [the docs](https://example.com) for more.\n"
-    issues = _lint(text)
-    assert issues == [LintIssue(
-        line=1, column=5, severity="warning", rule="discord/masked-link",
-        message="masked link '[the docs](https://example.com)' renders as literal text "
-                "in normal Discord messages; use bare URL",
-    )]
+    assert _lint(text) == []
 
 
 def test_bare_url_not_flagged():
     """Bare URLs auto-linkify in Discord — no warning."""
     text = "See https://example.com for more.\n"
     assert _lint(text) == []
-
-
-def test_multiple_masked_links_on_one_line():
-    text = "[a](https://a.example) and [b](https://b.example)\n"
-    issues = _lint(text)
-    assert [i.column for i in issues] == [1, 28]
-    assert all(i.rule == "discord/masked-link" for i in issues)
-
-
-def test_masked_link_inside_code_fence_ignored():
-    text = "```\n[link](https://x.example)\n```\nnormal [link](https://y.example)\n"
-    issues = _lint(text)
-    assert len(issues) == 1
-    assert issues[0].line == 4  # only the one outside the fence
 
 
 # --- tables ---
@@ -118,24 +103,23 @@ def test_raw_mention_includes_embedded_period_dot_username():
 def test_report_sorted_by_line_then_column():
     """LintReport keeps issues in (line, column) order across multiple rule types."""
     text = (
-        "Line one has @foo and [x](https://y).\n"
+        "Line one has @foo here.\n"
         "|---|\n"
     )
     report = DiscordLinter().lint(text)
     assert [(i.line, i.column, i.rule) for i in report.issues] == [
         (1, 14, "discord/raw-mention"),
-        (1, 23, "discord/masked-link"),
         (2, 1, "discord/table"),
     ]
 
 
 def test_report_format_prefixes_path_when_given():
     report = LintReport(issues=[LintIssue(
-        line=3, column=5, severity="warning", rule="discord/masked-link",
+        line=3, column=5, severity="warning", rule="discord/table",
         message="msg",
     )])
-    assert report.format(path="draft.md") == "draft.md:3:5: warning [discord/masked-link] msg"
-    assert report.format() == "3:5: warning [discord/masked-link] msg"
+    assert report.format(path="draft.md") == "draft.md:3:5: warning [discord/table] msg"
+    assert report.format() == "3:5: warning [discord/table] msg"
 
 
 def test_report_empty_when_no_issues():

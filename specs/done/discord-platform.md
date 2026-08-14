@@ -92,9 +92,11 @@ What landed:
 - `thrds discord {init,render,lint,open}` subgroup — no `push` verb.
 - `thrds.lint` module with a `DiscordLinter` class + `LintIssue` / `LintReport`
   dataclasses. Reusable across future platform linters.
-- Three lint rules:
-  - **masked links** (`[text](url)`) render as literal text in normal user
-    messages (only bot-embed messages render them as hyperlinks); use bare URLs.
+- Lint rules (originally three; masked-link rule was wrong — see
+  `specs/done/discord-masked-links-render.md` — and was removed 2026-08-14):
+  - ~~**masked links** (`[text](url)`)~~ — **removed**: they do render as
+    hyperlinks in normal Discord user messages (with click-through warning
+    for untrusted domains) since Discord's 2023 markdown update.
   - **markdown tables** don't render; use a code block or bullets.
   - **raw `@name`** doesn't ping; needs `<@user_id>`.
 - `thrds discord render` prints the doc's MD to stdout and auto-runs lint
@@ -134,7 +136,8 @@ Phase 1 (landed):
 
 Phase 2c (landed 2026-08-14):
 - [x] `thrds discord {init,render,lint,open}` subgroup (option `c` — no push)
-- [x] Discord MD-compat linter (masked links / tables / raw `@name`)
+- [x] Discord MD-compat linter (tables / raw `@name`; masked-link rule
+      removed 2026-08-14 — see `specs/done/discord-masked-links-render.md`)
 - [x] `render` surface + `.thrds-rc` `td*` aliases (incl. `tdc = render | pbcopy`)
 
 Also landed 2026-08-14 (same commit family):

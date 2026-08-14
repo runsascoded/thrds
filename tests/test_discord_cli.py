@@ -78,7 +78,9 @@ def test_discord_render_prints_doc_verbatim(in_tmp, monkeypatch):
 
 
 def test_discord_render_autoruns_lint_and_prints_warnings_to_stderr(in_tmp, monkeypatch):
-    text = "=== a\n\nSee [the docs](https://ex.com) and ping @alice.\n"
+    # Masked links render fine on Discord since 2023; the two active rules are
+    # tables and raw @mentions.
+    text = "=== a\n\nPing @alice and see:\n|---|\n"
     _init_discord(in_tmp, monkeypatch, doc_text=text)
     result = CliRunner().invoke(cli, ['discord', 'render'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -87,15 +89,15 @@ def test_discord_render_autoruns_lint_and_prints_warnings_to_stderr(in_tmp, monk
     # Stderr has both warnings, in file order.
     stderr_lines = result.stderr.rstrip().split('\n')
     assert stderr_lines == [
-        "draft.md:3:5: warning [discord/masked-link] masked link '[the docs](https://ex.com)' "
-        "renders as literal text in normal Discord messages; use bare URL",
-        "draft.md:3:41: warning [discord/raw-mention] raw @alice won't ping in Discord; "
+        "draft.md:3:6: warning [discord/raw-mention] raw @alice won't ping in Discord; "
         "use <@user_id> to mention",
+        "draft.md:4:1: warning [discord/table] markdown table doesn't render in Discord; "
+        "use a code block or bullets",
     ]
 
 
 def test_discord_render_no_lint_flag_skips_the_warning_pass(in_tmp, monkeypatch):
-    text = "=== a\n\nSee [x](https://ex.com).\n"
+    text = "=== a\n\nPing @alice about it.\n"
     _init_discord(in_tmp, monkeypatch, doc_text=text)
     result = CliRunner().invoke(cli, ['discord', 'render', '-L'])
     assert result.exit_code == 0
@@ -107,13 +109,13 @@ def test_discord_render_no_lint_flag_skips_the_warning_pass(in_tmp, monkeypatch)
 
 
 def test_discord_lint_reports_issues_to_stderr(in_tmp, monkeypatch):
-    text = "=== a\n\nHere's [a link](https://ex.com).\n"
+    text = "=== a\n\nHey @bob, thanks!\n"
     _init_discord(in_tmp, monkeypatch, doc_text=text)
     result = CliRunner().invoke(cli, ['discord', 'lint'])
     assert result.exit_code == 0  # warnings, not errors
     assert result.stderr.rstrip() == (
-        "draft.md:3:8: warning [discord/masked-link] masked link '[a link](https://ex.com)' "
-        "renders as literal text in normal Discord messages; use bare URL"
+        "draft.md:3:5: warning [discord/raw-mention] raw @bob won't ping in Discord; "
+        "use <@user_id> to mention"
     )
     # `lint` produces no stdout — findings go to stderr.
     assert result.stdout == ""

@@ -8,16 +8,17 @@ author can fix them before pasting/posting.
 
 Currently:
 
-- :class:`DiscordLinter` — catches the three MD constructs that don't render
+- :class:`DiscordLinter` — catches the two MD constructs that don't render
   as expected in a normal Discord user message:
 
-  - **masked links** (``[text](url)``) render as literal text in normal user
-    messages; only bot-embed messages render them as hyperlinks. The idiomatic
-    Discord author uses bare URLs (which auto-linkify).
   - **markdown tables** (``| col | col |``) don't render at all; use a code
     block or bullets.
   - **raw ``@name``** doesn't ping — Discord requires ``<@user_id>`` for a
     real user mention (name-based mentions don't resolve on paste).
+
+  (Masked links ``[text](url)`` render fine in normal user messages since
+  Discord's 2023 markdown update — see ``specs/done/discord-masked-links-render.md``
+  for the correction to the original phase-2c scope.)
 
 - :class:`BskyLinter` — Bluesky's constraints look different from Discord's
   but with some overlap:
@@ -112,8 +113,8 @@ def _is_fence(line: str) -> bool:
 class DiscordLinter:
     """Flag markdown constructs that don't render in normal Discord user messages.
 
-    The three rules (masked links, tables, raw ``@name``) are described in the
-    module docstring. Code blocks are skipped — anything inside \\`\\`\\` fences
+    The two rules (tables, raw ``@name``) are described in the module
+    docstring. Code blocks are skipped — anything inside \\`\\`\\` fences
     (or indented code, though we don't detect that) is presumed literal.
     """
 
@@ -127,16 +128,6 @@ class DiscordLinter:
                 continue
             if in_fence:
                 continue
-
-            # Masked links: `[text](url)` renders as literal text in DM/channel messages.
-            for m in _MASKED_LINK_RE.finditer(line):
-                report.append(LintIssue(
-                    line=i,
-                    column=m.start() + 1,
-                    severity="warning",
-                    rule="discord/masked-link",
-                    message=f"masked link {m.group()!r} renders as literal text in normal Discord messages; use bare URL",
-                ))
 
             # Tables: separator line + adjacent body lines.
             if _TABLE_SEP_RE.match(line):

@@ -1060,7 +1060,8 @@ def capture_open(no_open: bool):
 # loop without any bot-token / staging-channel plumbing. Prod delivery on
 # Discord is copy-paste (self-bots violate ToS); `render` outputs the doc's
 # MD to stdout for `| pbcopy`, `lint` flags the constructs that don't render
-# in normal Discord user messages (masked links, tables, raw @name).
+# in normal Discord user messages (tables, raw @name). Masked links used to
+# be flagged too; see specs/done/discord-masked-links-render.md for the fix.
 
 
 def _run_discord_lint(doc_text: str, doc_path: str) -> int:
@@ -1084,7 +1085,7 @@ def discord_cli():
     prohibited), so there's no `push`. The subgroup captures iteration
     history to a gist (via `init`) and surfaces the final MD (via `render`)
     with warnings about constructs Discord's user-message renderer drops
-    on the floor (masked links, tables, raw `@name`). See
+    on the floor (tables, raw `@name`). See
     `specs/done/discord-platform.md`.
     """
     pass
@@ -1134,8 +1135,6 @@ def discord_lint(doc_path: str | None):
     the doc still renders, just not as intended). Rules:
 
     \b
-    - masked links `[text](url)` render as literal text in normal Discord
-      messages (bot-embed messages are the exception); use bare URLs.
     - markdown tables don't render; use a code block or bullets.
     - raw `@name` doesn't ping; needs `<@user_id>`.
     """
