@@ -37,3 +37,10 @@ alias tdr='thrds discord render'        # print doc + lint warnings → stderr
 alias tdc='thrds discord render | pbcopy'  # macOS: paste directly to clipboard
 alias tdl='thrds discord lint'          # just the MD-compat warnings
 alias tdo='thrds discord open'          # browse the gist
+
+# --- thrds bsky (render + post-length + masked-link lint) ---
+alias tbi='thrds bsky init'             # init a bsky session (gist-mirrored)
+alias tbr='thrds bsky render'           # print doc + lint warnings → stderr
+alias tbc='thrds bsky render | pbcopy'  # macOS: paste directly to clipboard
+alias tbl='thrds bsky lint'             # just the length + link warnings
+alias tbo='thrds bsky open'             # browse the gist

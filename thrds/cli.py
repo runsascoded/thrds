@@ -1162,6 +1162,111 @@ def discord_open(no_open: bool):
         webbrowser.open(url)
 
 
+# ============================================================================
+# `thrds bsky …` subgroup — capture + Bluesky-specific lint, no live push.
+# ============================================================================
+#
+# Bluesky's chief drafting pain is the 300-char post limit (per paragraph);
+# beyond that, its render dialect is similar to Discord's (bare URLs
+# auto-linkify via facets; masked-link syntax renders literal). Same phase-2c
+# shape as `discord`: init + render + lint + open, no live push.
+
+
+def _run_bsky_lint(doc_text: str, doc_path: str) -> int:
+    """Shared lint runner for `bsky lint` and `bsky render`.
+
+    Prints the report to stderr; returns the number of issues found.
+    """
+    from .lint import BskyLinter
+    report = BskyLinter().lint(doc_text)
+    if report.has_issues:
+        err(report.format(path=doc_path))
+    return len(report.issues)
+
+
+@cli.group("bsky")
+def bsky_cli():
+    """Bluesky workflow: init, render (for paste), lint (post-length + link check).
+
+    Same shape as `discord` — no `push`, since bsky's drafting workflow benefits
+    most from the length + link lint alongside a gist-mirrored trajectory.
+    The `BskyClient` in `thrds.bsky` (Python API) is unaffected; those wanting
+    to script bsky posting directly can still import it.
+    """
+    pass
+
+
+@bsky_cli.command("init")
+@click.option('-G', '--no-gist', is_flag=True, help='Skip gist creation; local git repo only.')
+@click.argument('doc_path')
+def bsky_init(no_gist: bool, doc_path: str):
+    """Initialize a `thrds bsky` session for DOC_PATH.
+
+    Same on-disk shape as `slack init` / `discord init` / `capture init` —
+    session dir under ``<git-root-or-cwd>/thrds/<slug>/``, optionally
+    gist-mirrored. No atproto plumbing.
+    """
+    target, state, was_resume = _do_init(doc_path, no_gist, channel_prefix=None, platform='bsky')
+    if was_resume:
+        return
+    hint = None if state.gist_id is None else f"Gist: https://gist.github.com/{state.gist_id}"
+    _print_init_completion(target, state, extra_hint=hint)
+
+
+@bsky_cli.command("render")
+@click.option('-L', '--no-lint', is_flag=True, help='Skip the MD-compat lint pass (default: run it, warnings → stderr).')
+@click.argument('doc_path', required=False)
+def bsky_render(no_lint: bool, doc_path: str | None):
+    """Print DOC_PATH to stdout for paste-into-Bluesky.
+
+    Idiomatic: ``thrds bsky render | pbcopy`` (or set up the `tbc` alias
+    in `.thrds-rc`). By default runs the bsky lint first and prints
+    warnings to stderr; pass ``-L`` to skip.
+    """
+    state = _load_state(expected_platform='bsky')
+    path = _resolve_doc_path(state, doc_path)
+    text = Path(path).read_text()
+    if not no_lint:
+        _run_bsky_lint(text, path)
+    click.echo(text, nl=False)
+
+
+@bsky_cli.command("lint")
+@click.argument('doc_path', required=False)
+def bsky_lint(doc_path: str | None):
+    """Run the Bluesky MD-compat lint on DOC_PATH; print warnings to stderr.
+
+    Exit code is 0 whether or not issues were found (warnings, not errors —
+    the doc is still postable, just not as intended). Rules:
+
+    \b
+    - paragraphs exceeding 300 chars (bsky's post limit).
+    - masked links `[text](url)` render as literal text; use bare URLs
+      (bsky auto-linkifies via facets).
+    """
+    state = _load_state(expected_platform='bsky')
+    path = _resolve_doc_path(state, doc_path)
+    text = Path(path).read_text()
+    n = _run_bsky_lint(text, path)
+    if n == 0:
+        err(f"{path}: no issues")
+
+
+@bsky_cli.command("open")
+@click.option('-U', '--no-open', is_flag=True, help='Print the URL, do not launch browser.')
+def bsky_open(no_open: bool):
+    """Open this session's gist in the browser (or print with -U)."""
+    state = _load_state(expected_platform='bsky')
+    if state.gist_id is None:
+        raise click.UsageError(
+            'No gist recorded — session was init\'d with --no-gist.'
+        )
+    url = f'https://gist.github.com/{state.gist_id}'
+    err(f'Opening gist {state.gist_id}: {url}')
+    if not no_open:
+        webbrowser.open(url)
+
+
 def main():
     cli()
 

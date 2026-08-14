@@ -165,6 +165,15 @@ thrds discord render | pbcopy    # MD → clipboard (warnings → stderr)
 thrds discord open               # browse the gist
 ```
 
+**`thrds bsky …`** — same shape for Bluesky. Different lints: bsky's chief drafting pain is the **300-char post limit** (per paragraph), so `bsky lint` flags paragraphs that exceed it. Also warns on masked links (bsky auto-linkifies bare URLs via facets, so `[text](url)` renders as literal text):
+
+```bash
+thrds bsky init draft.md         # scaffold session dir + gist
+thrds bsky lint                  # length + link warnings
+thrds bsky render | pbcopy       # MD → clipboard
+thrds bsky open                  # browse the gist
+```
+
 Every session's `platform` is stamped into `thrds.json` at init and guarded on every subsequent verb — running `thrds slack push` inside a capture-inited session errors immediately with a clear message rather than trying and failing halfway through.
 
 [raw-spec]: specs/done/raw-mrkdwn-passthrough.md

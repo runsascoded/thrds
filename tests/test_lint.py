@@ -1,11 +1,15 @@
-"""Tests for the Discord MD-compat linter (`thrds.lint.DiscordLinter`)."""
+"""Tests for the per-platform MD-compat linters (`thrds.lint`)."""
 from __future__ import annotations
 
-from thrds.lint import DiscordLinter, LintIssue, LintReport
+from thrds.lint import BSKY_POST_LIMIT, BskyLinter, DiscordLinter, LintIssue, LintReport
 
 
 def _lint(text: str) -> list[LintIssue]:
     return DiscordLinter().lint(text).issues
+
+
+def _blint(text: str) -> list[LintIssue]:
+    return BskyLinter().lint(text).issues
 
 
 # --- masked links ---
@@ -143,3 +147,102 @@ def test_report_empty_when_no_issues():
 
 def test_report_format_empty_string_when_no_issues():
     assert LintReport().format() == ""
+
+
+# --- bsky: post length ---
+
+
+def test_bsky_short_paragraph_no_issue():
+    assert _blint("Short paragraph.\n") == []
+
+
+def test_bsky_at_limit_no_issue():
+    """Exactly BSKY_POST_LIMIT chars is allowed; over is not."""
+    at_limit = "x" * BSKY_POST_LIMIT
+    assert _blint(at_limit + "\n") == []
+
+
+def test_bsky_over_limit_flagged():
+    over = "x" * (BSKY_POST_LIMIT + 1)
+    issues = _blint(over + "\n")
+    assert len(issues) == 1
+    assert issues[0].rule == "bsky/post-too-long"
+    assert issues[0].line == 1
+    assert issues[0].column == 1
+    assert f"{BSKY_POST_LIMIT + 1} chars" in issues[0].message
+
+
+def test_bsky_multi_line_paragraph_joined_with_space_before_length_check():
+    """Two wrapped lines whose join exceeds the limit → one warning at the first line."""
+    line = "y" * 200
+    text = f"{line}\n{line}\n"  # 200 + 1(space) + 200 = 401 > 300
+    issues = _blint(text)
+    assert [i.line for i in issues] == [1]
+    assert issues[0].rule == "bsky/post-too-long"
+
+
+def test_bsky_multiple_paragraphs_checked_independently():
+    """Blank line ends the paragraph; each is checked on its own."""
+    p1 = "a" * 400
+    p2 = "short"
+    p3 = "b" * 500
+    text = f"{p1}\n\n{p2}\n\n{p3}\n"
+    issues = _blint(text)
+    assert [i.line for i in issues] == [1, 5]
+    assert all(i.rule == "bsky/post-too-long" for i in issues)
+
+
+def test_bsky_thrds_separators_excluded_from_paragraph():
+    """`=== slug` and `---` are thrds doc-structure metadata, not post content."""
+    body = "z" * 250  # well under limit
+    text = f"=== a\n\n{body}\n---\n{body}\n"
+    # Each 250-char paragraph is a separate post (separators break); no warnings.
+    assert _blint(text) == []
+
+
+def test_bsky_trailing_paragraph_without_final_blank_line_still_checked():
+    """A paragraph at end-of-file (no trailing blank) still gets length-checked."""
+    over = "q" * 400
+    issues = _blint(over)  # no trailing newline
+    assert len(issues) == 1
+    assert issues[0].rule == "bsky/post-too-long"
+
+
+# --- bsky: masked links ---
+
+
+def test_bsky_masked_link_flagged():
+    issues = _blint("See [docs](https://ex.com).\n")
+    assert len(issues) == 1
+    assert issues[0].rule == "bsky/masked-link"
+    assert issues[0].line == 1
+    assert issues[0].column == 5
+
+
+def test_bsky_bare_url_not_flagged():
+    """bsky auto-linkifies bare URLs via facets — no warning."""
+    assert _blint("See https://ex.com for more.\n") == []
+
+
+def test_bsky_masked_link_and_post_length_both_reported():
+    """Both rules fire independently; report is sorted (line, column)."""
+    # Long para (>300 chars) that also contains a masked link.
+    prefix = "a" * 290 + " "  # 291 chars; +19 (masked link) +7 (extra) = 317 total → over limit
+    para = f"{prefix}[a](https://ex.com) extra."
+    text = f"{para}\n"
+    issues = _blint(text)
+    # Two issues: post-too-long at col 1, masked-link at col 292 (after 291-char prefix).
+    # Sort order is (line, column) → post-too-long first.
+    assert [(i.line, i.column, i.rule) for i in issues] == [
+        (1, 1, "bsky/post-too-long"),
+        (1, len(prefix) + 1, "bsky/masked-link"),
+    ]
+
+
+def test_bsky_masked_link_inside_code_fence_ignored():
+    text = "```\n[link](https://x.example)\n```\nsee [link](https://y.example)\n"
+    issues = _blint(text)
+    # One masked-link (line 4). Note: line 2's short content doesn't trip length.
+    ml_issues = [i for i in issues if i.rule == "bsky/masked-link"]
+    assert len(ml_issues) == 1
+    assert ml_issues[0].line == 4

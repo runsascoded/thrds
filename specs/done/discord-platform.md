@@ -137,6 +137,10 @@ Phase 2c (landed 2026-08-14):
 - [x] Discord MD-compat linter (masked links / tables / raw `@name`)
 - [x] `render` surface + `.thrds-rc` `td*` aliases (incl. `tdc = render | pbcopy`)
 
-Deferred (a later spec, if the lint-only loop proves insufficient):
+Also landed 2026-08-14 (same commit family):
+- [x] `thrds bsky {init,render,lint,open}` subgroup — same phase-2c shape
+- [x] `BskyLinter` — 300-char post-length + masked-link rules
+
+Deferred (a later spec, if the lint-only loops prove insufficient):
 - [ ] Discord staging push — (b) MVP or (a) full-parity from original scope
-- [ ] `thrds bsky …` subgroup (has `BskyClient` but no `sync_linked`; scope TBD)
+- [ ] `thrds bsky push` — actual atproto posting via `BskyClient`

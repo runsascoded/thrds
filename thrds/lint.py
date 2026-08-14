@@ -1,10 +1,10 @@
 """MD-compat linters for platforms that render (or don't render) their own
 subset of markdown.
 
-Slack and Discord each render a *different* subset of common markdown; a
-document written in one platform's dialect will render badly in the other.
-The linters here flag those mismatches in the source `.md` so the author can
-fix them before pasting/posting.
+Slack, Discord, and Bluesky each render a *different* subset of common
+markdown; a document written in one platform's dialect will render badly in
+the other. The linters here flag those mismatches in the source `.md` so the
+author can fix them before pasting/posting.
 
 Currently:
 
@@ -18,6 +18,15 @@ Currently:
     block or bullets.
   - **raw ``@name``** doesn't ping — Discord requires ``<@user_id>`` for a
     real user mention (name-based mentions don't resolve on paste).
+
+- :class:`BskyLinter` — Bluesky's constraints look different from Discord's
+  but with some overlap:
+
+  - **300-char post limit** — each paragraph (blank-line-separated block, with
+    thrds `===`/`---` separators stripped) that exceeds the limit is flagged.
+    This is bsky's main drafting pain and the linter's headline value-add.
+  - **masked links** — bsky renders them as literal text; bare URLs auto-link
+    via facets. Same rule as Discord, different rule slug.
 
 Extending to another platform: add a linter class here (each with a
 ``lint(text: str) -> LintReport`` method); the CLI's platform subgroup wires
@@ -169,3 +178,94 @@ class DiscordLinter:
             if 0 <= j < len(lines) and _TABLE_SEP_RE.match(lines[j]):
                 return True
         return False
+
+
+# Bluesky's post limit is 300 graphemes; we approximate as Python string length
+# (`len(str)` counts code points, not graphemes — close enough for lint purposes;
+# a paragraph near the limit that fails hard on paste is a rare corner).
+BSKY_POST_LIMIT = 300
+
+
+def _is_thrds_separator(line: str) -> bool:
+    """thrds' multi-thread doc format uses ``=== slug`` for thread starts and
+    ``---`` for message separators; both are metadata, not post content, and
+    should be excluded from bsky's paragraph-length check."""
+    stripped = line.lstrip()
+    return stripped.startswith("=== ") or stripped == "---" or stripped.startswith("--- ")
+
+
+class BskyLinter:
+    """Flag markdown constructs / lengths that break on Bluesky.
+
+    Rules today: paragraph length vs :data:`BSKY_POST_LIMIT`, and masked links
+    (bsky auto-linkifies bare URLs via facets, so the ``[text](url)`` form
+    renders as literal text — same failure mode as Discord).
+
+    "Paragraph" = one or more consecutive non-blank, non-thrds-separator lines,
+    joined by ``" "`` to approximate the rendered length (bsky trims runs of
+    whitespace before posting). thrds ``===``/``---`` separators are stripped
+    since they're doc-structure metadata, not post content.
+    """
+
+    def lint(self, text: str) -> LintReport:
+        report = LintReport()
+        in_fence = False
+        lines = text.split("\n")
+
+        # Masked links: same rule as Discord, different slug.
+        for i, line in enumerate(lines, start=1):
+            if _is_fence(line):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            for m in _MASKED_LINK_RE.finditer(line):
+                report.append(LintIssue(
+                    line=i,
+                    column=m.start() + 1,
+                    severity="warning",
+                    rule="bsky/masked-link",
+                    message=f"masked link {m.group()!r} renders as literal text on Bluesky; use bare URL (auto-linkified via facets)",
+                ))
+
+        # Paragraph length: gather blank-separated blocks, joined by space.
+        para_start: int | None = None  # 1-indexed line of the first line of the current paragraph
+        para_lines: list[str] = []
+        for i, line in enumerate(lines, start=1):
+            if _is_fence(line) or _is_thrds_separator(line):
+                # Fences aren't post content; separators are doc metadata. Break paragraph.
+                if para_start is not None:
+                    self._check_paragraph(report, para_start, para_lines)
+                    para_start, para_lines = None, []
+                continue
+            if not line.strip():
+                # Blank line ends the paragraph.
+                if para_start is not None:
+                    self._check_paragraph(report, para_start, para_lines)
+                    para_start, para_lines = None, []
+                continue
+            # Non-blank content line — join into current paragraph.
+            if para_start is None:
+                para_start = i
+            para_lines.append(line.strip())
+
+        # Flush trailing paragraph (no trailing blank line).
+        if para_start is not None:
+            self._check_paragraph(report, para_start, para_lines)
+
+        return report
+
+    @staticmethod
+    def _check_paragraph(report: LintReport, start_line: int, lines: list[str]) -> None:
+        """Emit a `bsky/post-too-long` warning if the joined paragraph exceeds the limit."""
+        text = " ".join(lines)
+        if len(text) > BSKY_POST_LIMIT:
+            report.append(LintIssue(
+                line=start_line,
+                column=1,
+                severity="warning",
+                rule="bsky/post-too-long",
+                message=(
+                    f"paragraph is {len(text)} chars; bsky post limit is {BSKY_POST_LIMIT}"
+                ),
+            ))
