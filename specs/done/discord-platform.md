@@ -78,38 +78,41 @@ that users can adopt to keep short-form invocations.
 - Tests: `test_capture_cli.py` (14 tests) + 5 new `test_state.py` tests +
   updates to `test_cli.py` for the new invocation syntax.
 
-## Phase 2 (scoped, not implemented): Discord staging
+## Phase 2c (landed 2026-08-14): Discord lint + render, no live push
 
-When picked up, the shape decision is: how much of Slack's doc-level API
-(`sync_doc_staging`, `pull_doc_staging`, preamble, staging-PC semantics) do
-we port to Discord? Three tiers:
+Picked **option (c) — lint-only**. Rationale: (a)/(b) require porting Slack's
+doc-level API to `DiscordClient` for a benefit (rendering into a private
+staging channel to preview before paste) that a good local linter mostly
+captures without any Discord API involvement. Bot-token config and a "staging
+channel" concept can land later if the render-preview workflow proves
+insufficient.
 
-- **(a) Full parity** — implement a doc-level API on `DiscordClient` mirroring
-  `SlackClient.sync_doc_staging` etc. Largest scope, closest UX parity.
-- **(b) MVP staging** — no preamble/staging container; `thrds discord push`
-  posts each doc thread sequentially to the configured staging channel via
-  `sync_linked`. Smaller, still gives the render loop.
-- **(c) Lint-only** — `thrds discord push` runs `lint` and prints the
-  rendered MD (or a linted rendering); user pastes into their own staging
-  channel manually. Simplest; still catches the Discord gotchas at the
-  right moment.
+What landed:
 
-Related bits also deferred to phase 2:
+- `thrds discord {init,render,lint,open}` subgroup — no `push` verb.
+- `thrds.lint` module with a `DiscordLinter` class + `LintIssue` / `LintReport`
+  dataclasses. Reusable across future platform linters.
+- Three lint rules:
+  - **masked links** (`[text](url)`) render as literal text in normal user
+    messages (only bot-embed messages render them as hyperlinks); use bare URLs.
+  - **markdown tables** don't render; use a code block or bullets.
+  - **raw `@name`** doesn't ping; needs `<@user_id>`.
+- `thrds discord render` prints the doc's MD to stdout and auto-runs lint
+  (warnings → stderr). `--no-lint` bypasses.
+- `thrds discord lint` is standalone; prints `<path>: no issues` if clean.
+- `.thrds-rc` aliases: `tdi`/`tdr`/`tdc`/`tdl`/`tdo` (with `tdc` set to
+  `thrds discord render | pbcopy` for the macOS clipboard flow).
+- Tests: 17 in `test_lint.py` (rule coverage: masked-link, table, mention,
+  code-fence exclusions, punctuation handling, report shape) + 10 in
+  `test_discord_cli.py` (init, render, render-with-lint, lint standalone,
+  open, platform-mismatch guard both directions).
 
-- **`thrds discord render DOC.md`** — print the final MD to stdout for
-  paste-into-anywhere (idiomatic use: `thrds discord render | pbcopy`; a
-  `.thrds-rc` alias `tdc` is easy from there).
-- **`thrds discord lint DOC.md`** — Discord-specific MD-compat linter:
-  - masked links `[text](url)` — **don't render** in normal user messages
-    (bare URLs auto-link)
-  - markdown **tables** — don't render (use a code block / bullets)
-  - raw `@name` — won't ping (needs `<@id>`)
-- **`push` autoruns `lint`** when a lint exists for that platform;
-  `--no-lint` bypass. `lint` also standalone.
-- **Staging config**: `DISCORD_TOKEN` from env, staging `guild`/`channel`
-  either from env vars (`THRDS_DISCORD_STAGING_{GUILD,CHANNEL}`) or per
-  session in `state.json` at `init` time — env default, session field
-  override.
+Deferred to a future phase (if the lint-only loop proves insufficient):
+
+- **Discord staging push** — (b) or (a) from the original scope. Bot-token
+  config from env (`DISCORD_TOKEN`), staging `guild`/`channel` per env or
+  per session, `push` posts the doc's threads via `sync_linked` for
+  render-preview inside a private Discord channel.
 
 ## Non-goals
 
@@ -129,8 +132,11 @@ Phase 1 (landed):
 - [x] README + `.thrds-rc` rewritten for the subgroup model
 - [x] Tests: `test_capture_cli.py` (14) + platform-field tests (5)
 
-Phase 2 (future spec, when picked up):
-- [ ] `thrds discord {init,push,render,lint,open}` subgroup — pick (a)/(b)/(c)
-- [ ] Discord MD-compat linter (masked links / tables / raw `@name`)
-- [ ] `render`/`copy` surface + `.thrds-rc` `td*` aliases
+Phase 2c (landed 2026-08-14):
+- [x] `thrds discord {init,render,lint,open}` subgroup (option `c` — no push)
+- [x] Discord MD-compat linter (masked links / tables / raw `@name`)
+- [x] `render` surface + `.thrds-rc` `td*` aliases (incl. `tdc = render | pbcopy`)
+
+Deferred (a later spec, if the lint-only loop proves insufficient):
+- [ ] Discord staging push — (b) MVP or (a) full-parity from original scope
 - [ ] `thrds bsky …` subgroup (has `BskyClient` but no `sync_linked`; scope TBD)

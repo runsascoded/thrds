@@ -2,6 +2,7 @@ from .core import Action, ActionType, EditRateLimited, Message, Msg, OrphanedRep
 from .discord import DiscordClient
 from .doc import Doc, DocMessage, DocSyncResult, DocThread, Frontmatter
 from .linked import LinkedSyncResult, LinkedThread, Section
+from .lint import DiscordLinter, LintIssue, LintReport
 from .protocol import ThreadClient
 from .slack import RecoveredSession, ScanCapReached, SlackClient
 from .state import SessionState
@@ -10,6 +11,7 @@ __all__ = [
     "Action",
     "ActionType",
     "DiscordClient",
+    "DiscordLinter",
     "Doc",
     "DocMessage",
     "DocSyncResult",
@@ -18,6 +20,8 @@ __all__ = [
     "Frontmatter",
     "LinkedSyncResult",
     "LinkedThread",
+    "LintIssue",
+    "LintReport",
     "Message",
     "Msg",
     "OrphanedRepliesError",

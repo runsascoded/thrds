@@ -30,3 +30,10 @@ alias tspl='thrds slack permalink'      # get permalink URL
 alias tci='thrds capture init'          # init a capture-only session
 alias tcp='thrds capture push'          # commit + push to gist
 alias tco='thrds capture open'          # browse the gist
+
+# --- thrds discord (render + MD-compat lint; prod delivery is copy-paste) ---
+alias tdi='thrds discord init'          # init a discord session (gist-mirrored)
+alias tdr='thrds discord render'        # print doc + lint warnings → stderr
+alias tdc='thrds discord render | pbcopy'  # macOS: paste directly to clipboard
+alias tdl='thrds discord lint'          # just the MD-compat warnings
+alias tdo='thrds discord open'          # browse the gist

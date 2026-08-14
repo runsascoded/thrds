@@ -146,13 +146,23 @@ thrds slack edit    #foo 1783.1 'new'    # edit; raw by default
 thrds slack permalink #foo 1783.1        # get workspace permalink URL
 ```
 
-**`thrds capture …`** — capture-only sessions: same on-disk shape (git repo + gist mirror), no platform posting. Useful when the destination is somewhere `thrds` doesn't (yet) integrate with — Discord, an arbitrary forum, an email draft — but you still want the doc's iteration history captured to a gist:
+**`thrds capture …`** — capture-only sessions: same on-disk shape (git repo + gist mirror), no platform posting. Useful when the destination is somewhere `thrds` doesn't (yet) integrate with, but you still want the doc's iteration history captured to a gist:
 
 ```bash
 thrds capture init draft.md      # scaffold session dir + gist mirror (no channel)
 # ... edit draft.md ...
 thrds capture push               # commit doc changes and push to the gist
 thrds capture open               # browse the gist
+```
+
+**`thrds discord …`** — capture + MD-compat lint for Discord. Discord asymmetry: prod delivery is copy-paste (self-bots are ToS-prohibited), so there's no `push`. `render` prints the doc to stdout (idiomatic: `thrds discord render | pbcopy`) and auto-runs `lint` alongside (masked links, tables, raw `@name` — three constructs Discord's user-message renderer drops on the floor):
+
+```bash
+thrds discord init draft.md      # scaffold session dir + gist (no channel/bot)
+# ... edit draft.md, iterate ...
+thrds discord lint               # just the MD-compat warnings
+thrds discord render | pbcopy    # MD → clipboard (warnings → stderr)
+thrds discord open               # browse the gist
 ```
 
 Every session's `platform` is stamped into `thrds.json` at init and guarded on every subsequent verb — running `thrds slack push` inside a capture-inited session errors immediately with a clear message rather than trying and failing halfway through.

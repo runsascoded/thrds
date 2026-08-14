@@ -1052,6 +1052,116 @@ def capture_open(no_open: bool):
         webbrowser.open(url)
 
 
+# ============================================================================
+# `thrds discord …` subgroup — capture + MD-compat lint, no live push.
+# ============================================================================
+#
+# Discord phase 2c (from specs/done/discord-platform.md): the render-preview
+# loop without any bot-token / staging-channel plumbing. Prod delivery on
+# Discord is copy-paste (self-bots violate ToS); `render` outputs the doc's
+# MD to stdout for `| pbcopy`, `lint` flags the constructs that don't render
+# in normal Discord user messages (masked links, tables, raw @name).
+
+
+def _run_discord_lint(doc_text: str, doc_path: str) -> int:
+    """Shared lint runner used by both `discord lint` and `discord render`.
+
+    Prints the report to stderr; returns the number of issues found so callers
+    can decide exit code / whether to still emit output.
+    """
+    from .lint import DiscordLinter
+    report = DiscordLinter().lint(doc_text)
+    if report.has_issues:
+        err(report.format(path=doc_path))
+    return len(report.issues)
+
+
+@cli.group("discord")
+def discord_cli():
+    """Discord workflow: init, render (for paste), lint (MD-compat warnings).
+
+    Discord asymmetry: prod delivery is copy-paste (self-bots are ToS-
+    prohibited), so there's no `push`. The subgroup captures iteration
+    history to a gist (via `init`) and surfaces the final MD (via `render`)
+    with warnings about constructs Discord's user-message renderer drops
+    on the floor (masked links, tables, raw `@name`). See
+    `specs/done/discord-platform.md`.
+    """
+    pass
+
+
+@discord_cli.command("init")
+@click.option('-G', '--no-gist', is_flag=True, help='Skip gist creation; local git repo only.')
+@click.argument('doc_path')
+def discord_init(no_gist: bool, doc_path: str):
+    """Initialize a `thrds discord` session for DOC_PATH.
+
+    Same on-disk shape as `slack init` / `capture init` — session dir under
+    ``<git-root-or-cwd>/thrds/<slug>/``, optionally gist-mirrored. No Slack
+    plumbing.
+    """
+    target, state, was_resume = _do_init(doc_path, no_gist, channel_prefix=None, platform='discord')
+    if was_resume:
+        return
+    hint = None if state.gist_id is None else f"Gist: https://gist.github.com/{state.gist_id}"
+    _print_init_completion(target, state, extra_hint=hint)
+
+
+@discord_cli.command("render")
+@click.option('-L', '--no-lint', is_flag=True, help='Skip the MD-compat lint pass (default: run it, warnings → stderr).')
+@click.argument('doc_path', required=False)
+def discord_render(no_lint: bool, doc_path: str | None):
+    """Print DOC_PATH to stdout for paste-into-Discord.
+
+    Idiomatic: ``thrds discord render | pbcopy`` (or set up the `tdc` alias
+    in `.thrds-rc`). By default runs the Discord MD-compat lint first and
+    prints warnings to stderr; pass ``-L`` to skip.
+    """
+    state = _load_state(expected_platform='discord')
+    path = _resolve_doc_path(state, doc_path)
+    text = Path(path).read_text()
+    if not no_lint:
+        _run_discord_lint(text, path)
+    click.echo(text, nl=False)
+
+
+@discord_cli.command("lint")
+@click.argument('doc_path', required=False)
+def discord_lint(doc_path: str | None):
+    """Run the Discord MD-compat lint on DOC_PATH; print warnings to stderr.
+
+    Exit code is 0 whether or not issues were found (warnings, not errors —
+    the doc still renders, just not as intended). Rules:
+
+    \b
+    - masked links `[text](url)` render as literal text in normal Discord
+      messages (bot-embed messages are the exception); use bare URLs.
+    - markdown tables don't render; use a code block or bullets.
+    - raw `@name` doesn't ping; needs `<@user_id>`.
+    """
+    state = _load_state(expected_platform='discord')
+    path = _resolve_doc_path(state, doc_path)
+    text = Path(path).read_text()
+    n = _run_discord_lint(text, path)
+    if n == 0:
+        err(f"{path}: no issues")
+
+
+@discord_cli.command("open")
+@click.option('-U', '--no-open', is_flag=True, help='Print the URL, do not launch browser.')
+def discord_open(no_open: bool):
+    """Open this session's gist in the browser (or print with -U)."""
+    state = _load_state(expected_platform='discord')
+    if state.gist_id is None:
+        raise click.UsageError(
+            'No gist recorded — session was init\'d with --no-gist.'
+        )
+    url = f'https://gist.github.com/{state.gist_id}'
+    err(f'Opening gist {state.gist_id}: {url}')
+    if not no_open:
+        webbrowser.open(url)
+
+
 def main():
     cli()
 
