@@ -8,7 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from thrds.state import CHANNEL_PREFIX_ENV, DEFAULT_GIST_REMOTE, STATE_PATH, SessionState, resolve_channel_prefix
+from thrds.state import (
+    CHANNEL_PREFIX_ENV,
+    DEFAULT_GIST_REMOTE,
+    DEFAULT_PLATFORM,
+    STATE_PATH,
+    VALID_PLATFORMS,
+    SessionState,
+    resolve_channel_prefix,
+)
 
 
 def test_new_generates_uuid4():
@@ -180,3 +188,42 @@ def test_staging_channel_name_no_prefix(monkeypatch):
     monkeypatch.delenv(CHANNEL_PREFIX_ENV, raising=False)
     s = SessionState(session_id='x', doc_path='trainium-update.md')
     assert s.staging_channel_name() == 'trainium-update'
+
+
+def test_platform_defaults_to_slack():
+    """Default platform is `slack` (matches pre-0.6 behavior)."""
+    assert DEFAULT_PLATFORM == 'slack'
+    assert SessionState(session_id='x').platform == 'slack'
+
+
+def test_valid_platforms_enumerated():
+    """VALID_PLATFORMS is the canonical set (kept in sync with subcommand groups)."""
+    assert VALID_PLATFORMS == ('slack', 'discord', 'bsky', 'capture')
+
+
+def test_platform_roundtrips_through_save_load(tmp_path):
+    """Non-default platform (e.g. capture) survives save/load."""
+    original = SessionState(session_id='x', doc_path='foo.md', platform='capture')
+    original.save(tmp_path)
+    loaded = SessionState.load(tmp_path)
+    assert loaded.platform == 'capture'
+    assert loaded == original
+
+
+def test_load_backfills_platform_on_legacy_state(tmp_path):
+    """State files predating the `platform` field load with platform=slack."""
+    # Simulate a pre-0.6 state file (no `platform` key).
+    (tmp_path / STATE_PATH).write_text(json.dumps({
+        'session_id': 'legacy-uuid',
+        'doc_path': 'legacy.md',
+        'staging_channel': 'C0STAGE',
+    }) + '\n')
+    loaded = SessionState.load(tmp_path)
+    assert loaded.platform == 'slack'
+    assert loaded.session_id == 'legacy-uuid'
+
+
+def test_invalid_platform_raises():
+    """Unknown platform value raises immediately (catches typos on init)."""
+    with pytest.raises(ValueError, match="Invalid platform 'twitter'"):
+        SessionState(session_id='x', platform='twitter')

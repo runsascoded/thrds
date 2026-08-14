@@ -4,7 +4,7 @@ Written to ``thrds.json`` at the session root, tracked and gist-mirrored via
 the git repo so multi-machine sees the same authoritative slug → thread_ts map
 without needing to scan Slack. The Slack ``metadata`` field on each posted message
 carries the same info (session_id, slug, kind) as belt-and-suspenders: if the
-local state is lost or corrupted, ``thrds recover`` scans Slack filtered by
+local state is lost or corrupted, ``thrds slack recover`` scans Slack filtered by
 session_id and rebuilds this file.
 
 Session : .md doc : staging PC is 1 : 1 : 1 — a single doc per session, tracked
@@ -14,6 +14,14 @@ by `doc_path` (relative to the session root). Two channel scopes on a session:
   for preview/iteration. Terraformed on each staging push.
 - ``prod_threads[channel][slug]``: threads created in real target channels. Additive;
   subsequent prod pushes sync in place, never terraforming.
+
+``platform`` identifies which subcommand group owns this session:
+
+- ``"slack"``: the default; ``thrds slack …`` verbs operate on it.
+- ``"discord"`` / ``"bsky"``: reserved for future subcommand groups.
+- ``"capture"``: no platform target — gist-mirrored trajectory only, `thrds capture …`.
+
+Old state files (pre-0.6) predate the field and default to ``"slack"`` on load.
 """
 from __future__ import annotations
 
@@ -28,6 +36,9 @@ from typing import Any
 STATE_PATH = Path('thrds.json')  # flat filename (not `.thrds/state.json`) — GitHub gists reject directories
 DEFAULT_GIST_REMOTE = 'g'  # matches ghpr's convention
 CHANNEL_PREFIX_ENV = 'THRDS_CHANNEL_PREFIX'
+
+VALID_PLATFORMS = ('slack', 'discord', 'bsky', 'capture')
+DEFAULT_PLATFORM = 'slack'
 
 
 def resolve_channel_prefix(session_override: str | None) -> str:
@@ -58,6 +69,12 @@ class SessionState:
     ``channel_prefix`` overrides the ``THRDS_CHANNEL_PREFIX`` env var at
     session scope — usually left ``None`` (env-scoped is the common case for
     user-namespaced private channels).
+
+    ``platform`` is set implicitly by the ``init`` subcommand used
+    (``thrds slack init`` → ``"slack"``, ``thrds capture init`` → ``"capture"``,
+    etc.). All subsequent verbs for that session must match; the ``slack_cli`` /
+    ``capture_cli`` groups guard on this to fail fast with a clear error rather
+    than blowing up deep inside a mismatched code path.
     """
     session_id: str
     doc_path: str | None = None
@@ -65,6 +82,7 @@ class SessionState:
     gist_id: str | None = None
     gist_remote: str = DEFAULT_GIST_REMOTE
     channel_prefix: str | None = None
+    platform: str = DEFAULT_PLATFORM
     staging_channel: str | None = None
     staging_preamble_ts: str | None = None
     staging_threads: dict[str, str] = field(default_factory=dict)                    # slug → thread_ts
@@ -72,6 +90,12 @@ class SessionState:
     prod_threads: dict[str, dict[str, str]] = field(default_factory=dict)            # channel → (slug → thread_ts)
     prod_preamble_ts: dict[str, str] = field(default_factory=dict)                   # channel → preamble ts
     workspace_emoji: dict[str, str] = field(default_factory=dict)                    # custom emoji name → local filename (relative to session dir)
+
+    def __post_init__(self) -> None:
+        if self.platform not in VALID_PLATFORMS:
+            raise ValueError(
+                f"Invalid platform {self.platform!r}; must be one of {VALID_PLATFORMS}"
+            )
 
     @classmethod
     def new(cls, **overrides: Any) -> 'SessionState':
@@ -84,7 +108,7 @@ class SessionState:
         path = Path(root) / STATE_PATH
         if not path.exists():
             raise FileNotFoundError(
-                f"No thrds session state at {path}; run `thrds init` first."
+                f"No thrds session state at {path}; run `thrds <platform> init` first."
             )
         return cls(**json.loads(path.read_text()))
 
