@@ -1,6 +1,6 @@
 {
   "name": "@rdub/thrds",
-  "version": "0.1.1-dist.0a0b7d8",
+  "version": "0.1.1-dist.fdc4c5b",
   "description": "Declarative thread sync for Slack, Discord, and Bluesky",
   "license": "MIT",
   "author": "Ryan Williams",
