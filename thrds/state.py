@@ -7,13 +7,33 @@ carries the same info (session_id, slug, kind) as belt-and-suspenders: if the
 local state is lost or corrupted, ``thrds slack recover`` scans Slack filtered by
 session_id and rebuilds this file.
 
-Session : .md doc : staging PC is 1 : 1 : 1 — a single doc per session, tracked
-by `doc_path` (relative to the session root). Two channel scopes on a session:
+Per-thread model (``specs/per-thread-model.md``)
+------------------------------------------------
+::
 
-- ``staging_channel`` + ``staging_threads``: the single-member private channel used
-  for preview/iteration. Terraformed on each staging push.
-- ``prod_threads[channel][slug]``: threads created in real target channels. Additive;
-  subsequent prod pushes sync in place, never terraforming.
+    private ephemeral channel (PEC)  ↔  gist  ↔  session  ↔  N threads
+                                                  thread  ↔  one `NN-slug.md`
+
+``threads`` maps each thread's slug to a :class:`ThreadEntry`: where its draft
+lives in the staging channel, where it's destined (:class:`ThreadTarget`), and
+its lifecycle state. **Destination is a property of the thread, not the
+session** — that's what collapses the two use cases into one shape:
+
+- batch: N threads, all targeting one channel with no ``thread_ts`` (the
+  session-level ``prod_channel`` supplies it as a default, so no per-thread
+  config is needed at all);
+- reply: N threads, each targeting a different channel and/or an existing
+  thread within it.
+
+Legacy layout (pre-per-thread)
+------------------------------
+Sessions created before the per-thread model have a single ``doc_path`` holding
+many ``===``-separated threads, with pointers split across ``staging_threads``
+and ``prod_threads[channel][slug]``, and ``prod_channel`` as the *authority*
+for prod pushes rather than a default. :attr:`SessionState.is_legacy` detects
+these; ``thrds slack migrate`` converts one. The legacy fields are retained
+(and still drive the pre-migration code paths) until every live session has
+been migrated.
 
 ``platform`` identifies which subcommand group owns this session:
 
@@ -39,6 +59,63 @@ CHANNEL_PREFIX_ENV = 'THRDS_CHANNEL_PREFIX'
 
 VALID_PLATFORMS = ('slack', 'discord', 'bsky', 'capture')
 DEFAULT_PLATFORM = 'slack'
+
+# A thread's lifecycle. `draft` → not ready; `ready` → armed for push (set by
+# hand or by a 🟢 reaction); `posted` → landed at its target; `dropped` →
+# abandoned without posting. Archiving the staging channel is gated on every
+# thread being `posted` or `dropped`.
+VALID_THREAD_STATES = ('draft', 'ready', 'posted', 'dropped')
+DEFAULT_THREAD_STATE = 'draft'
+TERMINAL_THREAD_STATES = ('posted', 'dropped')
+
+
+@dataclass
+class ThreadTarget:
+    """Where a thread is destined: a channel, and optionally a thread within it.
+
+    ``thread_ts is None`` means "post as a new top-level message in
+    ``channel``" — the batch case (six sibling messages into one channel).
+    ``thread_ts`` set means "post as a reply into that existing thread" — the
+    case of drafting a considered response to someone else's message.
+
+    Destination is a property of the *thread*, not the session: that's what
+    collapses both use cases into one shape. The session-level
+    ``prod_channel`` is only a default for newly-added threads.
+    """
+    channel: str
+    thread_ts: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.channel:
+            raise ValueError("ThreadTarget.channel must be non-empty")
+
+
+@dataclass
+class ThreadEntry:
+    """Per-thread state: where its draft lives, where it's going, and its status.
+
+    ``staging_ts`` is the OP ts of this thread's draft in the staging channel.
+    ``target`` is the prod destination (None until set). ``posted_ts`` is the
+    ts of *our* message once it lands at the target — distinct from
+    ``target.thread_ts``, which is the message we're replying *to*.
+    """
+    staging_ts: str | None = None
+    target: ThreadTarget | None = None
+    state: str = DEFAULT_THREAD_STATE
+    posted_ts: str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.target, dict):
+            self.target = ThreadTarget(**self.target)
+        if self.state not in VALID_THREAD_STATES:
+            raise ValueError(
+                f"Invalid thread state {self.state!r}; must be one of {VALID_THREAD_STATES}"
+            )
+
+    @property
+    def is_terminal(self) -> bool:
+        """True once this thread has been posted or explicitly dropped."""
+        return self.state in TERMINAL_THREAD_STATES
 
 
 def resolve_channel_prefix(session_override: str | None) -> str:
@@ -90,12 +167,20 @@ class SessionState:
     prod_threads: dict[str, dict[str, str]] = field(default_factory=dict)            # channel → (slug → thread_ts)
     prod_preamble_ts: dict[str, str] = field(default_factory=dict)                   # channel → preamble ts
     workspace_emoji: dict[str, str] = field(default_factory=dict)                    # custom emoji name → local filename (relative to session dir)
+    threads: dict[str, ThreadEntry] = field(default_factory=dict)                    # slug → per-thread state (per-thread model; see `threads_legacy`)
 
     def __post_init__(self) -> None:
         if self.platform not in VALID_PLATFORMS:
             raise ValueError(
                 f"Invalid platform {self.platform!r}; must be one of {VALID_PLATFORMS}"
             )
+        # `load` reconstructs via `cls(**json)`, so nested entries arrive as
+        # plain dicts; coerce here so both load and direct construction yield
+        # the same types.
+        self.threads = {
+            slug: entry if isinstance(entry, ThreadEntry) else ThreadEntry(**entry)
+            for slug, entry in self.threads.items()
+        }
 
     @classmethod
     def new(cls, **overrides: Any) -> 'SessionState':
@@ -140,6 +225,54 @@ class SessionState:
         if channel == self.staging_channel:
             return dict(self.staging_threads)
         return dict(self.prod_threads.get(channel, {}))
+
+    # --- per-thread model (`threads`) ---------------------------------------
+
+    @property
+    def is_legacy(self) -> bool:
+        """True for a session still on the one-doc-many-threads layout.
+
+        Detected as "has legacy thread pointers but no ``threads`` map".
+        Verbs on the per-thread model check this and direct the user to
+        ``thrds slack migrate`` rather than silently operating on a session
+        whose threads they can't see.
+        """
+        if self.threads:
+            return False
+        return bool(self.staging_threads or self.prod_threads)
+
+    def thread(self, slug: str) -> ThreadEntry:
+        """The :class:`ThreadEntry` for ``slug``, creating an empty one if absent.
+
+        Creating-on-access is right here because a thread's existence is
+        determined by its file on disk; ``thrds.json`` only accumulates what
+        we've learned about it (where its draft landed, where it's going).
+        """
+        if slug not in self.threads:
+            self.threads[slug] = ThreadEntry()
+        return self.threads[slug]
+
+    def target_for(self, slug: str) -> ThreadTarget | None:
+        """Resolved destination for ``slug``: its own target, else the session default.
+
+        Falls back to ``prod_channel`` as a bare channel target, which is what
+        makes the batch case (N threads, all the same channel) require no
+        per-thread configuration at all.
+        """
+        entry = self.threads.get(slug)
+        if entry is not None and entry.target is not None:
+            return entry.target
+        if self.prod_channel is not None:
+            return ThreadTarget(channel=self.prod_channel)
+        return None
+
+    def pending_threads(self) -> list[str]:
+        """Slugs not yet in a terminal (``posted``/``dropped``) state, in slug order.
+
+        Archiving the staging channel is gated on this being empty — other
+        drafts being live is exactly why prod push must not auto-archive.
+        """
+        return sorted(slug for slug, e in self.threads.items() if not e.is_terminal)
 
     @property
     def doc_slug(self) -> str:

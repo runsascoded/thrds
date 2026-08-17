@@ -1,7 +1,18 @@
-"""Parse and serialize the multi-thread doc markdown format.
+"""Parse and serialize the thread markdown format.
 
-Format
-------
+Two layouts share this module:
+
+- **per-thread files** (current; see ``specs/per-thread-model.md``) — one
+  ``NN-slug.md`` per thread, parsed by :func:`parse_thread` /
+  :func:`serialize_thread`. The slug comes from the filename; ``+++``
+  separates replies; ``===`` is rejected.
+- **single multi-thread doc** (legacy) — one ``.md`` holding every thread,
+  parsed by :func:`parse_doc` / :func:`serialize_doc`, where ``===`` starts
+  each thread. Retained to read pre-migration sessions and to drive
+  ``thrds slack migrate``, which splits such a doc into per-thread files.
+
+Legacy format
+-------------
 Two block-level delimiters split the document into two levels:
 
 - ``=== slug``  starts a new top-level thread (its OP + zero or more replies).
@@ -44,6 +55,18 @@ _KNOWN_FRONTMATTER_KEYS = ('channel', 'thread_ts', 'session_id')
 class ParsedDoc:
     """A doc parsed from its .md source, alongside its YAML frontmatter."""
     doc: Doc
+    frontmatter: Frontmatter
+
+
+@dataclass
+class ParsedThread:
+    """One thread parsed from its own ``NN-slug.md`` file, plus frontmatter.
+
+    The per-thread counterpart to :class:`ParsedDoc`. The thread's slug comes
+    from the *filename*, not from any in-file marker — see
+    :mod:`thrds.threadfile`.
+    """
+    thread: DocThread
     frontmatter: Frontmatter
 
 
@@ -113,31 +136,119 @@ def parse_doc(text: str) -> ParsedDoc:
                 raise ValueError(f"Duplicate thread slug: {slug!r}")
             seen_slugs.add(slug)
         i += 1
-        current: list[str] = []
-        current_author: str | None = None  # OP is always ours
-        messages: list[DocMessage] = []
+        start = i
         while i < len(lines):
             is_next_header, _ = _match_header(lines[i])
             if is_next_header:
                 break
-            reply_m = _REPLY_RE.match(lines[i])
-            if reply_m:
-                messages.append(DocMessage(content='\n'.join(current).strip(), author=current_author))
-                current = []
-                current_author = reply_m.group(1)
-                i += 1
-                continue
-            current.append(lines[i])
             i += 1
-        messages.append(DocMessage(content='\n'.join(current).strip(), author=current_author))
-        if not messages[0].content:
-            raise ValueError(f"Thread {slug!r}: OP (first message) is empty")
-        for j, m in enumerate(messages[1:], start=1):
-            if not m.content:
-                raise ValueError(f"Thread {slug!r}: reply {j} is empty")
-        threads.append(DocThread(messages=messages, slug=slug))
+        threads.append(DocThread(messages=_split_messages(lines[start:i], slug), slug=slug))
 
     return ParsedDoc(doc=Doc(threads=threads, preamble=preamble), frontmatter=frontmatter)
+
+
+def _split_messages(lines: list[str], label: str | None) -> list[DocMessage]:
+    """Split ``lines`` on ``+++`` into OP + replies, validating non-emptiness.
+
+    ``label`` names the thread in error messages — its slug, or ``None`` for a
+    thread that has none.
+    """
+    current: list[str] = []
+    current_author: str | None = None  # OP is always ours
+    messages: list[DocMessage] = []
+    for line in lines:
+        reply_m = _REPLY_RE.match(line)
+        if reply_m:
+            messages.append(DocMessage(content='\n'.join(current).strip(), author=current_author))
+            current = []
+            current_author = reply_m.group(1)
+            continue
+        current.append(line)
+    messages.append(DocMessage(content='\n'.join(current).strip(), author=current_author))
+    if not messages[0].content:
+        raise ValueError(f"Thread {label!r}: OP (first message) is empty")
+    for j, m in enumerate(messages[1:], start=1):
+        if not m.content:
+            raise ValueError(f"Thread {label!r}: reply {j} is empty")
+    return messages
+
+
+def parse_thread(text: str, slug: str | None = None) -> ParsedThread:
+    """Parse one thread's ``.md`` file into a `DocThread` + its frontmatter.
+
+    The per-thread-file counterpart to :func:`parse_doc`: the whole file is a
+    single thread (OP plus ``+++``-separated replies), and the slug comes from
+    the filename rather than a ``=== slug`` header. A stray ``===`` is an
+    error — it's the old multi-thread-per-file syntax, and silently accepting
+    it would let a doc that means several threads post as one.
+
+    Round-trip guarantee: ``parse_thread(serialize_thread(t, fm)) == (t, fm)``.
+    """
+    lines = text.split('\n')
+    i = 0
+    frontmatter = Frontmatter()
+
+    if i < len(lines) and lines[i].strip() == _FRONTMATTER_DELIM:
+        end = next((j for j in range(i + 1, len(lines)) if lines[j].strip() == _FRONTMATTER_DELIM), None)
+        if end is None:
+            raise ValueError("Frontmatter opened with `---` but no closing delimiter found")
+        frontmatter = _parse_frontmatter_body('\n'.join(lines[i + 1:end]))
+        i = end + 1
+
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+
+    body = lines[i:]
+    for n, line in enumerate(body):
+        is_header, _ = _match_header(line)
+        if is_header:
+            raise ValueError(
+                f"Thread {slug!r}: unexpected `===` at line {i + n}: one file is one thread; "
+                f"`===` (multi-thread-per-file) was retired — split into `NN-slug.md` files "
+                f"via `thrds slack migrate`"
+            )
+
+    return ParsedThread(
+        thread=DocThread(messages=_split_messages(body, slug), slug=slug),
+        frontmatter=frontmatter,
+    )
+
+
+def _render_frontmatter(frontmatter: Frontmatter | None) -> list[str]:
+    """Frontmatter block as serialized parts (empty when absent or all-None)."""
+    if frontmatter is None:
+        return []
+    fm_items = [
+        (k, getattr(frontmatter, k))
+        for k in _KNOWN_FRONTMATTER_KEYS
+        if getattr(frontmatter, k) is not None
+    ]
+    if not fm_items:
+        return []
+    fm_body = '\n'.join(f'{k}: {v}' for k, v in fm_items)
+    return [f'{_FRONTMATTER_DELIM}\n{fm_body}\n{_FRONTMATTER_DELIM}']
+
+
+def serialize_thread(thread: DocThread, frontmatter: Frontmatter | None = None) -> str:
+    """Serialize one `DocThread` to canonical per-thread `.md`.
+
+    No ``===`` header — the slug lives in the filename. Canonical form matches
+    :func:`serialize_doc`: single blank line between sections, trailing
+    newline, no leading blank lines.
+    """
+    parts: list[str] = _render_frontmatter(frontmatter)
+
+    for i, msg in enumerate(thread.messages):
+        if i > 0:
+            parts.append(f'+++ @{msg.author}' if msg.author else '+++')
+        if i == 0 and msg.author is not None:
+            raise ValueError(
+                f"Thread {thread.slug!r}: OP author must be None (top-level = ours), "
+                f"got {msg.author!r}"
+            )
+        parts.append(msg.content.strip())
+
+    return '\n\n'.join(parts) + '\n'
 
 
 def diff_docs(
@@ -172,17 +283,7 @@ def serialize_doc(doc: Doc, frontmatter: Frontmatter | None = None) -> str:
     trailing newline, no leading blank lines. This is the fixed point of
     parse ∘ serialize.
     """
-    parts: list[str] = []
-
-    if frontmatter is not None:
-        fm_items = [
-            (k, getattr(frontmatter, k))
-            for k in _KNOWN_FRONTMATTER_KEYS
-            if getattr(frontmatter, k) is not None
-        ]
-        if fm_items:
-            fm_body = '\n'.join(f'{k}: {v}' for k, v in fm_items)
-            parts.append(f'{_FRONTMATTER_DELIM}\n{fm_body}\n{_FRONTMATTER_DELIM}')
+    parts: list[str] = _render_frontmatter(frontmatter)
 
     if doc.preamble:
         parts.append(doc.preamble.strip())
