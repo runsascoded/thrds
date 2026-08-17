@@ -163,10 +163,23 @@ def test_doc_slug_from_doc_path():
 
 
 def test_doc_slug_raises_when_unset():
-    """doc_slug is an error if doc_path isn't set (indicates uninitialized session)."""
+    """doc_slug is an error if neither slug source is set (uninitialized session)."""
     s = SessionState(session_id='x')
-    with pytest.raises(ValueError, match='doc_path is not set'):
+    with pytest.raises(ValueError) as e:
         _ = s.doc_slug
+    assert str(e.value) == 'neither session_slug nor doc_path is set on this session'
+
+
+def test_doc_slug_prefers_session_slug_over_doc_path():
+    """Migration pins `session_slug` then retires `doc_path`; the staging channel
+    name must not shift underneath a session when that happens."""
+    s = SessionState(session_id='x', doc_path='old-name.md', session_slug='pinned')
+    assert s.doc_slug == 'pinned'
+
+
+def test_doc_slug_falls_back_to_doc_path_for_legacy_sessions():
+    s = SessionState(session_id='x', doc_path='cw-quickwins.md')
+    assert s.doc_slug == 'cw-quickwins'
 
 
 def test_staging_channel_name_prefix_env(monkeypatch):

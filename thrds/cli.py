@@ -77,6 +77,7 @@ import click
 from . import mirror
 from .doc import Doc
 from .md import diff_docs, parse_doc, serialize_doc
+from .migrate import apply_migration, plan_migration
 from .slack import ScanCapReached, SlackClient
 from .state import STATE_PATH, SessionState
 
@@ -701,6 +702,66 @@ def slack_archive():
     state.save()
     err(f"archived staging PC: {state.staging_channel}")
     _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: archive {state.staging_channel}')
+
+
+@slack_cli.command("migrate")
+@click.option('-n', '--dry-run', is_flag=True, help='Print the plan; write nothing.')
+def slack_migrate(dry_run: bool):
+    """Split this session's single doc into per-thread `NN-slug.md` files.
+
+    Converts a legacy one-doc-many-threads session to the per-thread model
+    (see ``specs/per-thread-model.md``): each ``=== slug`` section becomes its
+    own file, and `thrds.json` gains a `threads` map carrying each thread's
+    staging ts, destination, and state. A preamble becomes ``00-preamble.md``.
+
+    The payoff is per-file git history — a commit reads as "*this message*
+    went v2→v3" rather than "the doc changed", which is what makes a session's
+    gist usable as a revision trajectory.
+
+    Content is preserved verbatim; only its distribution across files changes.
+    Threads already posted to prod migrate as ``posted`` with their actual
+    channel pinned; everything else stays ``draft`` and inherits the
+    session-level ``prod_channel`` as a default.
+    """
+    state = _load_state(expected_platform='slack')
+    if not state.is_legacy:
+        if state.threads:
+            raise click.UsageError(
+                'This session is already on the per-thread model '
+                f'({len(state.threads)} thread(s) in thrds.json).'
+            )
+        raise click.UsageError('Nothing to migrate: this session has no threads recorded.')
+
+    doc_path = _resolve_doc_path(state, None)
+    parsed = parse_doc(Path(doc_path).read_text())
+    try:
+        plan = plan_migration(parsed.doc, state, doc_path, parsed.frontmatter)
+    except ValueError as e:
+        raise click.UsageError(str(e))
+
+    err(f"migrate {doc_path} → {len(plan.threads)} thread file(s):")
+    for t in plan.threads:
+        target = t.entry.target
+        dest = f" → {target.channel}" if target is not None else ''
+        if target is not None and target.thread_ts is not None:
+            dest += f" (reply to {target.thread_ts})"
+        err(f"  {t.filename}  [{t.entry.state}]{dest}")
+
+    if dry_run:
+        err('(dry run — nothing written)')
+        return
+
+    try:
+        touched = apply_migration(Path.cwd(), state, plan)
+    except ValueError as e:
+        raise click.UsageError(str(e))
+    state.save()
+    err(f"removed {doc_path}; wrote {len(plan.threads)} file(s)")
+    _autocommit(
+        Path.cwd(),
+        [p.name for p in touched] + [str(STATE_PATH)],
+        f'thrds: migrate {doc_path} → per-thread files',
+    )
 
 
 @slack_cli.command("open")

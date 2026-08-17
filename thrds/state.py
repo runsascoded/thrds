@@ -155,6 +155,7 @@ class SessionState:
     """
     session_id: str
     doc_path: str | None = None
+    session_slug: str | None = None
     prod_channel: str | None = None
     gist_id: str | None = None
     gist_remote: str = DEFAULT_GIST_REMOTE
@@ -276,13 +277,17 @@ class SessionState:
 
     @property
     def doc_slug(self) -> str:
-        """The doc's slug, derived from ``doc_path`` basename (minus .md extension).
+        """The session's slug: the local ID and the un-prefixed staging channel name.
 
-        Used both as the local ID for the doc and as the un-prefixed portion
-        of the staging channel name. Raises if ``doc_path`` is unset.
+        Prefers the explicit ``session_slug``; falls back to the ``doc_path``
+        basename for legacy sessions, where the single doc *was* the session's
+        identity. Migration pins ``session_slug`` before retiring ``doc_path``,
+        so the staging channel name and session dir stay stable across it.
         """
+        if self.session_slug is not None:
+            return self.session_slug
         if self.doc_path is None:
-            raise ValueError("doc_path is not set on this session")
+            raise ValueError("neither session_slug nor doc_path is set on this session")
         return Path(self.doc_path).stem
 
     def staging_channel_name(self) -> str:
