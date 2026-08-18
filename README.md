@@ -125,14 +125,22 @@ Foreign (non-editable) messages — e.g. human replies in a bot thread — are a
 
 ```bash
 thrds slack init draft.md              # scaffold session dir + gist mirror
-thrds slack push                       # sync to staging PC (terraform)
-thrds slack pull --write               # pull edits back → .md
-thrds slack push --prod --channel #foo # sync to prod (additive)
-thrds slack diff --prod --channel #foo # see what would change
-thrds slack archive                    # archive the staging PC
+thrds slack migrate                    # split the doc into per-thread NN-slug.md files
+thrds slack push                       # sync every thread to staging PC (terraform)
+thrds slack pull --write               # pull edits back → each thread's file
+thrds slack status                     # per-thread state + resolved destination
+thrds slack promote cw-mpu             # post ONE thread to its target (confirms first)
+thrds slack drop cw-summary            # mark a thread abandoned without posting
+thrds slack archive                    # archive staging (once all threads are terminal)
 thrds slack list-sessions #foo         # what thrds sessions exist in #foo
 thrds slack recover -i <sid> #foo      # rebuild a lost session from Slack metadata
 ```
+
+**One file per thread.** A session directory holds `01-slug.md`, `02-slug.md`, … — one Slack thread each (`+++` still separates replies *within* a thread). Per-file git history then reads as "*this message* went v2→v3" rather than "the doc changed", which is the point when the gist history is the artifact you're keeping.
+
+**Destination is a property of the thread, not the session.** Each thread records its own `{channel, thread_ts?}` target in `thrds.json`; the session-level `prod_channel` is just a default for threads that don't set one. A target with no `thread_ts` posts a new top-level message; with one, the thread's messages go in as replies to that existing message — so "draft a considered reply to someone else's post" and "batch six messages into one channel" are the same mechanism.
+
+**Prod push is per-thread and never whole-doc.** `promote` resolves the destination, prints it with the exact body, asks, then posts only that thread — and never archives the staging channel, because your other drafts are still live. Archiving is its own verb, refusing until every thread is `posted` or `dropped` (`-f` overrides).
 
 `thrds slack …` also exposes low-level CRUD verbs for ad-hoc operations (finding a message's ts, deleting a test post, posting one-off mrkdwn) — a first-class alternative to hand-rolled `chat.*` heredocs. All CRUD verbs default to **raw mrkdwn** (send verbatim); pass `-m` to opt into local-md → Slack-mrkdwn conversion (the opposite of the session verbs' default — see [`raw-mrkdwn-passthrough`][raw-spec]).
 

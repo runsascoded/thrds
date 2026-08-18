@@ -144,8 +144,18 @@ def test_migrate_refuses_already_migrated_session(in_tmp):
     )
 
 
-def test_migrate_refuses_session_with_no_threads(in_tmp):
+def test_migrate_works_on_session_that_never_pushed(in_tmp):
+    """A doc drafted but never pushed has no `staging_threads`; it's still a
+    legacy-layout session and migrating it is legitimate."""
+    (in_tmp / 'draft.md').write_text("=== a\n\nA body.\n")
     SessionState.new(doc_path='draft.md').save(in_tmp)
+    result = CliRunner().invoke(cli, ['slack', 'migrate'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert sorted(p.name for p in in_tmp.glob('*.md')) == ['01-a.md']
+
+
+def test_migrate_refuses_per_thread_session_with_no_threads(in_tmp):
+    SessionState.new(session_slug='s').save(in_tmp)
     result = CliRunner().invoke(cli, ['slack', 'migrate'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (

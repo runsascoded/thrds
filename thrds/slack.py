@@ -923,6 +923,102 @@ class SlackClient:
         finally:
             self.channel = prev_channel
 
+    def sync_threads_staging(
+        self,
+        threads: list[DocThread],
+        state: SessionState,
+        dry_run: bool = False,
+        pace: float = 0.4,
+        jitter: float = 0.0,
+        suppress_unfurls: bool = True,
+    ) -> DocSyncResult:
+        """Terraform-sync a session's thread files into its staging PC.
+
+        The per-thread-model counterpart to :meth:`sync_doc_staging`. Same
+        terraform semantics — threads recorded in state but no longer on disk
+        are deleted from Slack, threads on disk are reconciled in place — but
+        driven by ``NN-slug.md`` files rather than one doc's ``===`` sections,
+        and with no preamble special case (a preamble is just ``00-preamble``,
+        an ordinary thread).
+
+        Cross-references still resolve across the whole session: the threads
+        are assembled into a transient `Doc` purely so the existing two-phase
+        ref machinery (placeholder → real permalink) can operate over all of
+        them at once, since a ``[text](#slug)`` link points from one file to
+        another.
+        """
+        for t in threads:
+            if t.slug is None:
+                raise ValueError(
+                    "sync_threads_staging requires every thread to have a slug; "
+                    "a thread's slug is its filename."
+                )
+
+        doc = Doc(threads=threads)
+        phase2_doc = self._prepare_doc_for_refs(doc, dry_run)
+
+        if state.staging_channel is None and not dry_run:
+            state.staging_channel = self.create_private_channel(state.staging_channel_name())
+            state.save()  # persist eagerly — a mid-run failure shouldn't leak the channel handle
+        channel = state.staging_channel if state.staging_channel is not None else "<new-pc>"
+
+        prev_channel = self.channel
+        self.channel = channel
+        try:
+            # Threads recorded in state but no longer on disk: terraform away.
+            # Only those with a staging message to delete are considered — an
+            # entry that never reached staging has nothing to clean up.
+            desired = {t.slug for t in phase2_doc.threads}
+            stale = [
+                slug for slug, e in sorted(state.threads.items())
+                if slug not in desired and e.staging_ts is not None
+            ]
+            for slug in stale:
+                if not dry_run:
+                    self._delete_thread(state.threads[slug].staging_ts, pace=pace, jitter=jitter)
+                    del state.threads[slug]
+
+            thread_ts_by_slug: dict[str, str] = {}
+            thread_results: dict[str, SyncResult] = {}
+            for thread in phase2_doc.threads:
+                entry = state.thread(thread.slug)
+                op_ts, sync_result = self._sync_doc_thread(
+                    thread,
+                    entry.staging_ts,
+                    state,
+                    dry_run=dry_run,
+                    pace=pace,
+                    jitter=jitter,
+                    suppress_unfurls=suppress_unfurls,
+                )
+                if not dry_run:
+                    entry.staging_ts = op_ts
+                thread_ts_by_slug[thread.slug] = op_ts
+                thread_results[thread.slug] = sync_result
+
+            if not dry_run:
+                self._resolve_and_edit_refs(
+                    doc,
+                    channel,
+                    None,
+                    thread_ts_by_slug,
+                    state,
+                    pace=pace,
+                    jitter=jitter,
+                    suppress_unfurls=suppress_unfurls,
+                )
+                state.save()
+
+            return DocSyncResult(
+                channel=channel,
+                preamble_ts=None,
+                thread_ts_by_slug=thread_ts_by_slug,
+                thread_results=thread_results,
+                deleted_slugs=stale,
+            )
+        finally:
+            self.channel = prev_channel
+
     def promote_thread(
         self,
         slug: str,
@@ -1540,6 +1636,33 @@ class SlackClient:
                 for t in doc.threads
             ],
         )
+
+    def pull_threads_staging(
+        self,
+        state: SessionState,
+        session_dir: Path | None = None,
+    ) -> list[DocThread]:
+        """Fetch each per-thread draft's current state from the staging PC.
+
+        The per-thread-model counterpart to :meth:`pull_doc_staging`, keyed off
+        ``state.threads[slug].staging_ts``. Returns threads in slug order;
+        callers write each back to its own ``NN-slug.md``, which is what makes
+        an edit (or a *deletion*) made in Slack land as a version of that one
+        message rather than as a change to a shared doc.
+        """
+        if state.staging_channel is None:
+            raise ValueError(
+                "No staging channel — the session hasn't pushed a staging Doc yet."
+            )
+        roots = {
+            slug: e.staging_ts
+            for slug, e in sorted(state.threads.items())
+            if e.staging_ts is not None
+        }
+        doc = self._pull_doc(state.staging_channel, None, roots)
+        if session_dir is not None:
+            doc = self._resolve_custom_emoji(doc, state, session_dir)
+        return doc.threads
 
     def pull_doc_staging(
         self,

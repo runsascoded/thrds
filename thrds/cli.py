@@ -76,11 +76,11 @@ import click
 
 from . import mirror
 from .doc import Doc
-from .md import diff_docs, parse_doc, serialize_doc
+from .md import diff_docs, parse_doc, serialize_doc, serialize_thread
 from .migrate import apply_migration, plan_migration
 from .slack import ScanCapReached, SlackClient
 from .state import STATE_PATH, SessionState, ThreadTarget
-from .threadfile import find_thread, thread_files
+from .threadfile import find_thread, read_threads, thread_files
 
 
 def err(*msg):
@@ -582,20 +582,45 @@ def slack_init(no_gist: bool, prefix: str | None, doc_path: str):
 
 
 @slack_cli.command("push")
-@click.option('-c', '--channel', help='Prod channel override (only with --prod).')
-@click.option('-k', '--keep-staging', is_flag=True, help='Do not auto-archive the staging PC after --prod.')
+@click.option('-c', '--channel', help='Prod channel override (legacy sessions only).')
+@click.option('-k', '--keep-staging', is_flag=True, help='Do not auto-archive the staging PC after --prod (legacy).')
 @click.option('-n', '--dry-run', is_flag=True, help='Show plan without side effects.')
-@click.option('-p', '--prod', is_flag=True, help='Push to prod (additive) instead of staging (terraform).')
+@click.option('-p', '--prod', is_flag=True, help='Push to prod (legacy sessions only; use `promote` instead).')
 @click.argument('doc_path', required=False)
 def slack_push(channel: str | None, keep_staging: bool, dry_run: bool, prod: bool, doc_path: str | None):
-    """Push DOC_PATH to Slack. Default: staging PC (terraform)."""
+    """Push this session's threads to the staging PC (terraform).
+
+    On a per-thread session, pushes every `NN-slug.md` and takes no `--prod`:
+    promoting to a real channel is per-thread and deliberate, via
+    `thrds slack promote <slug>`.
+
+    `--prod` remains only for legacy single-doc sessions that haven't been
+    through `thrds slack migrate` yet.
+    """
     state = _load_state(expected_platform='slack')
+    client = _make_slack_client()
+
+    if not state.is_legacy:
+        if prod or channel is not None or keep_staging:
+            raise click.UsageError(
+                'Per-thread sessions push only to staging; use '
+                '`thrds slack promote <slug>` to post a thread to its target.'
+            )
+        threads = read_threads(Path.cwd())
+        if not threads:
+            raise click.UsageError('No thread files (`NN-slug.md`) in this session.')
+        result = client.sync_threads_staging(threads, state, dry_run=dry_run)
+        _print_sync_summary('pushed to staging' + (' (dry-run)' if dry_run else ''), result)
+        if not dry_run:
+            paths = [f.name for f in thread_files(Path.cwd())] + [str(STATE_PATH)]
+            _autocommit(Path.cwd(), paths, 'thrds: push staging')
+        return
+
     doc = _load_doc(state, doc_path)
     if not prod and channel is not None:
         raise click.UsageError('--channel requires --prod.')
     if not prod and keep_staging:
         raise click.UsageError('--keep-staging requires --prod.')
-    client = _make_slack_client()
     if channel is not None:
         channel = _resolve_channel(client, channel)
     if prod:
@@ -640,6 +665,38 @@ def slack_pull(channel: str | None, prod: bool, write: bool, doc_path: str | Non
     if channel is not None:
         channel = _resolve_channel(client, channel)
     session_dir = Path.cwd()
+
+    if not state.is_legacy:
+        if prod:
+            raise click.UsageError(
+                'Per-thread sessions pull from staging only; a promoted thread '
+                'is tracked by its `posted_ts`.'
+            )
+        threads = client.pull_threads_staging(state, session_dir=session_dir)
+        by_slug = {t.slug: t for t in threads}
+        written: list[str] = []
+        for tf in thread_files(session_dir):
+            thread = by_slug.get(tf.slug)
+            if thread is None:
+                continue
+            text = serialize_thread(thread)
+            if write:
+                tf.path.write_text(text)
+                written.append(tf.name)
+            else:
+                click.echo(f'--- {tf.name} ---', err=True)
+                click.echo(text, nl=False)
+        if write:
+            state.save()
+            err(f"wrote {len(written)} thread file(s): {', '.join(written)}")
+            emoji_paths = [p.name for p in session_dir.glob('emoji-*') if p.is_file()]
+            _autocommit(
+                session_dir,
+                [*written, str(STATE_PATH), *emoji_paths],
+                'thrds: pull staging',
+            )
+        return
+
     doc = (
         client.pull_doc_prod(state, channel=channel, session_dir=session_dir)
         if prod

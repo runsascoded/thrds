@@ -233,14 +233,17 @@ class SessionState:
     def is_legacy(self) -> bool:
         """True for a session still on the one-doc-many-threads layout.
 
-        Detected as "has legacy thread pointers but no ``threads`` map".
+        The discriminator is ``doc_path``: a legacy session keeps every thread
+        in that one file, and migration clears it when the content moves out to
+        ``NN-slug.md`` files. Deliberately *not* keyed on whether
+        ``staging_threads`` is populated — a freshly-inited session has a doc
+        but no threads recorded yet, and is still very much single-doc.
+
         Verbs on the per-thread model check this and direct the user to
         ``thrds slack migrate`` rather than silently operating on a session
         whose threads they can't see.
         """
-        if self.threads:
-            return False
-        return bool(self.staging_threads or self.prod_threads)
+        return self.doc_path is not None
 
     def thread(self, slug: str) -> ThreadEntry:
         """The :class:`ThreadEntry` for ``slug``, creating an empty one if absent.

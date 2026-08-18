@@ -116,23 +116,24 @@ def test_threads_defaults_to_empty(tmp_path):
 # --- is_legacy ---
 
 
-def test_is_legacy_true_for_session_with_staging_threads_and_no_threads_map():
-    state = SessionState.new(staging_threads={'a': '1.1'})
+def test_is_legacy_true_while_doc_path_is_set():
+    state = SessionState.new(doc_path='draft.md', staging_threads={'a': '1.1'})
     assert state.is_legacy is True
 
 
-def test_is_legacy_true_for_session_with_prod_threads_only():
-    state = SessionState.new(prod_threads={'#c': {'a': '1.1'}})
-    assert state.is_legacy is True
+def test_is_legacy_true_for_freshly_inited_session_with_no_threads_yet():
+    """A session that has a doc but hasn't pushed is still single-doc — keying
+    on `staging_threads` would misclassify it as per-thread."""
+    assert SessionState.new(doc_path='draft.md').is_legacy is True
 
 
-def test_is_legacy_false_once_threads_map_populated():
-    state = SessionState.new(staging_threads={'a': '1.1'}, threads={'a': ThreadEntry()})
+def test_is_legacy_false_once_doc_path_cleared():
+    state = SessionState.new(session_slug='s', threads={'a': ThreadEntry()})
     assert state.is_legacy is False
 
 
-def test_is_legacy_false_for_fresh_session():
-    assert SessionState.new(doc_path='d.md').is_legacy is False
+def test_is_legacy_false_for_per_thread_session_with_no_threads_recorded():
+    assert SessionState.new(session_slug='s').is_legacy is False
 
 
 # --- thread() accessor ---

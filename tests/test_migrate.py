@@ -249,6 +249,8 @@ def test_apply_refuses_when_thread_files_already_present(tmp_path):
 
 
 def test_apply_leaves_session_no_longer_legacy(tmp_path):
+    """`doc_path` is the layout discriminator; clearing it is what flips the
+    session onto the per-thread code paths."""
     (tmp_path / 'd.md').write_text("=== a\n\nA.\n")
     state = SessionState.new(doc_path='d.md', staging_threads={'a': '1.1'})
     assert state.is_legacy is True
