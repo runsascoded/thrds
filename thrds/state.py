@@ -78,29 +78,22 @@ class StagingChrome:
     Slack) and a pointer to the message a draft is replying to.
 
     It is stored here and rendered at push time — **never** written into doc
-    content. That way the body posted to prod is byte-identical to the body
-    reviewed in staging, with no strip step that could fail open and publish a
-    secret-gist URL. Concretely, the body goes out as the message's ``text``
-    *and* as a section block, with chrome as ``context`` blocks around it;
-    since ``pull`` reads ``text``, chrome cannot round-trip into a doc even in
-    principle. It also can't unfurl: Slack only unfurls links found in ``text``,
-    and no chrome link is ever in ``text``.
-
-    Layout is header/footer, matching what each affordance is *for*:
-    ``target_link`` and ``posted_link`` answer "where is this going / where did
-    it land", so they head the message; ``gist_link`` is provenance, so it
-    trails it.
+    content, so the body posted to prod is byte-identical to the body reviewed
+    in staging. It renders as one trailing line in the message text, stripped
+    on pull; see `thrds.chrome` for the shape, and for why it can't live in
+    ``blocks`` (Slack makes any message carrying blocks uneditable, which would
+    cost the staging channel the editing it exists for).
     """
     gist_link: bool = True
     target_link: bool = True
     posted_link: bool = True
-    style: str = 'context_block'
+    style: str = 'footer'
 
     def __post_init__(self) -> None:
-        if self.style != 'context_block':
+        if self.style != 'footer':
             raise ValueError(
-                f"Unsupported staging-chrome style {self.style!r}; only 'context_block' "
-                f"keeps chrome structurally separate from body text"
+                f"Unsupported staging-chrome style {self.style!r}; only 'footer' "
+                f"keeps staged messages editable in Slack"
             )
 
     @property

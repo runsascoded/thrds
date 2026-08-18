@@ -711,6 +711,17 @@ def slack_pull(channel: str | None, prod: bool, write: bool, doc_path: str | Non
                 'is tracked by its `posted_ts`.'
             )
         threads = client.pull_threads_staging(state, session_dir=session_dir)
+        files = {f.slug: f.name for f in thread_files(session_dir)}
+        for slug, edit in client.pull_chrome_edits(state, files).items():
+            if edit.target_now is not None:
+                where = edit.target_now.channel + (
+                    f' @ {edit.target_now.thread_ts}' if edit.target_now.thread_ts else ''
+                )
+                err(f"retargeted {slug} → {where} (edited in Slack)")
+            if edit.renamed_to is not None:
+                err(f"note: {slug}'s footer says {edit.renamed_to}, file is "
+                    f"{files[slug]} — rename it yourself if you meant to; doing it "
+                    f"here would break the file's git history silently")
         by_slug = {t.slug: t for t in threads}
         written: list[str] = []
         for tf in thread_files(session_dir):

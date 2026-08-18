@@ -54,6 +54,9 @@ class SyncSpy:
         self.pull_calls.append(state.staging_channel)
         return self.pull_returns
 
+    def pull_chrome_edits(self, state, filenames=None):
+        return {}
+
 
 @pytest.fixture
 def spy(monkeypatch):

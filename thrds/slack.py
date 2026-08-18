@@ -10,6 +10,13 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 
+from .chrome import (
+    ChromeEdit,
+    has_chrome,
+    parse as parse_chrome,
+    render as render_chrome,
+    split as split_chrome,
+)
 from .core import Message, OrphanedRepliesError, SyncOptions, SyncResult, Thread, sync
 from .doc import Doc, DocMessage, DocSyncResult, DocThread
 from .linked import (
@@ -38,10 +45,6 @@ from .state import SessionState, ThreadTarget
 THRDS_METADATA_EVENT_TYPE = 'thrds'
 
 SLACK_MESSAGE_LIMIT = 4000
-# A `section` block's text maxes out at 3000 chars, below the 4000 a plain
-# `text` message allows. Bodies between the two can still post — they just go
-# without staging chrome rather than being split mid-mrkdwn.
-SLACK_SECTION_LIMIT = 3000
 
 
 def _slack_icon_url(msg: dict) -> str | None:
@@ -143,8 +146,8 @@ class SlackClient:
         self.raw = raw
         self._suppress_unfurls: bool = True
         self._metadata_by_content: dict[str, dict] | None = None
-        self._chrome_by_content: dict[str, tuple[list[dict], list[dict]]] | None = None
-        self._chrome_by_slug: dict[str, tuple[list[dict], list[dict]]] | None = None
+        self._chrome_by_content: dict[str, str] | None = None
+        self._chrome_by_slug: dict[str, str] | None = None
         self._skip_op: bool = False
         self._bot_ids: tuple[str, str | None] | None = None
         self._user_name_cache: dict[str, str] = {}
@@ -249,27 +252,14 @@ class SlackClient:
         return result.get("messages", [])
 
     @staticmethod
-    def _body_text(m: dict) -> str:
-        """A message's body, preferring its section block over ``text``.
+    def _raw_body(m: dict) -> str:
+        """A message's body, with any staging-chrome footer stripped.
 
-        **Slack strips newlines from ``text`` when a message carries
-        ``blocks``** — ``text`` demotes to a one-line notification fallback,
-        and the section block becomes the faithful copy. Reading ``text``
-        regardless would silently flatten every multi-line staged message on
-        the next pull.
-
-        Only ``section`` blocks are read, never ``context``, so chrome still
-        cannot round-trip into a doc. Falls back to ``text`` for anything not
-        shaped like one of ours (no blocks, or several sections — a foreign
-        message we don't author and won't write back).
+        Runs on the wire text, before ``to_markdown``, mirroring the footer
+        being appended after ``to_slack``. This is what makes chrome unable to
+        round-trip into a doc; `promote_thread` backstops it.
         """
-        sections = [
-            b for b in (m.get("blocks") or [])
-            if b.get("type") == "section" and (b.get("text") or {}).get("text")
-        ]
-        if len(sections) == 1:
-            return sections[0]["text"]["text"]
-        return m.get("text", "")
+        return split_chrome(m.get("text", ""))[0]
 
     def list_messages(self, thread_id: str) -> list[Message]:
         result = self._request("conversations.replies", {
@@ -282,7 +272,7 @@ class SlackClient:
                 id=m["ts"],
                 # Convert Slack mrkdwn back to our local markdown form so pulled
                 # content is diff-clean against local docs. See `mrkdwn.py`.
-                content=_slack_to_md(self._body_text(m)),
+                content=_slack_to_md(self._raw_body(m)),
                 # Slack bot_messages come back with `user: null` and `bot_id`
                 # set; human messages carry `user`. Match either so our own
                 # bot's posts are correctly marked editable.
@@ -422,35 +412,31 @@ class SlackClient:
         return Message(id=message_id, content=content)
 
     def _attach_chrome(self, data: dict, content: str, wire: str) -> None:
-        """Add staging chrome to an outgoing payload, if any is set for ``content``.
+        """Append this content's staging-chrome footer to the outgoing text.
 
-        Renders as ``blocks = [*header, section(body), *footer]`` while leaving
-        ``data["text"]`` as the body alone. That split is what makes chrome
-        impossible to leak into a doc: ``list_messages`` reads ``text``, so a
-        pull sees only the body — there is no strip step that could fail open.
-        It also makes chrome unfurl-proof, since Slack only unfurls links in
-        ``text``.
+        Appended to ``wire`` — after md→mrkdwn conversion, so the converter
+        never sees it, mirroring `split_chrome` running before the reverse.
 
-        Skipped when the body exceeds Slack's per-section limit, since a
-        correct body matters more than the affordance; the message still posts,
-        just without chrome.
+        Every message in a staging sync is sent with ``blocks: []``, whether or
+        not it gets a footer: `chat.update` leaves existing blocks in place
+        unless told otherwise, and a message still carrying them from the
+        block-based version of chrome would stay uneditable in Slack forever.
+
+        Skipped when the footer wouldn't fit under Slack's message limit — a
+        complete body matters more than the affordance.
         """
-        if not self._chrome_by_content:
+        if self._chrome_by_content is None:
             return
-        blocks = self._chrome_by_content.get(content)
-        if not blocks or len(wire) > SLACK_SECTION_LIMIT:
+        data["blocks"] = []
+        footer = self._chrome_by_content.get(content)
+        if not footer or len(wire) + len(footer) + 2 > SLACK_MESSAGE_LIMIT:
             return
-        head, foot = blocks
-        data["blocks"] = [
-            *head,
-            {"type": "section", "text": {"type": "mrkdwn", "text": wire}},
-            *foot,
-        ]
+        data["text"] = f"{wire}\n\n{footer}"
 
-    def permalink(self, message_ts: str) -> str:
+    def permalink(self, message_ts: str, channel: str | None = None) -> str:
         """Get a permalink URL for a Slack message."""
         result = self._request("chat.getPermalink", {
-            "channel": self.channel,
+            "channel": channel if channel is not None else self.channel,
             "message_ts": message_ts,
         }, method="GET")
         return result["permalink"]
@@ -984,78 +970,48 @@ class SlackClient:
             self.channel = prev_channel
 
     @staticmethod
-    def _chrome_blocks(
+    def _chrome_line(
         state: SessionState,
         slug: str,
         filename: str,
-    ) -> tuple[list[dict], list[dict]]:
-        """``(header, footer)`` context blocks for one staged thread's OP.
+        target_url: str | None = None,
+    ) -> str | None:
+        """One staged thread's footer line, or None if there's nothing to say.
 
-        Three affordances, all derived from state rather than content:
-
-        * ``→`` where the draft is bound (header — the first thing to check
-          when reviewing a draft is where it's aimed)
-        * ``✓`` the permalink of the message it became, once posted (header,
-          right beside the target it fulfilled)
-        * ``⤴`` a link to the gist labelled with the thread's *file* basename,
-          meaningful now that thread ↔ file (footer — provenance, not action)
-
-        Either list is ``[]`` when nothing on that side is enabled or
-        resolvable, so a session with only a gist gets a footer and no header.
+        Three affordances, all derived from state rather than content: where
+        the draft is bound, the message it became once posted, and a deep link
+        to its file in the gist. See `thrds.chrome` for the shape and why it
+        lives in the text rather than in blocks.
         """
         chrome = state.staging_chrome
         entry = state.threads.get(slug)
-        head: list[str] = []
-        if chrome.target_link:
-            target = state.target_for(slug)
-            if target is not None:
-                where = f"<#{target.channel}>"
-                if target.thread_ts is not None:
-                    where += f" (reply to `{target.thread_ts}`)"
-                head.append(f"→ {where}")
-        if chrome.posted_link and entry is not None and entry.posted_url is not None:
-            head.append(f"✓ <{entry.posted_url}|posted>")
-        foot: list[str] = []
-        if chrome.gist_link and state.gist_id is not None:
-            foot.append(f"⤴ <https://gist.github.com/{state.gist_id}|{filename}>")
+        target = state.target_for(slug) if chrome.target_link else None
+        posted = entry.posted_url if (
+            chrome.posted_link and entry is not None
+        ) else None
+        return render_chrome(
+            channel=target.channel if target is not None else None,
+            thread_ts=target.thread_ts if target is not None else None,
+            target_url=target_url,
+            posted_url=posted,
+            gist_id=state.gist_id if chrome.gist_link else None,
+            filename=filename,
+        )
 
-        def block(parts: list[str]) -> list[dict]:
-            if not parts:
-                return []
-            return [{
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": "  ·  ".join(parts)}],
-            }]
-
-        return block(head), block(foot)
-
-    @staticmethod
-    def _context_texts(blocks: list[dict] | None) -> list[str]:
-        """The mrkdwn text of each ``context`` block, in order.
-
-        The comparable projection of a message's chrome: Slack echoes blocks
-        back with extra fields (``block_id``), so comparing whole blocks would
-        report drift on every push. The texts are what we authored.
-        """
-        out: list[str] = []
-        for b in blocks or []:
-            if b.get("type") != "context":
-                continue
-            out.append("".join(
-                e.get("text", "") for e in b.get("elements", [])
-                if e.get("type") == "mrkdwn"
-            ))
-        return out
-
-    def _live_chrome_texts(self, op_ts: str) -> list[str]:
-        """Chrome currently rendered on the staged message at ``op_ts``."""
+    def _live_chrome_line(self, op_ts: str) -> str | None:
+        """The footer currently on the staged message at ``op_ts``, if any."""
         result = self._request("conversations.replies", {
             "channel": self.channel,
             "ts": op_ts,
             "limit": 1,
         }, method="GET")
         messages = result.get("messages") or [{}]
-        return self._context_texts(messages[0].get("blocks"))
+        text = messages[0].get("text", "")
+        stripped = text.rstrip("\n")
+        _, sep, last = stripped.rpartition("\n")
+        if not sep or parse_chrome(last.strip()) is None:
+            return None
+        return last.strip()
 
     def _reconcile_chrome(
         self,
@@ -1067,51 +1023,69 @@ class SlackClient:
         """Bring the staged message at ``op_ts`` in line with its desired chrome.
 
         Body reconciliation can't cover this: `core.sync` compares *content*,
-        so an OP whose text is unchanged is SKIPped — and chrome, which lives
-        in blocks and is derived from `thrds.json` rather than the file, would
-        never appear. Chrome that only lands when the body happens to change is
-        chrome you can't trust to reflect state, so a push converges it
-        explicitly.
+        and the footer isn't part of content — it's derived from `thrds.json`.
+        An OP whose text is unchanged is SKIPped, so a thread promoted since
+        the last push would never gain its `posted` link. Chrome that only
+        lands when the body happens to change is chrome you can't trust to
+        reflect state, so a push converges it explicitly.
 
         Returns whether an edit was issued.
         """
-        blocks = (self._chrome_by_content or {}).get(content)
-        if not blocks:
+        footer = (self._chrome_by_content or {}).get(content)
+        if not footer:
             return False
-        wire = content if self.raw else _md_to_slack(content)
-        if len(wire) > SLACK_SECTION_LIMIT:
-            return False
-        head, foot = blocks
-        desired = self._context_texts([*head, *foot])
-        if self._live_chrome_texts(op_ts) == desired:
+        if self._live_chrome_line(op_ts) == footer:
             return False
         if pace > 0:
             time.sleep(pace + random.uniform(0, jitter))
         self.edit(op_ts, content)
         return True
 
+    def _target_urls(self, state: SessionState, slugs: list[str]) -> dict[str, str]:
+        """slug → permalink of the message each reply-targeted thread answers.
+
+        Only threads bound *into* a thread need one; the footer renders those
+        as a linked arrow rather than a raw ts. Failures are swallowed: a
+        stale target shouldn't fail a staging push, it should just render the
+        plainer channel-only form.
+        """
+        urls: dict[str, str] = {}
+        for slug in slugs:
+            target = state.target_for(slug)
+            if target is None or target.thread_ts is None:
+                continue
+            try:
+                urls[slug] = self.permalink(target.thread_ts, channel=target.channel)
+            except Exception:  # noqa: BLE001 — best-effort affordance
+                continue
+        return urls
+
     def _chrome_for_threads(
         self,
         threads: list[DocThread],
         state: SessionState,
         filenames: dict[str, str],
-    ) -> dict[str, tuple[list[dict], list[dict]]]:
-        """Map each thread's slug → its ``(header, footer)`` blocks."""
+    ) -> dict[str, str]:
+        """Map each thread's slug → its footer line."""
         if not state.staging_chrome.any_enabled:
             return {}
-        by_slug: dict[str, tuple[list[dict], list[dict]]] = {}
+        target_urls = self._target_urls(state, [t.slug for t in threads])
+        by_slug: dict[str, str] = {}
         for thread in threads:
-            head, foot = self._chrome_blocks(
-                state, thread.slug, filenames.get(thread.slug, f'{thread.slug}.md'),
+            line = self._chrome_line(
+                state,
+                thread.slug,
+                filenames.get(thread.slug, f'{thread.slug}.md'),
+                target_urls.get(thread.slug),
             )
-            if head or foot:
-                by_slug[thread.slug] = (head, foot)
+            if line:
+                by_slug[thread.slug] = line
         return by_slug
 
     def _register_chrome(self, threads: list[DocThread]) -> None:
         """Bind these threads' OP *contents* to their slugs' chrome.
 
-        `post`/`edit` see only content, so chrome has to be reachable by it —
+        `post`/`edit` see only content, so the footer has to be reachable by it —
         but one OP passes through up to three contents in a single push: the
         authored text, the placeholder-URL text used to size cross-refs, and
         the real-permalink text of phase 3. All three are the same thread, so
@@ -1126,12 +1100,12 @@ class SlackClient:
         if self._chrome_by_content is None:
             self._chrome_by_content = {}
         for thread in threads:
-            blocks = self._chrome_by_slug.get(thread.slug)
-            if blocks is None:
+            line = self._chrome_by_slug.get(thread.slug)
+            if line is None:
                 continue
             ours = [m for m in thread.messages if m.author is None]
             if ours:
-                self._chrome_by_content[ours[0].content] = blocks
+                self._chrome_by_content[ours[0].content] = line
 
     def sync_threads_staging(
         self,
@@ -1278,6 +1252,16 @@ class SlackClient:
         if not ours:
             raise ValueError(
                 f"Thread {slug!r}: no messages of ours to post."
+            )
+        # Fail closed. Chrome is stripped on pull, but "stripped on pull" is a
+        # step that can fail open; publishing a secret-gist URL to a real
+        # channel is the one failure worth an assertion at the boundary.
+        leaked = [i for i, m in enumerate(ours) if has_chrome(m.content)]
+        if leaked:
+            raise ValueError(
+                f"Thread {slug!r}: message(s) at index {leaked} still carry a staging "
+                f"chrome footer; refusing to post. Re-pull the thread (or delete the "
+                f"trailing footer line) before promoting."
             )
 
         prev_channel = self.channel
@@ -1443,11 +1427,11 @@ class SlackClient:
         Runs ``to_markdown`` on the raw Slack text so pulled content is in the
         same format the local doc uses — the roundtrip diff is a real content
         diff rather than a format-mismatch diff. Body comes from
-        :meth:`_body_text`, since a staged message's ``text`` is newline-free.
+        :meth:`_raw_body`, which strips any staging-chrome footer.
         """
         user_id, bot_id = self.bot_ids
         ours = raw.get("user") == user_id or (bot_id is not None and raw.get("bot_id") == bot_id)
-        content = _slack_to_md(self._body_text(raw))
+        content = _slack_to_md(self._raw_body(raw))
         if ours:
             return DocMessage(content=content, author=None)
         return DocMessage(content=content, author=self._resolve_user_name(raw["user"]))
@@ -1891,6 +1875,56 @@ class SlackClient:
         if session_dir is not None:
             doc = self._resolve_custom_emoji(doc, state, session_dir)
         return doc.threads
+
+    def pull_chrome_edits(
+        self,
+        state: SessionState,
+        filenames: dict[str, str] | None = None,
+    ) -> dict[str, ChromeEdit]:
+        """Read each staged OP's footer and apply what it declares.
+
+        The affordance the footer exists for, and the reason it can't live in
+        blocks: editing "→ #some-channel" in Slack is how you point a draft
+        somewhere else, and pasting a message permalink after the arrow aims
+        it *into* that thread.
+
+        Retargets are applied to ``state``. A changed filename is reported but
+        not acted on — see :class:`ChromeEdit`. Terminal threads are skipped
+        entirely: a `posted` thread's target is a record of where it went, not
+        an instruction.
+        """
+        if state.staging_channel is None or not state.staging_chrome.any_enabled:
+            return {}
+        prev_channel, self.channel = self.channel, state.staging_channel
+        edits: dict[str, ChromeEdit] = {}
+        try:
+            for slug, entry in sorted(state.threads.items()):
+                if entry.staging_ts is None or entry.is_terminal:
+                    continue
+                line = self._live_chrome_line(entry.staging_ts)
+                chrome = parse_chrome(line) if line else None
+                if chrome is None:
+                    continue
+                was, now = entry.target, None
+                if state.staging_chrome.target_link and chrome.channel is not None:
+                    candidate = ThreadTarget(
+                        channel=chrome.channel, thread_ts=chrome.thread_ts,
+                    )
+                    if candidate != was:
+                        entry.target = candidate
+                        now = candidate
+                renamed = None
+                if chrome.filename is not None and filenames is not None:
+                    on_disk = filenames.get(slug)
+                    if on_disk is not None and chrome.filename != on_disk:
+                        renamed = chrome.filename
+                if now is not None or renamed is not None:
+                    edits[slug] = ChromeEdit(
+                        slug=slug, target_was=was, target_now=now, renamed_to=renamed,
+                    )
+        finally:
+            self.channel = prev_channel
+        return edits
 
     def pull_doc_staging(
         self,

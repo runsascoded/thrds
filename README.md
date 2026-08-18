@@ -152,20 +152,27 @@ Every commit is rebuilt with the doc split into thread files, preserving message
 
 **Destination is a property of the thread, not the session.** Each thread records its own `{channel, thread_ts?}` target in `thrds.json`; the session-level `prod_channel` is just a default for threads that don't set one. A target with no `thread_ts` posts a new top-level message; with one, the thread's messages go in as replies to that existing message — so "draft a considered reply to someone else's post" and "batch six messages into one channel" are the same mechanism.
 
-**Staging-only chrome.** Staged messages get a subtle context line above and below the body — a *header* answering "where is this aimed, and where did it land" (`→ #channel  ·  ✓ posted`) and a *footer* carrying provenance (`⤴ 01-slug.md`, linking to the gist, so the versions being captured are auditable from Slack). It's configured in `thrds.json` (`staging_chrome`), never written into doc content:
+**Staging-only chrome.** Staged messages carry one trailing line saying where the draft is aimed, what it became once posted, and which file in the gist it is:
 
-```jsonc
-"staging_chrome": { "gist_link": true, "target_link": true, "posted_link": true, "style": "context_block" }
+```
+→ #oa-amazon-trainium · posted · 01-mfu.md
+→ (#marin-alerts) · posted · 02-cw-summary.md
 ```
 
-The body goes out as the message's `text` *and* as a section block, with chrome as `context` blocks around it. That split buys two guarantees for free:
+In the second, the arrow itself links to the message being replied to — the `thread_ts` is what a machine needs and a human never reads. The gist link deep-links the file (`#file-01-mfu-md`), not just the gist. Configured in `thrds.json`, never written into doc content:
 
-- **Chrome can't leak into a doc.** `pull` reads only the `section` block, never a `context` one, so there's no strip step that could fail open and publish a secret-gist URL — the body you promote is byte-identical to the body you reviewed. (It reads the section rather than `text` because Slack strips newlines from `text` once a message carries blocks, demoting it to a one-line notification fallback.)
-- **Chrome can't unfurl.** Slack only unfurls links found in `text`, and no chrome link is ever in `text`.
+```jsonc
+"staging_chrome": { "gist_link": true, "target_link": true, "posted_link": true, "style": "footer" }
+```
 
-(Bodies over Slack's 3000-char section limit post without chrome rather than being split mid-mrkdwn.)
+**Edit the footer to retarget a draft.** Change `→ #some-channel` in Slack and the next `pull` moves the thread's target; paste a message permalink after the arrow and it aims *into* that thread. That's the reason chrome is text and not `blocks`: **Slack removes the Edit affordance from any message carrying blocks**, which would cost a staging channel the one thing it exists for. (An edited *filename* is reported, not applied — renaming a thread file is how you reorder threads, but it breaks the per-file git history the layout exists to give, so it stays a deliberate act.)
 
-The `✓ posted` link appears once a thread has gone out, so the staging channel doubles as an index of what shipped where. It's the permalink `promote`/`adopt` already fetched, stored on the thread as `posted_url` — `status` prints it as a fourth column.
+Two things keep chrome out of prod, since it's now in the text:
+
+- **Stripped on pull.** The footer is appended after md→mrkdwn conversion and removed before the reverse, so neither direction of the converter ever sees it.
+- **Fail closed at the boundary.** `promote` refuses to post a body that still carries a footer. Stripping is a step that can fail open; publishing a secret-gist URL to a real channel is worth an assertion.
+
+A body that leaves no room for the footer under Slack's 4000-char limit posts without it — a complete body matters more than the affordance.
 
 **Prod push is per-thread and never whole-doc.** `promote` resolves the destination, prints it with the exact body, asks, then posts only that thread — and never archives the staging channel, because your other drafts are still live. Archiving is its own verb, refusing until every thread is `posted` or `dropped` (`-f` overrides).
 
