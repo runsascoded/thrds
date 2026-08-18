@@ -954,6 +954,54 @@ def slack_replay(branch: str, dry_run: bool, ref: str):
     err(f'inspect with: git log --stat {branch}')
 
 
+@slack_cli.command("adopt")
+@click.option('-c', '--channel', required=True, help='Channel the message already lives in.')
+@click.option('-t', '--ts', required=True, help='Timestamp of the existing prod message.')
+@click.option('-V', '--no-verify', is_flag=True, help='Skip the permalink check on TS.')
+@click.argument('slug')
+def slack_adopt(channel: str, ts: str, no_verify: bool, slug: str):
+    """Record an existing prod message as SLUG's posted result, without posting.
+
+    For threads that went out before thrds was tracking them — posted by hand,
+    or by an older version that never recorded `prod_threads`. Marks the thread
+    `posted`, pins its target, and stores the message ts, so `status` and the
+    archive gate see reality.
+
+    Posts nothing. By default resolves the ts to a permalink first, since a
+    mistyped ts would otherwise be recorded silently and only surface later as
+    a `promote` syncing against a message that doesn't exist.
+    """
+    state = _load_state(expected_platform='slack')
+    _require_per_thread(state)
+    try:
+        find_thread(Path.cwd(), slug)
+    except ValueError as e:
+        raise click.UsageError(str(e))
+
+    client = _make_slack_client()
+    resolved = _resolve_channel(client, channel)
+    entry = state.thread(slug)
+    if entry.state == 'posted':
+        err(f"note: {slug} was already posted (ts {entry.posted_ts}); overwriting")
+
+    if not no_verify:
+        prev, client.channel = client.channel, resolved
+        try:
+            link = client.permalink(ts)
+        except Exception as e:  # noqa: BLE001 — surface the API's own complaint
+            raise click.UsageError(f"Could not resolve {ts} in {resolved}: {e}")
+        finally:
+            client.channel = prev
+        err(f"  {link}")
+
+    entry.target = ThreadTarget(channel=resolved)
+    entry.posted_ts = ts
+    entry.state = 'posted'
+    state.save()
+    err(f"adopted {slug} → {resolved} @ {ts}")
+    _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: adopt {slug} → {resolved}')
+
+
 @slack_cli.command("drop")
 @click.argument('slug')
 def slack_drop(slug: str):
