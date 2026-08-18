@@ -69,6 +69,11 @@ DEFAULT_THREAD_STATE = 'draft'
 TERMINAL_THREAD_STATES = ('posted', 'dropped')
 
 
+# Staging chrome rendered as `context` blocks before that turned out to strip
+# Slack's Edit affordance from every staged message.
+RETIRED_CHROME_STYLE = 'context_block'
+
+
 @dataclass
 class StagingChrome:
     """What extra affordances to render on staged messages, and how.
@@ -90,6 +95,12 @@ class StagingChrome:
     style: str = 'footer'
 
     def __post_init__(self) -> None:
+        # `context_block` was the shipped default before blocks turned out to
+        # make staged messages uneditable. Coerce rather than raise: it names a
+        # version, not a choice, and refusing to load would strand any session
+        # written by that version behind a hand-edit of `thrds.json`.
+        if self.style == RETIRED_CHROME_STYLE:
+            self.style = 'footer'
         if self.style != 'footer':
             raise ValueError(
                 f"Unsupported staging-chrome style {self.style!r}; only 'footer' "

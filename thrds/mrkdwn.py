@@ -110,6 +110,17 @@ _SLACK_ITALIC = re.compile(
 _VS_16 = re.compile(r'[︎️]')
 
 
+def decode_entities(text: str) -> str:
+    """Undo the HTML encoding Slack applies on storage.
+
+    Split out because chrome comparison needs it without the rest of the
+    mrkdwn→markdown rewrite: a permalink's ``&cid=`` comes back ``&amp;cid=``,
+    and comparing that against a freshly-rendered footer would report drift on
+    every push.
+    """
+    return text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+
+
 def to_markdown(text: str) -> str:
     """Convert Slack mrkdwn back to local markdown format.
 
@@ -134,7 +145,7 @@ def to_markdown(text: str) -> str:
     text = _SLACK_LINK.sub(r'[\2](\1)', text)
     text = _SLACK_BOLD.sub(r'**\1**', text)
     text = _SLACK_ITALIC.sub(r'*\1*', text)
-    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    text = decode_entities(text)
     text = _VS_16.sub('', emoji.emojize(text, language='alias'))
     return text
 

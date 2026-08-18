@@ -28,6 +28,7 @@ from .linked import (
     render_summary_from_partition,
 )
 from .mrkdwn import (
+    decode_entities as _decode_entities,
     find_custom_shortcodes,
     substitute_custom_emoji,
     to_markdown as _slack_to_md,
@@ -999,14 +1000,20 @@ class SlackClient:
         )
 
     def _live_chrome_line(self, op_ts: str) -> str | None:
-        """The footer currently on the staged message at ``op_ts``, if any."""
+        """The footer currently on the staged message at ``op_ts``, if any.
+
+        Entity-decoded, because Slack HTML-encodes ``&`` on storage: a
+        permalink's ``&cid=`` comes back as ``&amp;cid=``, and comparing that
+        against the footer we generate would report drift on every push and
+        re-edit every message forever.
+        """
         result = self._request("conversations.replies", {
             "channel": self.channel,
             "ts": op_ts,
             "limit": 1,
         }, method="GET")
         messages = result.get("messages") or [{}]
-        text = messages[0].get("text", "")
+        text = _decode_entities(messages[0].get("text", ""))
         stripped = text.rstrip("\n")
         _, sep, last = stripped.rpartition("\n")
         if not sep or parse_chrome(last.strip()) is None:

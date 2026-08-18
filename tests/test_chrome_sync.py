@@ -39,13 +39,17 @@ def test_chrome_defaults():
     )
 
 
-def test_chrome_rejects_the_retired_block_style():
-    """Blocks made staged messages uneditable in Slack; there's no going back
-    to them behind a config flag."""
+def test_chrome_coerces_the_retired_block_style():
+    """It names a version, not a choice — refusing to load would strand every
+    session written by the block-based version behind a hand-edit."""
+    assert StagingChrome(style='context_block').style == 'footer'
+
+
+def test_chrome_rejects_an_unknown_style():
     with pytest.raises(ValueError) as e:
-        StagingChrome(style='context_block')
+        StagingChrome(style='inline')
     assert str(e.value) == (
-        "Unsupported staging-chrome style 'context_block'; only 'footer' "
+        "Unsupported staging-chrome style 'inline'; only 'footer' "
         "keeps staged messages editable in Slack"
     )
 
@@ -394,3 +398,15 @@ def test_edits_ignore_a_matching_filename(monkeypatch):
         staging_ts='1.1', target=ThreadTarget(channel='C0T'),
     )})
     assert client.pull_chrome_edits(state, {'a': '01-a.md'}) == {}
+
+
+def test_reconcile_noop_against_slack_entity_encoding(monkeypatch):
+    """Slack HTML-encodes `&` on storage, so a permalink comes back with
+    `&amp;cid=`. Comparing that raw would report drift on every push and
+    re-edit every message forever."""
+    url = 'https://ex.slack.com/archives/C0P/p99?thread_ts=1.1&cid=C0P'
+    footer = f'→ <#C0T> · <{url}|posted>'
+    live = footer.replace('&', '&amp;')
+    client, calls = _reconcile_client(monkeypatch, f'Body.\n\n{live}')
+    client._chrome_by_content = {'Body.': footer}
+    assert client._reconcile_chrome('1.1', 'Body.', pace=0.0, jitter=0.0) is False
