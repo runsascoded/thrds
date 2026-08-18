@@ -208,6 +208,22 @@ Add scopes under **OAuth & Permissions** — under **User Token Scopes** for a u
 
 Metadata visibility is app-scoped (Slack only returns your app's metadata to your app), so `slack recover` needs **no** additional scope beyond the ones above.
 
+### `THRDS_SLACK_BOT_TOKEN` — get notified when a thread goes out
+
+`promote` posts **as you** (user token), and Slack doesn't notify you about your own messages — it marks them read as it posts them. So a successful prod post is, by default, completely silent: no unread, no push, nothing on your phone.
+
+Set `THRDS_SLACK_BOT_TOKEN` to a bot token and `promote` will DM you a link to the post it just made. The DM comes from the app, not from you, which is what makes it a real notification.
+
+Setup:
+
+1. In your Slack app, add the **bot** scope `chat:write` (Bot Token Scopes), and reinstall.
+2. **App Home → Show Tabs → enable the Messages tab.** Easy to miss, and without it your app has no DM surface to write to.
+3. `export THRDS_SLACK_BOT_TOKEN=xoxb-…`
+
+You don't need to open a DM with the app first, and you don't need `im:write` — passing your own `U…` id as the channel opens the conversation implicitly.
+
+If the token isn't set, `promote` says so and carries on. If the DM fails, it warns but the post still succeeded — a notification problem never fails the thing it's reporting on.
+
 ### `THRDS_NO_PUSH`
 
 Every state-mutating verb auto-commits **and pushes** to the session's gist. Set `THRDS_NO_PUSH=1` to keep the local commits and skip every push:

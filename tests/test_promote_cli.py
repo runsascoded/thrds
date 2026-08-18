@@ -19,13 +19,23 @@ from thrds.core import SyncResult
 
 @dataclass
 class PromoteSpy:
-    """SlackClient stand-in recording promote/archive calls."""
+    """SlackClient stand-in recording promote/archive/DM calls.
+
+    One spy serves as both the user-token client and the bot-token client the
+    notification path constructs; `post_calls` records the channel it was
+    constructed with, which is what distinguishes a DM (channel = a `U…` id)
+    from anything else.
+    """
     token: str = ''
     channel: str = ''
     channels_by_name: dict[str, str] = field(default_factory=dict)
     promote_calls: list[dict] = field(default_factory=list)
     archive_calls: list[str] = field(default_factory=list)
+    post_calls: list[dict] = field(default_factory=list)
     posted_ts: str = '9.900000'
+    user_id: str = 'U0ME'
+    permalink_returns: str = 'https://ex.slack.com/archives/C0D/p9900000'
+    permalink_raises: Exception | None = None
 
     def __init__(self, *, token, channel):
         self.token = token
@@ -33,7 +43,24 @@ class PromoteSpy:
         self.channels_by_name = {}
         self.promote_calls = []
         self.archive_calls = []
+        self.post_calls = []
         self.posted_ts = '9.900000'
+        self.user_id = 'U0ME'
+        self.permalink_returns = 'https://ex.slack.com/archives/C0D/p9900000'
+        self.permalink_raises = None
+
+    @property
+    def bot_ids(self):
+        return (self.user_id, None)
+
+    def permalink(self, message_ts: str) -> str:
+        if self.permalink_raises is not None:
+            raise self.permalink_raises
+        return self.permalink_returns
+
+    def post(self, content: str, thread_id=None, **kw):
+        self.post_calls.append({'channel': self.channel, 'content': content, 'token': self.token})
+        return None
 
     def list_channels_by_name(self) -> dict[str, str]:
         return dict(self.channels_by_name)
@@ -274,6 +301,75 @@ def test_promote_warns_when_already_posted(session, spy):
     assert result.stderr.split('\n')[1] == (
         '  note: already posted (ts 5.5) — this will sync it in place'
     )
+
+
+# --- prod-post notification ---
+
+
+@pytest.fixture
+def promotable(session):
+    """`session` with a resolvable target so promote reaches the notify step."""
+    state = SessionState.load(session)
+    state.prod_channel = 'C0D'
+    state.save(session)
+    return session
+
+
+def test_promote_dms_user_when_bot_token_set(promotable, spy, monkeypatch):
+    """The DM goes to the user's own `U…` id, using the *bot* token — a post
+    made with the user's own token never notifies them."""
+    monkeypatch.setenv('THRDS_SLACK_BOT_TOKEN', 'xoxb-bot')
+    _run('promote', 'alpha', '-y')
+    assert spy.post_calls == [{
+        'channel': 'U0ME',
+        'content': 'Posted *alpha* to <#C0D>: https://ex.slack.com/archives/C0D/p9900000',
+        'token': 'xoxb-bot',
+    }]
+
+
+def test_promote_reports_dm_sent(promotable, spy, monkeypatch):
+    monkeypatch.setenv('THRDS_SLACK_BOT_TOKEN', 'xoxb-bot')
+    result = _run('promote', 'alpha', '-y')
+    assert result.stderr.rstrip().split('\n')[-1] == '  DM sent to U0ME'
+
+
+def test_promote_without_bot_token_sends_no_dm(promotable, spy, monkeypatch):
+    monkeypatch.delenv('THRDS_SLACK_BOT_TOKEN', raising=False)
+    _run('promote', 'alpha', '-y')
+    assert spy.post_calls == []
+
+
+def test_promote_without_bot_token_explains_the_silence(promotable, spy, monkeypatch):
+    monkeypatch.delenv('THRDS_SLACK_BOT_TOKEN', raising=False)
+    result = _run('promote', 'alpha', '-y')
+    assert result.stderr.rstrip().split('\n')[-1] == (
+        "  (no THRDS_SLACK_BOT_TOKEN — no DM sent; posts made with your own "
+        "token don't notify you)"
+    )
+
+
+def test_promote_succeeds_even_if_dm_fails(promotable, spy, monkeypatch):
+    """A notification failure must not make a successful post look failed."""
+    monkeypatch.setenv('THRDS_SLACK_BOT_TOKEN', 'xoxb-bot')
+    spy.permalink_raises = RuntimeError('missing_scope')
+    result = _run('promote', 'alpha', '-y')
+    assert result.exit_code == 0
+    assert SessionState.load(promotable).threads['alpha'].state == 'posted'
+
+
+def test_promote_warns_when_dm_fails(promotable, spy, monkeypatch):
+    monkeypatch.setenv('THRDS_SLACK_BOT_TOKEN', 'xoxb-bot')
+    spy.permalink_raises = RuntimeError('missing_scope')
+    result = _run('promote', 'alpha', '-y')
+    assert result.stderr.rstrip().split('\n')[-1] == (
+        '  warning: promote succeeded but DM failed: missing_scope'
+    )
+
+
+def test_dry_run_sends_no_dm(promotable, spy, monkeypatch):
+    monkeypatch.setenv('THRDS_SLACK_BOT_TOKEN', 'xoxb-bot')
+    _run('promote', 'alpha', '-n')
+    assert spy.post_calls == []
 
 
 # --- drop ---

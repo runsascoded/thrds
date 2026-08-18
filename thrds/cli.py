@@ -92,6 +92,11 @@ def err(*msg):
 
 SLACK_TOKEN_ENV = 'THRDS_SLACK_TOKEN'
 SLACK_TOKEN_ENV_DEPRECATED = 'SLACK_THRDS_USER_TOKEN'
+# Optional bot token, used only to DM you when a thread is promoted. It has to
+# be a *different* identity from the one that posts: a message you authored
+# with your own user token is attributed to you and advances your own read
+# cursor, so it never produces an unread or a push notification. A bot DM does.
+SLACK_BOT_TOKEN_ENV = 'THRDS_SLACK_BOT_TOKEN'
 
 _deprecated_env_warned = False
 
@@ -128,6 +133,34 @@ def _make_slack_client() -> SlackClient:
             f"need a user token; the `slack` CRUD verbs accept either."
         )
     return SlackClient(token=token, channel="")
+
+
+def _notify_promoted(client: SlackClient, slug: str, channel: str, message_ts: str) -> None:
+    """DM the user that ``slug`` just went out, via the bot token if configured.
+
+    Best-effort by construction: a failure here must never turn a successful
+    post into a command that looks failed. Warn and move on.
+
+    Why a bot token rather than the user token already in hand: `promote` posts
+    *as you*, and Slack doesn't notify you about your own messages — it marks
+    them read as it posts them. A notification therefore requires a second
+    identity, and a bot DM is the supported, non-deprecated way to get one.
+    """
+    bot_token = os.environ.get(SLACK_BOT_TOKEN_ENV)
+    if not bot_token:
+        err(
+            f"  (no {SLACK_BOT_TOKEN_ENV} — no DM sent; posts made with your own "
+            f"token don't notify you)"
+        )
+        return
+    try:
+        user_id = client.bot_ids[0]
+        link = client.permalink(message_ts)
+        bot = SlackClient(token=bot_token, channel=user_id)
+        bot.post(f"Posted *{slug}* to <#{channel}>: {link}", raw=True)
+        err(f"  DM sent to {user_id}")
+    except Exception as e:  # noqa: BLE001 — notification must not fail the promote
+        err(f"  warning: promote succeeded but DM failed: {e}")
 
 
 def _load_state(expected_platform: str | None = None) -> SessionState:
@@ -855,6 +888,7 @@ def slack_promote(channel: str | None, dry_run: bool, thread_ts: str | None, yes
     result = client.promote_thread(slug, thread, target, state)
     state.save()
     err(f"posted {slug}: {result.thread_id}")
+    _notify_promoted(client, slug, target.channel, result.thread_id)
     _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: promote {slug} → {target.channel}')
 
 
