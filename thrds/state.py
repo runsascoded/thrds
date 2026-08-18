@@ -70,6 +70,38 @@ TERMINAL_THREAD_STATES = ('posted', 'dropped')
 
 
 @dataclass
+class StagingChrome:
+    """What extra affordances to render on staged messages, and how.
+
+    "Chrome" is anything visible in staging that must be absent from prod: a
+    link back to the gist (so the versions being captured are auditable from
+    Slack) and a pointer to the message a draft is replying to.
+
+    It is stored here and rendered at push time — **never** written into doc
+    content. That way the body posted to prod is byte-identical to the body
+    reviewed in staging, with no strip step that could fail open and publish a
+    secret-gist URL. Concretely, the body goes out as the message's ``text``
+    *and* as a section block, with chrome appended as a ``context`` block;
+    since ``pull`` reads ``text``, chrome cannot round-trip into a doc even in
+    principle.
+    """
+    gist_link: bool = True
+    target_link: bool = True
+    style: str = 'context_block'
+
+    def __post_init__(self) -> None:
+        if self.style != 'context_block':
+            raise ValueError(
+                f"Unsupported staging-chrome style {self.style!r}; only 'context_block' "
+                f"keeps chrome structurally separate from body text"
+            )
+
+    @property
+    def any_enabled(self) -> bool:
+        return self.gist_link or self.target_link
+
+
+@dataclass
 class ThreadTarget:
     """Where a thread is destined: a channel, and optionally a thread within it.
 
@@ -169,12 +201,15 @@ class SessionState:
     prod_preamble_ts: dict[str, str] = field(default_factory=dict)                   # channel → preamble ts
     workspace_emoji: dict[str, str] = field(default_factory=dict)                    # custom emoji name → local filename (relative to session dir)
     threads: dict[str, ThreadEntry] = field(default_factory=dict)                    # slug → per-thread state (per-thread model; see `threads_legacy`)
+    staging_chrome: StagingChrome = field(default_factory=StagingChrome)             # staging-only affordances; never written into doc content
 
     def __post_init__(self) -> None:
         if self.platform not in VALID_PLATFORMS:
             raise ValueError(
                 f"Invalid platform {self.platform!r}; must be one of {VALID_PLATFORMS}"
             )
+        if isinstance(self.staging_chrome, dict):
+            self.staging_chrome = StagingChrome(**self.staging_chrome)
         # `load` reconstructs via `cls(**json)`, so nested entries arrive as
         # plain dicts; coerce here so both load and direct construction yield
         # the same types.

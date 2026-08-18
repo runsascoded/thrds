@@ -150,6 +150,14 @@ Every commit is rebuilt with the doc split into thread files, preserving message
 
 **Destination is a property of the thread, not the session.** Each thread records its own `{channel, thread_ts?}` target in `thrds.json`; the session-level `prod_channel` is just a default for threads that don't set one. A target with no `thread_ts` posts a new top-level message; with one, the thread's messages go in as replies to that existing message — so "draft a considered reply to someone else's post" and "batch six messages into one channel" are the same mechanism.
 
+**Staging-only chrome.** Staged messages carry a subtle context line — `⤴ 01-slug.md` linking to the gist (so the versions being captured are auditable from Slack) and `→ #channel` showing where the draft is bound. It's configured in `thrds.json` (`staging_chrome`), never written into doc content:
+
+```jsonc
+"staging_chrome": { "gist_link": true, "target_link": true, "style": "context_block" }
+```
+
+The body goes out as the message's `text` *and* as a section block, with chrome appended as a separate `context` block. Since `pull` reads `text`, chrome cannot round-trip into a doc even in principle — there's no strip step that could fail open and publish a secret-gist URL, and the body you promote is byte-identical to the body you reviewed. (Bodies over Slack's 3000-char section limit post without chrome rather than being split mid-mrkdwn.)
+
 **Prod push is per-thread and never whole-doc.** `promote` resolves the destination, prints it with the exact body, asks, then posts only that thread — and never archives the staging channel, because your other drafts are still live. Archiving is its own verb, refusing until every thread is `posted` or `dropped` (`-f` overrides).
 
 `thrds slack …` also exposes low-level CRUD verbs for ad-hoc operations (finding a message's ts, deleting a test post, posting one-off mrkdwn) — a first-class alternative to hand-rolled `chat.*` heredocs. All CRUD verbs default to **raw mrkdwn** (send verbatim); pass `-m` to opt into local-md → Slack-mrkdwn conversion (the opposite of the session verbs' default — see [`raw-mrkdwn-passthrough`][raw-spec]).

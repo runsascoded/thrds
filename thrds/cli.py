@@ -640,10 +640,14 @@ def slack_push(channel: str | None, keep_staging: bool, dry_run: bool, prod: boo
                 'Per-thread sessions push only to staging; use '
                 '`thrds slack promote <slug>` to post a thread to its target.'
             )
+        files = thread_files(Path.cwd())
         threads = read_threads(Path.cwd())
         if not threads:
             raise click.UsageError('No thread files (`NN-slug.md`) in this session.')
-        result = client.sync_threads_staging(threads, state, dry_run=dry_run)
+        result = client.sync_threads_staging(
+            threads, state, dry_run=dry_run,
+            filenames={f.slug: f.name for f in files},
+        )
         _print_sync_summary('pushed to staging' + (' (dry-run)' if dry_run else ''), result)
         if not dry_run:
             paths = [f.name for f in thread_files(Path.cwd())] + [str(STATE_PATH)]

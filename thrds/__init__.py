@@ -5,7 +5,7 @@ from .linked import LinkedSyncResult, LinkedThread, Section
 from .lint import BskyLinter, DiscordLinter, LintIssue, LintReport
 from .protocol import ThreadClient
 from .slack import RecoveredSession, ScanCapReached, SlackClient
-from .state import SessionState, ThreadEntry, ThreadTarget
+from .state import SessionState, StagingChrome, ThreadEntry, ThreadTarget
 from .threadfile import ThreadFile, thread_files, thread_filename
 
 __all__ = [
@@ -34,6 +34,7 @@ __all__ = [
     "SenderChangePolicy",
     "SessionState",
     "SlackClient",
+    "StagingChrome",
     "SyncOptions",
     "SyncResult",
     "Thread",

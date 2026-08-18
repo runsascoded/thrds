@@ -38,6 +38,10 @@ from .state import SessionState, ThreadTarget
 THRDS_METADATA_EVENT_TYPE = 'thrds'
 
 SLACK_MESSAGE_LIMIT = 4000
+# A `section` block's text maxes out at 3000 chars, below the 4000 a plain
+# `text` message allows. Bodies between the two can still post — they just go
+# without staging chrome rather than being split mid-mrkdwn.
+SLACK_SECTION_LIMIT = 3000
 
 
 def _slack_icon_url(msg: dict) -> str | None:
@@ -139,6 +143,7 @@ class SlackClient:
         self.raw = raw
         self._suppress_unfurls: bool = True
         self._metadata_by_content: dict[str, dict] | None = None
+        self._chrome_by_content: dict[str, list[dict]] | None = None
         self._skip_op: bool = False
         self._bot_ids: tuple[str, str | None] | None = None
         self._user_name_cache: dict[str, str] = {}
@@ -327,6 +332,7 @@ class SlackClient:
             "unfurl_links": not self._suppress_unfurls,
             "unfurl_media": not self._suppress_unfurls,
         }
+        self._attach_chrome(data, content, wire)
         resolved_username = username if username is not None else self.username
         if resolved_username is not None:
             data["username"] = resolved_username
@@ -384,11 +390,34 @@ class SlackClient:
             "unfurl_links": not self._suppress_unfurls,
             "unfurl_media": not self._suppress_unfurls,
         }
+        self._attach_chrome(data, content, wire)
         md = self._metadata_for(content)
         if md is not None:
             data["metadata"] = md
         self._request("chat.update", data)
         return Message(id=message_id, content=content)
+
+    def _attach_chrome(self, data: dict, content: str, wire: str) -> None:
+        """Add staging chrome to an outgoing payload, if any is set for ``content``.
+
+        Renders as ``blocks = [section(body), context(chrome)]`` while leaving
+        ``data["text"]`` as the body alone. That split is what makes chrome
+        impossible to leak into a doc: ``list_messages`` reads ``text``, so a
+        pull sees only the body — there is no strip step that could fail open.
+
+        Skipped when the body exceeds Slack's per-section limit, since a
+        correct body matters more than the affordance; the message still posts,
+        just without chrome.
+        """
+        if not self._chrome_by_content:
+            return
+        blocks = self._chrome_by_content.get(content)
+        if not blocks or len(wire) > SLACK_SECTION_LIMIT:
+            return
+        data["blocks"] = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": wire}},
+            *blocks,
+        ]
 
     def permalink(self, message_ts: str) -> str:
         """Get a permalink URL for a Slack message."""
@@ -923,6 +952,58 @@ class SlackClient:
         finally:
             self.channel = prev_channel
 
+    @staticmethod
+    def _chrome_elements(
+        state: SessionState,
+        slug: str,
+        filename: str,
+    ) -> list[dict]:
+        """Context-block elements for one staged thread's OP.
+
+        Two affordances, both derived from state rather than content:
+        a ``⤴`` link to the gist labelled with the thread's *file* basename
+        (meaningful now that thread ↔ file), and a ``→`` pointer to where the
+        draft is bound. Returns ``[]`` when nothing is enabled or resolvable.
+        """
+        chrome = state.staging_chrome
+        parts: list[str] = []
+        if chrome.gist_link and state.gist_id is not None:
+            parts.append(f"⤴ <https://gist.github.com/{state.gist_id}|{filename}>")
+        if chrome.target_link:
+            target = state.target_for(slug)
+            if target is not None:
+                where = f"<#{target.channel}>"
+                if target.thread_ts is not None:
+                    where += f" (reply to `{target.thread_ts}`)"
+                parts.append(f"→ {where}")
+        if not parts:
+            return []
+        return [{
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "  ·  ".join(parts)}],
+        }]
+
+    def _chrome_for_threads(
+        self,
+        threads: list[DocThread],
+        state: SessionState,
+        filenames: dict[str, str],
+    ) -> dict[str, list[dict]]:
+        """Map each thread's OP content → its chrome blocks (OPs only)."""
+        if not state.staging_chrome.any_enabled:
+            return {}
+        by_content: dict[str, list[dict]] = {}
+        for thread in threads:
+            ours = [m for m in thread.messages if m.author is None]
+            if not ours:
+                continue
+            elements = self._chrome_elements(
+                state, thread.slug, filenames.get(thread.slug, f'{thread.slug}.md'),
+            )
+            if elements:
+                by_content[ours[0].content] = elements
+        return by_content
+
     def sync_threads_staging(
         self,
         threads: list[DocThread],
@@ -931,6 +1012,7 @@ class SlackClient:
         pace: float = 0.4,
         jitter: float = 0.0,
         suppress_unfurls: bool = True,
+        filenames: dict[str, str] | None = None,
     ) -> DocSyncResult:
         """Terraform-sync a session's thread files into its staging PC.
 
@@ -964,6 +1046,11 @@ class SlackClient:
 
         prev_channel = self.channel
         self.channel = channel
+        # Chrome is staging-only by construction: it's attached here and
+        # nowhere in `promote_thread`, so a prod post can't carry it.
+        self._chrome_by_content = self._chrome_for_threads(
+            phase2_doc.threads, state, filenames or {},
+        )
         try:
             # Threads recorded in state but no longer on disk: terraform away.
             # Only those with a staging message to delete are considered — an
@@ -1018,6 +1105,7 @@ class SlackClient:
             )
         finally:
             self.channel = prev_channel
+            self._chrome_by_content = None
 
     def promote_thread(
         self,
