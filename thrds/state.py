@@ -81,12 +81,19 @@ class StagingChrome:
     content. That way the body posted to prod is byte-identical to the body
     reviewed in staging, with no strip step that could fail open and publish a
     secret-gist URL. Concretely, the body goes out as the message's ``text``
-    *and* as a section block, with chrome appended as a ``context`` block;
+    *and* as a section block, with chrome as ``context`` blocks around it;
     since ``pull`` reads ``text``, chrome cannot round-trip into a doc even in
-    principle.
+    principle. It also can't unfurl: Slack only unfurls links found in ``text``,
+    and no chrome link is ever in ``text``.
+
+    Layout is header/footer, matching what each affordance is *for*:
+    ``target_link`` and ``posted_link`` answer "where is this going / where did
+    it land", so they head the message; ``gist_link`` is provenance, so it
+    trails it.
     """
     gist_link: bool = True
     target_link: bool = True
+    posted_link: bool = True
     style: str = 'context_block'
 
     def __post_init__(self) -> None:
@@ -98,7 +105,7 @@ class StagingChrome:
 
     @property
     def any_enabled(self) -> bool:
-        return self.gist_link or self.target_link
+        return self.gist_link or self.target_link or self.posted_link
 
 
 @dataclass
@@ -130,11 +137,18 @@ class ThreadEntry:
     ``target`` is the prod destination (None until set). ``posted_ts`` is the
     ts of *our* message once it lands at the target — distinct from
     ``target.thread_ts``, which is the message we're replying *to*.
+
+    ``posted_url`` is that message's permalink. It's stored rather than derived
+    because deriving one needs the workspace domain, which only Slack knows —
+    and both paths that set ``posted_ts`` (``promote``, ``adopt``) already hold
+    a permalink at that moment. Persisting it keeps every later reader
+    (staging chrome, ``status``) offline.
     """
     staging_ts: str | None = None
     target: ThreadTarget | None = None
     state: str = DEFAULT_THREAD_STATE
     posted_ts: str | None = None
+    posted_url: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.target, dict):

@@ -126,6 +126,22 @@ def test_adopt_leaves_state_unchanged_on_verify_failure(session, spy):
     assert SessionState.load(session).threads['alpha'].state == 'draft'
 
 
+def test_adopt_records_the_permalink_it_verified(session, spy):
+    """The verify call already holds the URL; keeping it saves every later
+    reader (staging chrome, `status`) an API round-trip."""
+    _run('adopt', 'alpha', '-c', 'C0PROD', '-t', '9.9')
+    assert SessionState.load(session).threads['alpha'].posted_url == (
+        'https://ex.slack.com/archives/C0PROD/p99'
+    )
+
+
+def test_adopt_no_verify_records_no_permalink(session, spy):
+    """No check, no URL — chrome degrades rather than fabricating a link."""
+    spy.permalink_raises = RuntimeError('should not be called')
+    _run('adopt', 'alpha', '-c', 'C0PROD', '-t', '9.9', '-V')
+    assert SessionState.load(session).threads['alpha'].posted_url is None
+
+
 def test_adopt_no_verify_skips_permalink(session, spy):
     spy.permalink_raises = RuntimeError('should not be called')
     result = _run('adopt', 'alpha', '-c', 'C0PROD', '-t', '9.9', '-V')

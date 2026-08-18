@@ -104,6 +104,7 @@ def test_threads_serialize_as_nested_json(tmp_path):
             'target': {'channel': '#c', 'thread_ts': None},
             'state': 'draft',
             'posted_ts': None,
+            'posted_url': None,
         },
     }
 

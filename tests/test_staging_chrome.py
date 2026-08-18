@@ -1,9 +1,10 @@
 """Tests for staging-only chrome (`StagingChrome`, context blocks).
 
-The load-bearing property: chrome renders as a *block* while the body stays the
+The load-bearing property: chrome renders as *blocks* while the body stays the
 message's `text`. `pull` reads `text`, so chrome cannot round-trip into doc
 content — there is no strip step that could fail open and publish a secret-gist
-URL. See `specs/per-thread-model.md`.
+URL. Slack also only unfurls links in `text`, so no chrome link can unfurl.
+See `specs/per-thread-model.md`.
 """
 from __future__ import annotations
 
@@ -17,9 +18,11 @@ from thrds.state import StagingChrome
 # --- StagingChrome ---
 
 
-def test_chrome_defaults_to_both_links_enabled():
+def test_chrome_defaults_to_every_link_enabled():
     c = StagingChrome()
-    assert (c.gist_link, c.target_link, c.style) == (True, True, 'context_block')
+    assert (c.gist_link, c.target_link, c.posted_link, c.style) == (
+        True, True, True, 'context_block',
+    )
 
 
 def test_chrome_rejects_other_styles():
@@ -31,14 +34,16 @@ def test_chrome_rejects_other_styles():
     )
 
 
-@pytest.mark.parametrize('gist,target,enabled', [
-    (True, True, True),
-    (True, False, True),
-    (False, True, True),
-    (False, False, False),
+@pytest.mark.parametrize('gist,target,posted,enabled', [
+    (True, True, True, True),
+    (True, False, False, True),
+    (False, True, False, True),
+    (False, False, True, True),
+    (False, False, False, False),
 ])
-def test_chrome_any_enabled(gist, target, enabled):
-    assert StagingChrome(gist_link=gist, target_link=target).any_enabled is enabled
+def test_chrome_any_enabled(gist, target, posted, enabled):
+    chrome = StagingChrome(gist_link=gist, target_link=target, posted_link=posted)
+    assert chrome.any_enabled is enabled
 
 
 def test_chrome_round_trips_through_state(tmp_path):
@@ -54,7 +59,7 @@ def test_chrome_coerced_from_dict():
     assert state.staging_chrome == StagingChrome(target_link=False)
 
 
-# --- _chrome_elements ---
+# --- _chrome_blocks: (header, footer) ---
 
 
 def _state(**kw) -> SessionState:
@@ -63,66 +68,109 @@ def _state(**kw) -> SessionState:
     return SessionState.new(**base)
 
 
-def _text(elements: list[dict]) -> str:
-    return elements[0]['elements'][0]['text']
+def _texts(blocks: list[dict]) -> list[str]:
+    return [b['elements'][0]['text'] for b in blocks]
 
 
-def test_elements_render_gist_link_with_file_basename():
-    """The label is the *file* basename — meaningful now that thread ↔ file."""
-    els = SlackClient._chrome_elements(_state(), 'a', '01-a.md')
-    assert _text(els) == '⤴ <https://gist.github.com/abc123|01-a.md>'
+def _posted(**kw) -> SessionState:
+    """A session whose only thread went out, with a permalink on record."""
+    return _state(threads={'a': ThreadEntry(
+        target=ThreadTarget(channel='C0A'),
+        state='posted',
+        posted_ts='9.9',
+        posted_url='https://ex.slack.com/archives/C0A/p99',
+    )}, **kw)
 
 
-def test_elements_render_target_channel():
-    state = _state(threads={'a': ThreadEntry(target=ThreadTarget(channel='C0ALERTS'))})
-    assert _text(SlackClient._chrome_elements(state, 'a', '01-a.md')) == (
-        '⤴ <https://gist.github.com/abc123|01-a.md>  ·  → <#C0ALERTS>'
+def test_blocks_put_gist_link_in_the_footer():
+    """Provenance trails the body; the label is the *file* basename."""
+    head, foot = SlackClient._chrome_blocks(_state(), 'a', '01-a.md')
+    assert (_texts(head), _texts(foot)) == (
+        [], ['⤴ <https://gist.github.com/abc123|01-a.md>'],
     )
 
 
-def test_elements_render_reply_target_with_ts():
+def test_blocks_put_target_in_the_header():
+    state = _state(threads={'a': ThreadEntry(target=ThreadTarget(channel='C0ALERTS'))})
+    head, foot = SlackClient._chrome_blocks(state, 'a', '01-a.md')
+    assert (_texts(head), _texts(foot)) == (
+        ['→ <#C0ALERTS>'], ['⤴ <https://gist.github.com/abc123|01-a.md>'],
+    )
+
+
+def test_blocks_render_reply_target_with_ts():
     state = _state(threads={
         'a': ThreadEntry(target=ThreadTarget(channel='C0A', thread_ts='1786980761.357209')),
     })
-    assert _text(SlackClient._chrome_elements(state, 'a', '01-a.md')) == (
-        '⤴ <https://gist.github.com/abc123|01-a.md>  ·  '
-        '→ <#C0A> (reply to `1786980761.357209`)'
+    head, _ = SlackClient._chrome_blocks(state, 'a', '01-a.md')
+    assert _texts(head) == ['→ <#C0A> (reply to `1786980761.357209`)']
+
+
+def test_blocks_pair_posted_permalink_with_the_target():
+    """Where it's going and where it landed read together, in that order."""
+    head, _ = SlackClient._chrome_blocks(_posted(), 'a', '01-a.md')
+    assert _texts(head) == [
+        '→ <#C0A>  ·  ✓ <https://ex.slack.com/archives/C0A/p99|posted>'
+    ]
+
+
+def test_blocks_omit_posted_link_before_a_thread_is_posted():
+    state = _state(threads={'a': ThreadEntry(target=ThreadTarget(channel='C0A'))})
+    head, _ = SlackClient._chrome_blocks(state, 'a', '01-a.md')
+    assert _texts(head) == ['→ <#C0A>']
+
+
+def test_blocks_omit_posted_link_when_no_url_was_recorded():
+    """`adopt -V` records a ts but no permalink; chrome degrades, doesn't guess."""
+    state = _state(threads={
+        'a': ThreadEntry(target=ThreadTarget(channel='C0A'), state='posted', posted_ts='9.9'),
+    })
+    head, _ = SlackClient._chrome_blocks(state, 'a', '01-a.md')
+    assert _texts(head) == ['→ <#C0A>']
+
+
+def test_blocks_omit_posted_link_when_disabled():
+    head, _ = SlackClient._chrome_blocks(
+        _posted(staging_chrome=StagingChrome(posted_link=False)), 'a', '01-a.md',
     )
+    assert _texts(head) == ['→ <#C0A>']
 
 
-def test_elements_use_context_block_type():
-    els = SlackClient._chrome_elements(_state(), 'a', '01-a.md')
-    assert els[0]['type'] == 'context'
+def test_blocks_use_context_block_type():
+    head, foot = SlackClient._chrome_blocks(_posted(), 'a', '01-a.md')
+    assert [b['type'] for b in head + foot] == ['context', 'context']
 
 
-def test_elements_omit_gist_link_when_disabled():
+def test_blocks_omit_gist_link_when_disabled():
     state = _state(staging_chrome=StagingChrome(gist_link=False),
                    threads={'a': ThreadEntry(target=ThreadTarget(channel='C0A'))})
-    assert _text(SlackClient._chrome_elements(state, 'a', '01-a.md')) == '→ <#C0A>'
+    head, foot = SlackClient._chrome_blocks(state, 'a', '01-a.md')
+    assert (_texts(head), foot) == (['→ <#C0A>'], [])
 
 
-def test_elements_omit_gist_link_for_no_gist_session():
+def test_blocks_omit_gist_link_for_no_gist_session():
     state = _state(gist_id=None, threads={'a': ThreadEntry(target=ThreadTarget(channel='C0A'))})
-    assert _text(SlackClient._chrome_elements(state, 'a', '01-a.md')) == '→ <#C0A>'
+    head, foot = SlackClient._chrome_blocks(state, 'a', '01-a.md')
+    assert (_texts(head), foot) == (['→ <#C0A>'], [])
 
 
-def test_elements_omit_target_when_unresolvable():
-    assert _text(SlackClient._chrome_elements(_state(), 'a', '01-a.md')) == (
-        '⤴ <https://gist.github.com/abc123|01-a.md>'
-    )
+def test_blocks_omit_header_when_target_unresolvable():
+    head, foot = SlackClient._chrome_blocks(_state(), 'a', '01-a.md')
+    assert (head, _texts(foot)) == ([], ['⤴ <https://gist.github.com/abc123|01-a.md>'])
 
 
-def test_elements_empty_when_nothing_resolvable():
-    state = _state(gist_id=None)
-    assert SlackClient._chrome_elements(state, 'a', '01-a.md') == []
+def test_blocks_empty_when_nothing_resolvable():
+    assert SlackClient._chrome_blocks(_state(gist_id=None), 'a', '01-a.md') == ([], [])
 
 
-def test_elements_empty_when_all_disabled():
-    state = _state(staging_chrome=StagingChrome(gist_link=False, target_link=False))
-    assert SlackClient._chrome_elements(state, 'a', '01-a.md') == []
+def test_blocks_empty_when_all_disabled():
+    state = _state(staging_chrome=StagingChrome(
+        gist_link=False, target_link=False, posted_link=False,
+    ))
+    assert SlackClient._chrome_blocks(state, 'a', '01-a.md') == ([], [])
 
 
-# --- _chrome_for_threads: OPs only ---
+# --- _chrome_for_threads / _register_chrome: slug → blocks → OP content ---
 
 
 def _client() -> SlackClient:
@@ -133,54 +181,95 @@ def _thread(slug: str, *contents: str) -> DocThread:
     return DocThread(messages=[DocMessage(content=c) for c in contents], slug=slug)
 
 
-def test_chrome_maps_only_the_op_content():
-    client = _client()
-    threads = [_thread('a', 'OP body.', 'A reply.')]
-    got = client._chrome_for_threads(threads, _state(), {'a': '01-a.md'})
-    assert list(got) == ['OP body.']
-
-
-def test_chrome_covers_every_thread():
+def test_chrome_keyed_by_slug():
     client = _client()
     state = _state(threads={'a': ThreadEntry(), 'b': ThreadEntry()})
     threads = [_thread('a', 'A op.'), _thread('b', 'B op.')]
     got = client._chrome_for_threads(threads, state, {'a': '01-a.md', 'b': '02-b.md'})
-    assert sorted(got) == ['A op.', 'B op.']
+    assert sorted(got) == ['a', 'b']
 
 
 def test_chrome_empty_when_disabled():
     client = _client()
-    state = _state(staging_chrome=StagingChrome(gist_link=False, target_link=False))
+    state = _state(staging_chrome=StagingChrome(
+        gist_link=False, target_link=False, posted_link=False,
+    ))
     assert client._chrome_for_threads([_thread('a', 'A.')], state, {}) == {}
 
 
-def test_chrome_skips_thread_with_no_messages_of_ours():
+def test_register_binds_only_the_op_content():
+    client = _client()
+    threads = [_thread('a', 'OP body.', 'A reply.')]
+    client._chrome_by_slug = client._chrome_for_threads(threads, _state(), {'a': '01-a.md'})
+    client._register_chrome(threads)
+    assert list(client._chrome_by_content) == ['OP body.']
+
+
+def test_register_binds_every_content_variant_of_one_op():
+    """Authored text, placeholder-URL text, and real-permalink text are the
+    same thread — all three must resolve to its chrome, or a cross-ref-carrying
+    OP loses chrome the moment refs resolve."""
+    client = _client()
+    authored = [_thread('a', 'See [x](#b).')]
+    resolved = [_thread('a', 'See <https://ex.slack.com/p1|x>.')]
+    client._chrome_by_slug = client._chrome_for_threads(authored, _state(), {'a': '01-a.md'})
+    client._register_chrome(authored)
+    client._register_chrome(resolved)
+    assert sorted(client._chrome_by_content) == [
+        'See <https://ex.slack.com/p1|x>.', 'See [x](#b).',
+    ]
+    assert (
+        client._chrome_by_content['See [x](#b).']
+        == client._chrome_by_content['See <https://ex.slack.com/p1|x>.']
+    )
+
+
+def test_register_skips_thread_with_no_messages_of_ours():
     client = _client()
     foreign = DocThread(messages=[DocMessage(content='Theirs.', author='rafal')], slug='a')
-    assert client._chrome_for_threads([foreign], _state(), {}) == {}
+    client._chrome_by_slug = client._chrome_for_threads([foreign], _state(), {})
+    client._register_chrome([foreign])
+    assert client._chrome_by_content == {}
 
 
 # --- _attach_chrome: the text/blocks split ---
 
 
+def _ctx(text: str) -> dict:
+    return {'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': text}]}
+
+
 def test_attach_leaves_text_as_body_alone():
-    """The property that makes chrome unable to leak: `text` is body-only."""
+    """The property that makes chrome unable to leak (or unfurl): `text` is body-only."""
     client = _client()
-    client._chrome_by_content = {'Body.': [{'type': 'context', 'elements': []}]}
+    client._chrome_by_content = {'Body.': ([_ctx('→ x')], [_ctx('⤴ y')])}
     data = {'text': 'Body.'}
     client._attach_chrome(data, 'Body.', 'Body.')
     assert data['text'] == 'Body.'
 
 
-def test_attach_puts_body_in_a_section_and_chrome_after_it():
+def test_attach_wraps_the_body_section_in_header_and_footer():
     client = _client()
-    chrome = [{'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': '⤴ x'}]}]
-    client._chrome_by_content = {'Body.': chrome}
+    head, foot = _ctx('→ <#C0A>'), _ctx('⤴ gist')
+    client._chrome_by_content = {'Body.': ([head], [foot])}
+    data = {'text': 'Body.'}
+    client._attach_chrome(data, 'Body.', 'Body.')
+    assert data['blocks'] == [
+        head,
+        {'type': 'section', 'text': {'type': 'mrkdwn', 'text': 'Body.'}},
+        foot,
+    ]
+
+
+def test_attach_handles_a_footer_only_thread():
+    client = _client()
+    foot = _ctx('⤴ gist')
+    client._chrome_by_content = {'Body.': ([], [foot])}
     data = {'text': 'Body.'}
     client._attach_chrome(data, 'Body.', 'Body.')
     assert data['blocks'] == [
         {'type': 'section', 'text': {'type': 'mrkdwn', 'text': 'Body.'}},
-        chrome[0],
+        foot,
     ]
 
 
@@ -195,7 +284,7 @@ def test_attach_noop_when_no_chrome_registered():
 def test_attach_noop_for_content_without_chrome():
     """Replies get no chrome — only the OP is registered."""
     client = _client()
-    client._chrome_by_content = {'OP.': [{'type': 'context', 'elements': []}]}
+    client._chrome_by_content = {'OP.': ([], [_ctx('⤴ y')])}
     data = {'text': 'A reply.'}
     client._attach_chrome(data, 'A reply.', 'A reply.')
     assert data == {'text': 'A reply.'}
@@ -206,7 +295,7 @@ def test_attach_skipped_when_body_exceeds_section_limit():
     rather than splitting mid-mrkdwn."""
     client = _client()
     long_body = 'x' * (SLACK_SECTION_LIMIT + 1)
-    client._chrome_by_content = {long_body: [{'type': 'context', 'elements': []}]}
+    client._chrome_by_content = {long_body: ([], [_ctx('⤴ y')])}
     data = {'text': long_body}
     client._attach_chrome(data, long_body, long_body)
     assert 'blocks' not in data
@@ -215,21 +304,22 @@ def test_attach_skipped_when_body_exceeds_section_limit():
 def test_attach_applies_at_exactly_the_section_limit():
     client = _client()
     body = 'x' * SLACK_SECTION_LIMIT
-    client._chrome_by_content = {body: [{'type': 'context', 'elements': []}]}
+    client._chrome_by_content = {body: ([], [_ctx('⤴ y')])}
     data = {'text': body}
     client._attach_chrome(data, body, body)
     assert 'blocks' in data
 
 
-def test_promote_sends_no_blocks(monkeypatch):
+def test_promote_sends_no_blocks(monkeypatch, tmp_path):
     """Prod purity: chrome is attached only by the staging path, so a promoted
     message goes out as plain text with no chrome block."""
+    monkeypatch.chdir(tmp_path)
     client = _client()
     sent: list[dict] = []
 
-    def fake_request(method, data=None, **kw):
-        sent.append({'method': method, **(data or {})})
-        return {'ts': '9.9', 'ok': True}
+    def fake_request(endpoint, data=None, **kw):
+        sent.append({'method': endpoint, **(data or {})})
+        return {'ts': '9.9', 'ok': True, 'permalink': 'https://ex.slack.com/x'}
 
     monkeypatch.setattr(client, '_request', fake_request)
     state = _state(threads={'a': ThreadEntry(target=ThreadTarget(channel='C0PROD'))})
@@ -241,9 +331,27 @@ def test_promote_sends_no_blocks(monkeypatch):
     assert all('blocks' not in p for p in posts)
 
 
-def test_staging_chrome_cleared_after_sync(monkeypatch):
+def test_promote_records_the_permalink(monkeypatch, tmp_path):
+    """So later staging pushes can link the draft to what it became, offline."""
+    monkeypatch.chdir(tmp_path)
+    client = _client()
+    monkeypatch.setattr(client, '_request', lambda *a, **kw: {
+        'ts': '9.9', 'ok': True, 'permalink': 'https://ex.slack.com/archives/C0PROD/p99',
+    })
+    state = _state(threads={'a': ThreadEntry(target=ThreadTarget(channel='C0PROD'))})
+    client.promote_thread(
+        'a', _thread('a', 'Body.'), ThreadTarget(channel='C0PROD'), state, pace=0.0,
+    )
+    entry = state.thread('a')
+    assert (entry.posted_ts, entry.posted_url) == (
+        '9.9', 'https://ex.slack.com/archives/C0PROD/p99',
+    )
+
+
+def test_staging_chrome_cleared_after_sync(monkeypatch, tmp_path):
     """Cleared in `finally`, so a promote later in the same process can't
     inherit chrome from an earlier staging push."""
+    monkeypatch.chdir(tmp_path)
     client = _client()
     monkeypatch.setattr(client, '_request', lambda *a, **kw: {'ts': '1.1', 'ok': True})
     state = _state(staging_channel='C0S')
@@ -253,10 +361,127 @@ def test_staging_chrome_cleared_after_sync(monkeypatch):
     assert client._chrome_by_content is None
 
 
-def test_attach_uses_wire_text_in_the_section():
-    """The section carries the converted mrkdwn, matching what `text` carries."""
+# --- _reconcile_chrome: chrome converges even when the body doesn't change ---
+
+
+def _reconcile_client(monkeypatch, live_blocks: list[dict] | None) -> tuple[SlackClient, list]:
+    """A client whose staged OP currently renders ``live_blocks``."""
     client = _client()
-    client._chrome_by_content = {'*md*': [{'type': 'context', 'elements': []}]}
-    data = {'text': '*wire*'}
-    client._attach_chrome(data, '*md*', '*wire*')
-    assert data['blocks'][0]['text']['text'] == '*wire*'
+    calls: list[dict] = []
+
+    def fake_request(endpoint, data=None, **kw):
+        calls.append({'endpoint': endpoint, **(data or {})})
+        if endpoint == 'conversations.replies':
+            return {'messages': [{'ts': '1.1', 'text': 'Body.', 'blocks': live_blocks}]}
+        return {'ok': True, 'ts': '1.1'}
+
+    monkeypatch.setattr(client, '_request', fake_request)
+    return client, calls
+
+
+def test_context_texts_projects_only_context_blocks():
+    """Slack echoes blocks back with `block_id`s; the authored text is what's
+    comparable."""
+    blocks = [
+        {'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': '→ <#C0A>'}], 'block_id': 'xY1'},
+        {'type': 'section', 'text': {'type': 'mrkdwn', 'text': 'Body.'}},
+        {'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': '⤴ gist'}], 'block_id': 'zQ2'},
+    ]
+    assert SlackClient._context_texts(blocks) == ['→ <#C0A>', '⤴ gist']
+
+
+def test_context_texts_of_a_message_with_no_blocks():
+    assert SlackClient._context_texts(None) == []
+
+
+def test_reconcile_edits_when_live_chrome_is_missing(monkeypatch):
+    """The case that matters: a body `core.sync` SKIPped, whose chrome is due."""
+    client, calls = _reconcile_client(monkeypatch, None)
+    client._chrome_by_content = {'Body.': ([_ctx('→ <#C0A>')], [])}
+    assert client._reconcile_chrome('1.1', 'Body.', pace=0.0, jitter=0.0) is True
+    assert [c['endpoint'] for c in calls] == ['conversations.replies', 'chat.update']
+
+
+def test_reconcile_edit_carries_the_chrome(monkeypatch):
+    client, calls = _reconcile_client(monkeypatch, None)
+    head = _ctx('→ <#C0A>')
+    client._chrome_by_content = {'Body.': ([head], [])}
+    client._reconcile_chrome('1.1', 'Body.', pace=0.0, jitter=0.0)
+    update = [c for c in calls if c['endpoint'] == 'chat.update'][0]
+    assert update['blocks'] == [
+        head, {'type': 'section', 'text': {'type': 'mrkdwn', 'text': 'Body.'}},
+    ]
+
+
+def test_reconcile_noop_when_live_chrome_already_matches(monkeypatch):
+    """Idempotent: a second push with nothing changed edits nothing."""
+    live = [
+        _ctx('→ <#C0A>'),
+        {'type': 'section', 'text': {'type': 'mrkdwn', 'text': 'Body.'}},
+    ]
+    client, calls = _reconcile_client(monkeypatch, live)
+    client._chrome_by_content = {'Body.': ([_ctx('→ <#C0A>')], [])}
+    assert client._reconcile_chrome('1.1', 'Body.', pace=0.0, jitter=0.0) is False
+    assert [c['endpoint'] for c in calls] == ['conversations.replies']
+
+
+def test_reconcile_edits_when_chrome_drifted(monkeypatch):
+    """A thread promoted since the last push is now due a `✓ posted` link."""
+    live = [_ctx('→ <#C0A>')]
+    client, calls = _reconcile_client(monkeypatch, live)
+    client._chrome_by_content = {
+        'Body.': ([_ctx('→ <#C0A>  ·  ✓ <https://ex.slack.com/p99|posted>')], []),
+    }
+    assert client._reconcile_chrome('1.1', 'Body.', pace=0.0, jitter=0.0) is True
+
+
+def test_reconcile_noop_for_content_with_no_chrome(monkeypatch):
+    """Replies aren't registered, so they cost no API call either."""
+    client, calls = _reconcile_client(monkeypatch, None)
+    client._chrome_by_content = {'OP.': ([_ctx('→ <#C0A>')], [])}
+    assert client._reconcile_chrome('1.1', 'A reply.', pace=0.0, jitter=0.0) is False
+    assert calls == []
+
+
+def test_reconcile_noop_when_body_exceeds_section_limit(monkeypatch):
+    """Matches `_attach_chrome`'s bail-out, so it can't loop trying to converge
+    chrome that will never be attached."""
+    client, calls = _reconcile_client(monkeypatch, None)
+    long_body = 'x' * (SLACK_SECTION_LIMIT + 1)
+    client._chrome_by_content = {long_body: ([_ctx('→ <#C0A>')], [])}
+    assert client._reconcile_chrome('1.1', long_body, pace=0.0, jitter=0.0) is False
+    assert calls == []
+
+
+def test_push_applies_newly_due_chrome_to_an_unchanged_body(monkeypatch, tmp_path):
+    """End to end: `core.sync` compares content, so without an explicit
+    reconcile a promoted thread's `✓ posted` link would never appear until the
+    draft text happened to change."""
+    monkeypatch.chdir(tmp_path)
+    client = _client()
+    calls: list[dict] = []
+
+    def fake_request(endpoint, data=None, **kw):
+        calls.append({'endpoint': endpoint, **(data or {})})
+        if endpoint == 'conversations.replies':
+            # Body already in sync; no chrome on it yet.
+            return {'messages': [{'ts': '1.1', 'text': 'Body.', 'user': 'U0ME'}]}
+        return {'ok': True, 'ts': '1.1'}
+
+    monkeypatch.setattr(client, '_request', fake_request)
+    monkeypatch.setattr(SlackClient, 'bot_ids', property(lambda self: ('U0ME', None)))
+    state = _state(staging_channel='C0S', threads={'a': ThreadEntry(
+        staging_ts='1.1',
+        target=ThreadTarget(channel='C0A'),
+        state='posted',
+        posted_ts='9.9',
+        posted_url='https://ex.slack.com/archives/C0A/p99',
+    )})
+    client.sync_threads_staging(
+        [_thread('a', 'Body.')], state, pace=0.0, filenames={'a': '01-a.md'},
+    )
+    updates = [c for c in calls if c['endpoint'] == 'chat.update']
+    assert [SlackClient._context_texts(u['blocks']) for u in updates] == [[
+        '→ <#C0A>  ·  ✓ <https://ex.slack.com/archives/C0A/p99|posted>',
+        '⤴ <https://gist.github.com/abc123|01-a.md>',
+    ]]

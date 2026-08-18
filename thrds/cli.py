@@ -969,7 +969,10 @@ def slack_adopt(channel: str, ts: str, no_verify: bool, slug: str):
 
     Posts nothing. By default resolves the ts to a permalink first, since a
     mistyped ts would otherwise be recorded silently and only surface later as
-    a `promote` syncing against a message that doesn't exist.
+    a `promote` syncing against a message that doesn't exist. That permalink is
+    also kept (as `posted_url`), so staging chrome and `status` can link to the
+    real message without another API call; `-V` skips the check and therefore
+    records no URL.
     """
     state = _load_state(expected_platform='slack')
     _require_per_thread(state)
@@ -984,6 +987,7 @@ def slack_adopt(channel: str, ts: str, no_verify: bool, slug: str):
     if entry.state == 'posted':
         err(f"note: {slug} was already posted (ts {entry.posted_ts}); overwriting")
 
+    link = None
     if not no_verify:
         prev, client.channel = client.channel, resolved
         try:
@@ -996,6 +1000,7 @@ def slack_adopt(channel: str, ts: str, no_verify: bool, slug: str):
 
     entry.target = ThreadTarget(channel=resolved)
     entry.posted_ts = ts
+    entry.posted_url = link
     entry.state = 'posted'
     state.save()
     err(f"adopted {slug} → {resolved} @ {ts}")
@@ -1027,7 +1032,11 @@ def slack_drop(slug: str):
 
 @slack_cli.command("status")
 def slack_status():
-    """List this session's threads with their state and resolved destination."""
+    """List this session's threads: file, state, destination, posted permalink.
+
+    Four tab-separated columns, always — the last is empty for anything not
+    posted, so `cut -f4` stays honest.
+    """
     state = _load_state(expected_platform='slack')
     _require_per_thread(state)
     files = thread_files(Path.cwd())
@@ -1044,7 +1053,8 @@ def slack_status():
             dest = f'{target.channel} @ {target.thread_ts}'
         else:
             dest = target.channel
-        click.echo(f'{tf.name}\t{st}\t{dest}')
+        url = entry.posted_url if entry is not None and entry.posted_url else ''
+        click.echo(f'{tf.name}\t{st}\t{dest}\t{url}')
 
 
 @slack_cli.command("migrate")

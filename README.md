@@ -152,13 +152,20 @@ Every commit is rebuilt with the doc split into thread files, preserving message
 
 **Destination is a property of the thread, not the session.** Each thread records its own `{channel, thread_ts?}` target in `thrds.json`; the session-level `prod_channel` is just a default for threads that don't set one. A target with no `thread_ts` posts a new top-level message; with one, the thread's messages go in as replies to that existing message — so "draft a considered reply to someone else's post" and "batch six messages into one channel" are the same mechanism.
 
-**Staging-only chrome.** Staged messages carry a subtle context line — `⤴ 01-slug.md` linking to the gist (so the versions being captured are auditable from Slack) and `→ #channel` showing where the draft is bound. It's configured in `thrds.json` (`staging_chrome`), never written into doc content:
+**Staging-only chrome.** Staged messages get a subtle context line above and below the body — a *header* answering "where is this aimed, and where did it land" (`→ #channel  ·  ✓ posted`) and a *footer* carrying provenance (`⤴ 01-slug.md`, linking to the gist, so the versions being captured are auditable from Slack). It's configured in `thrds.json` (`staging_chrome`), never written into doc content:
 
 ```jsonc
-"staging_chrome": { "gist_link": true, "target_link": true, "style": "context_block" }
+"staging_chrome": { "gist_link": true, "target_link": true, "posted_link": true, "style": "context_block" }
 ```
 
-The body goes out as the message's `text` *and* as a section block, with chrome appended as a separate `context` block. Since `pull` reads `text`, chrome cannot round-trip into a doc even in principle — there's no strip step that could fail open and publish a secret-gist URL, and the body you promote is byte-identical to the body you reviewed. (Bodies over Slack's 3000-char section limit post without chrome rather than being split mid-mrkdwn.)
+The body goes out as the message's `text` *and* as a section block, with chrome as `context` blocks around it. That split buys two guarantees for free:
+
+- **Chrome can't leak into a doc.** `pull` reads `text`, so there's no strip step that could fail open and publish a secret-gist URL — the body you promote is byte-identical to the body you reviewed.
+- **Chrome can't unfurl.** Slack only unfurls links found in `text`, and no chrome link is ever in `text`.
+
+(Bodies over Slack's 3000-char section limit post without chrome rather than being split mid-mrkdwn.)
+
+The `✓ posted` link appears once a thread has gone out, so the staging channel doubles as an index of what shipped where. It's the permalink `promote`/`adopt` already fetched, stored on the thread as `posted_url` — `status` prints it as a fourth column.
 
 **Prod push is per-thread and never whole-doc.** `promote` resolves the destination, prints it with the exact body, asks, then posts only that thread — and never archives the staging channel, because your other drafts are still live. Archiving is its own verb, refusing until every thread is `posted` or `dropped` (`-f` overrides).
 

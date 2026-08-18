@@ -402,17 +402,33 @@ def test_status_lists_threads_with_state_and_destination(session, spy):
     state.prod_channel = 'C0DEFAULT'
     state.save(session)
     result = _run('status')
-    assert result.stdout.rstrip().split('\n') == [
-        '01-alpha.md\tdraft\tC0A @ 1.5',
-        '02-beta.md\tready\tC0DEFAULT',
+    assert result.stdout.rstrip('\n').split('\n') == [
+        '01-alpha.md\tdraft\tC0A @ 1.5\t',
+        '02-beta.md\tready\tC0DEFAULT\t',
     ]
 
 
 def test_status_marks_threads_with_no_target(session, spy):
     result = _run('status')
-    assert result.stdout.rstrip().split('\n') == [
-        '01-alpha.md\tdraft\t(no target)',
-        '02-beta.md\tdraft\t(no target)',
+    assert result.stdout.rstrip('\n').split('\n') == [
+        '01-alpha.md\tdraft\t(no target)\t',
+        '02-beta.md\tdraft\t(no target)\t',
+    ]
+
+
+def test_status_shows_the_posted_permalink(session, spy):
+    """Four columns always, so `cut -f4` stays honest across mixed states."""
+    state = SessionState.load(session)
+    entry = state.thread('alpha')
+    entry.target = ThreadTarget(channel='C0A')
+    entry.state = 'posted'
+    entry.posted_ts = '9.9'
+    entry.posted_url = 'https://ex.slack.com/archives/C0A/p99'
+    state.save(session)
+    result = _run('status')
+    assert result.stdout.rstrip('\n').split('\n') == [
+        '01-alpha.md\tposted\tC0A\thttps://ex.slack.com/archives/C0A/p99',
+        '02-beta.md\tdraft\t(no target)\t',
     ]
 
 
