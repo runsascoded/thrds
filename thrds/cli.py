@@ -1674,5 +1674,17 @@ def main():
     cli()
 
 
+def slack_main():
+    """Entry point for `slck` — `thrds slack …` without the prefix.
+
+    Invokes the very same :data:`slack_cli` group object, so every verb,
+    option and help string is shared; there is nothing to keep in sync. This
+    exists instead of per-verb shell aliases because an alias list needs one
+    entry per verb and silently goes stale as verbs are added, while a group
+    entry point picks up new ones for free.
+    """
+    slack_cli(prog_name='slck')
+
+
 if __name__ == '__main__':
     main()

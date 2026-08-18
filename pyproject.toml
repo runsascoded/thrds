@@ -15,6 +15,8 @@ classifiers = [
 
 [project.scripts]
 thrds = "thrds.cli:main"
+# `slck <verb>` == `thrds slack <verb>`; same click group, nothing duplicated.
+slck = "thrds.cli:slack_main"
 
 [project.urls]
 Homepage = "https://github.com/runsascoded/thrds"

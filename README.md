@@ -123,6 +123,8 @@ Foreign (non-editable) messages — e.g. human replies in a bot thread — are a
 
 **`thrds slack …`** — draft multi-thread Slack posts locally, sync to a staging private channel, promote to a real prod channel:
 
+Installing `thrds` also installs **`slck`**, which *is* the `thrds slack` group — same click group object, so every verb, flag and help string is shared and `slck push` ≡ `thrds slack push`. (An alias list would need one entry per verb and go stale as verbs are added; an entry point picks up new ones for free.)
+
 ```bash
 thrds slack init draft.md              # scaffold session dir + gist mirror
 thrds slack migrate                    # split the doc into per-thread NN-slug.md files

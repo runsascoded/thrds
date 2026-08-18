@@ -5,26 +5,39 @@
 # the single-letter slot (used more than CRUD in practice); the two CRUD verbs
 # that would collide with session names (`tsp`=push vs post, `tsr`=recover vs
 # rm) get 2-letter suffixes (`tspo`, `tsrm`).
+#
+# `slck` (installed alongside `thrds`) is `thrds slack` as its own command, so
+# every verb is reachable as `slck <verb>` without an alias. The `ts*` aliases
+# below stay for the handful of verbs used often enough that two more
+# keystrokes matter; anything not listed here is just `slck <verb>`.
 
 # --- thrds slack (session verbs) ---
-alias tsi='thrds slack init'            # init a session for a doc
-alias tsp='thrds slack push'            # sync doc → staging PC (+ `-p` for prod)
-alias tsl='thrds slack pull'            # pull doc from Slack (+ `-w` to write back)
-alias tsd='thrds slack diff'            # local vs Slack
-alias tsa='thrds slack archive'         # archive the staging PC
-alias tso='thrds slack open'            # browse gist (default)
-alias tsos='thrds slack open -s'        # browse staging PC
-alias tsop='thrds slack open -p'        # browse prod channel
-alias tsls='thrds slack list-sessions'  # what sessions exist in a channel
-alias tsr='thrds slack recover'         # rebuild state from Slack metadata
+alias tsi='slck init'                   # init a session for a doc
+alias tsp='slck push'                   # sync threads → staging PC
+alias tsl='slck pull'                   # pull from Slack (+ `-w` to write back)
+alias tsd='slck diff'                   # local vs Slack
+alias tsa='slck archive'                # archive the staging PC
+alias tso='slck open'                   # browse gist (default)
+alias tsos='slck open -s'               # browse staging PC
+alias tsop='slck open -p'               # browse prod channel
+alias tsls='slck list-sessions'         # what sessions exist in a channel
+alias tsr='slck recover'                # rebuild state from Slack metadata
+
+# --- thrds slack (per-thread model) ---
+alias tss='slck status'                 # per-thread state + destination
+alias tspr='slck promote'               # post ONE thread to its target
+alias tsdr='slck drop'                  # mark a thread abandoned
+alias tsad='slck adopt'                 # record an already-posted message
+alias tsm='slck migrate'                # legacy doc → per-thread files
+alias tsrp='slck replay'                # rewrite history → per-thread files
 
 # --- thrds slack (CRUD, raw-mrkdwn by default) ---
-alias tsh='thrds slack history'         # last N messages in a channel
-alias tst='thrds slack thread'          # OP + replies for a thread ts
-alias tsrm='thrds slack rm'             # delete msg(s) by ts (+ `-f` orphans_ok)
-alias tspo='thrds slack post'           # post raw mrkdwn (+ `-m` for md→mrkdwn)
-alias tse='thrds slack edit'            # edit msg by ts (raw by default)
-alias tspl='thrds slack permalink'      # get permalink URL
+alias tsh='slck history'                # last N messages in a channel
+alias tst='slck thread'                 # OP + replies for a thread ts
+alias tsrm='slck rm'                    # delete msg(s) by ts (+ `-f` orphans_ok)
+alias tspo='slck post'                  # post raw mrkdwn (+ `-m` for md→mrkdwn)
+alias tse='slck edit'                   # edit msg by ts (raw by default)
+alias tspl='slck permalink'             # get permalink URL
 
 # --- thrds capture (gist-only trajectory, no platform target) ---
 alias tci='thrds capture init'          # init a capture-only session
