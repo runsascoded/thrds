@@ -79,7 +79,8 @@ from .doc import Doc
 from .md import diff_docs, parse_doc, serialize_doc
 from .migrate import apply_migration, plan_migration
 from .slack import ScanCapReached, SlackClient
-from .state import STATE_PATH, SessionState
+from .state import STATE_PATH, SessionState, ThreadTarget
+from .threadfile import find_thread, thread_files
 
 
 def err(*msg):
@@ -683,8 +684,14 @@ def slack_diff(channel: str | None, prod: bool, doc_path: str | None):
 
 
 @slack_cli.command("archive")
-def slack_archive():
+@click.option('-f', '--force', is_flag=True, help='Archive even with threads still pending.')
+def slack_archive(force: bool):
     """Archive this session's staging PC (reversible via Slack UI/API `unarchive`).
+
+    Refuses while any thread is still `draft` or `ready` — tearing down the
+    scratchpad with live drafts in it is exactly the failure the per-thread
+    model exists to prevent, and it's why prod push no longer auto-archives.
+    Mark stragglers with `thrds slack drop <slug>`, or pass `-f`.
 
     Idempotent — subsequent invocations no-op via the ``state.staging_archived``
     flag. Auto-commits + pushes the flag change to the gist mirror.
@@ -696,12 +703,147 @@ def slack_archive():
     if state.staging_archived:
         err(f"Already archived: {state.staging_channel}")
         return
+    pending = state.pending_threads()
+    if pending and not force:
+        raise click.UsageError(
+            f"{len(pending)} thread(s) still pending: {', '.join(pending)}. "
+            f"Promote or drop them first, or pass -f to archive anyway."
+        )
     client = _make_slack_client()
     client.archive_channel(state.staging_channel)
     state.staging_archived = True
     state.save()
     err(f"archived staging PC: {state.staging_channel}")
     _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: archive {state.staging_channel}')
+
+
+def _require_per_thread(state: SessionState) -> None:
+    """Reject a legacy session on a per-thread verb, pointing at `migrate`."""
+    if state.is_legacy:
+        raise click.UsageError(
+            'This session is still on the legacy single-doc layout; '
+            'run `thrds slack migrate` first.'
+        )
+
+
+@slack_cli.command("promote")
+@click.option('-c', '--channel', help='Override the thread\'s recorded target channel.')
+@click.option('-n', '--dry-run', is_flag=True, help='Resolve and render; post nothing.')
+@click.option('-t', '--thread-ts', help='Post as a reply into this existing thread.')
+@click.option('-y', '--yes', is_flag=True, help='Skip the confirmation prompt.')
+@click.argument('slug')
+def slack_promote(channel: str | None, dry_run: bool, thread_ts: str | None, yes: bool, slug: str):
+    """Post a single thread (SLUG) to its target channel.
+
+    The per-thread replacement for the old `push --prod`, which fired the
+    *whole doc* at one channel and then archived the staging PC — wrong when
+    the session holds several drafts at different readiness, bound for
+    different places (see ``specs/per-thread-model.md``).
+
+    Resolves the destination from the thread's own metadata (falling back to
+    the session's `prod_channel`), prints it alongside the exact body that
+    will be posted, and asks before sending. Posts only this thread, and
+    never archives the staging channel — other drafts are still live.
+
+    With a target `thread_ts` (recorded, or passed via `-t`), the messages go
+    into that existing thread as replies; the other person's messages are
+    left untouched.
+    """
+    state = _load_state(expected_platform='slack')
+    _require_per_thread(state)
+
+    try:
+        _, thread = find_thread(Path.cwd(), slug)
+    except ValueError as e:
+        raise click.UsageError(str(e))
+
+    target = state.target_for(slug)
+    if channel is not None:
+        target = ThreadTarget(channel=channel, thread_ts=thread_ts or (target.thread_ts if target else None))
+    elif thread_ts is not None:
+        if target is None:
+            raise click.UsageError(
+                f'No target channel for {slug!r} — pass --channel alongside --thread-ts.'
+            )
+        target = ThreadTarget(channel=target.channel, thread_ts=thread_ts)
+    if target is None:
+        raise click.UsageError(
+            f'No target for thread {slug!r} — pass --channel, or set the session\'s '
+            f'prod_channel, before promoting.'
+        )
+
+    client = _make_slack_client()
+    resolved = _resolve_channel(client, target.channel)
+    target = ThreadTarget(channel=resolved, thread_ts=target.thread_ts)
+
+    entry = state.thread(slug)
+    kind = 'reply into' if target.thread_ts else 'new thread in'
+    err(f"promote {slug} → {kind} {target.channel}"
+        + (f" @ {target.thread_ts}" if target.thread_ts else ''))
+    if entry.state == 'posted':
+        err(f"  note: already posted (ts {entry.posted_ts}) — this will sync it in place")
+    err('  ---')
+    for i, m in enumerate(m for m in thread.messages if m.author is None):
+        prefix = '  OP   ' if i == 0 else f'  +{i:<4d}'
+        for j, line in enumerate(m.content.split('\n')):
+            err(f"{prefix if j == 0 else '       '} {line}")
+    err('  ---')
+
+    if dry_run:
+        err('(dry run — nothing posted)')
+        return
+    if not yes:
+        click.confirm('Post it?', abort=True, err=True)
+
+    result = client.promote_thread(slug, thread, target, state)
+    state.save()
+    err(f"posted {slug}: {result.thread_id}")
+    _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: promote {slug} → {target.channel}')
+
+
+@slack_cli.command("drop")
+@click.argument('slug')
+def slack_drop(slug: str):
+    """Mark thread SLUG as abandoned (`dropped`) without posting it.
+
+    The other terminal state besides `posted`. Exists so the archive gate has
+    a way to say "this draft is finished business" about a thread that is
+    never going out — without deleting the file, since the trajectory of a
+    draft that got abandoned is still part of the record.
+    """
+    state = _load_state(expected_platform='slack')
+    _require_per_thread(state)
+    entry = state.thread(slug)
+    if entry.state == 'posted':
+        raise click.UsageError(
+            f"Thread {slug!r} was already posted (ts {entry.posted_ts}); refusing to mark it dropped."
+        )
+    entry.state = 'dropped'
+    state.save()
+    err(f"dropped {slug}")
+    _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: drop {slug}')
+
+
+@slack_cli.command("status")
+def slack_status():
+    """List this session's threads with their state and resolved destination."""
+    state = _load_state(expected_platform='slack')
+    _require_per_thread(state)
+    files = thread_files(Path.cwd())
+    if not files:
+        err('No thread files in this session.')
+        return
+    for tf in files:
+        entry = state.threads.get(tf.slug)
+        st = entry.state if entry is not None else 'draft'
+        target = state.target_for(tf.slug)
+        if target is None:
+            dest = '(no target)'
+        elif target.thread_ts:
+            dest = f'{target.channel} @ {target.thread_ts}'
+        else:
+            dest = target.channel
+        click.echo(f'{tf.name}\t{st}\t{dest}')
 
 
 @slack_cli.command("migrate")

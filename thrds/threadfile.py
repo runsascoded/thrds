@@ -26,6 +26,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .doc import DocThread
+
 
 # `01-cw-quickwins.md` → (1, 'cw-quickwins'). The slug charset matches
 # `md._HEADER_RE`'s, so slugs that were legal as `=== slug` stay legal as
@@ -110,6 +112,31 @@ def thread_files(session_dir: Path | str = '.') -> list[ThreadFile]:
         by_slug[slug] = tf
         found.append(tf)
     return sorted(found)
+
+
+def read_thread(tf: ThreadFile) -> DocThread:
+    """Parse one :class:`ThreadFile` into a `DocThread`, slug from the filename."""
+    from .md import parse_thread  # local import: md imports nothing from here, but keep the edge one-way
+    return parse_thread(tf.path.read_text(), slug=tf.slug).thread
+
+
+def read_threads(session_dir: Path | str = '.') -> list[DocThread]:
+    """Every thread in ``session_dir``, in file order.
+
+    File order (the ``NN`` prefix) is post order for a batch push, which is why
+    it's deterministic rather than whatever ``iterdir`` happens to yield.
+    """
+    return [read_thread(tf) for tf in thread_files(session_dir)]
+
+
+def find_thread(session_dir: Path | str, slug: str) -> tuple[ThreadFile, DocThread]:
+    """The ``(file, thread)`` for ``slug``; raises with the available slugs if absent."""
+    files = thread_files(session_dir)
+    for tf in files:
+        if tf.slug == slug:
+            return tf, read_thread(tf)
+    available = ', '.join(f.slug for f in files) or '(none)'
+    raise ValueError(f"No thread {slug!r} in this session; available: {available}")
 
 
 def next_index(files: list[ThreadFile]) -> int:

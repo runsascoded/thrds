@@ -33,7 +33,7 @@ from .refs import (
     thread_has_refs,
     validate_refs,
 )
-from .state import SessionState
+from .state import SessionState, ThreadTarget
 
 THRDS_METADATA_EVENT_TYPE = 'thrds'
 
@@ -920,6 +920,67 @@ class SlackClient:
                 thread_results=thread_results,
                 deleted_slugs=stale_slugs,
             )
+        finally:
+            self.channel = prev_channel
+
+    def promote_thread(
+        self,
+        slug: str,
+        thread: DocThread,
+        target: ThreadTarget,
+        state: SessionState,
+        dry_run: bool = False,
+        pace: float = 0.4,
+        jitter: float = 0.0,
+        suppress_unfurls: bool = True,
+    ) -> SyncResult:
+        """Post one thread to its own target. Never touches any other thread.
+
+        The per-thread replacement for ``sync_doc_prod``'s whole-doc push (see
+        ``specs/per-thread-model.md``). Two shapes, decided by the target:
+
+        - ``target.thread_ts is None`` → the thread's messages become a new
+          top-level message plus its replies.
+        - ``target.thread_ts`` set → the messages go *into* that existing
+          thread as replies. Slack messages we don't own come back
+          ``editable=False`` (see :meth:`list_messages`), so ``core.sync``
+          preserves the other person's OP and replies and reconciles only
+          ours — which is what makes "draft a considered reply to someone
+          else's message" the same code path as everything else.
+
+        Deliberately does **not** archive the staging channel: other threads in
+        the session are still live drafts. Archiving is its own verb, gated on
+        every thread reaching a terminal state.
+        """
+        ours = [m for m in thread.messages if m.author is None]
+        if not ours:
+            raise ValueError(
+                f"Thread {slug!r}: no messages of ours to post."
+            )
+
+        prev_channel = self.channel
+        self.channel = target.channel
+        try:
+            core_thread = Thread(messages=[m.content for m in ours])
+            metadata = {
+                m.content: self._thrds_metadata(state, slug, "op" if i == 0 else "reply")
+                for i, m in enumerate(ours)
+            }
+            result = self.sync(
+                core_thread,
+                thread_ts=target.thread_ts or state.thread(slug).posted_ts,
+                dry_run=dry_run,
+                pace=pace,
+                jitter=jitter,
+                suppress_unfurls=suppress_unfurls,
+                metadata=metadata,
+            )
+            if not dry_run:
+                entry = state.thread(slug)
+                entry.posted_ts = result.thread_id
+                entry.target = target
+                entry.state = 'posted'
+            return result
         finally:
             self.channel = prev_channel
 
