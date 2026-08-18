@@ -136,6 +136,16 @@ thrds slack list-sessions #foo         # what thrds sessions exist in #foo
 thrds slack recover -i <sid> #foo      # rebuild a lost session from Slack metadata
 ```
 
+**Converting an existing session.** `migrate` converts the working tree; `replay` converts the *git history*, so a session kept as a writing example can be read without learning the retired `===` syntax:
+
+```bash
+thrds slack replay -n          # plan + verify, write nothing
+thrds slack replay             # write the rewritten history to branch `per-thread`
+git log --stat per-thread      # inspect, then move the remote yourself
+```
+
+Every commit is rebuilt with the doc split into thread files, preserving message, author, committer and dates. Indices are assigned **globally** from the final commit's ordering, so a slug keeps one number for all time and a commit where a thread doesn't exist yet simply has a gap — numbering each commit independently would renumber every thread below an insertion, and a rename is precisely what breaks the per-file history the layout exists to produce. Before writing anything it verifies that every commit's new files parse back to exactly the threads the old doc parsed to; it refuses if not, and never force-pushes.
+
 **One file per thread.** A session directory holds `01-slug.md`, `02-slug.md`, … — one Slack thread each (`+++` still separates replies *within* a thread). Per-file git history then reads as "*this message* went v2→v3" rather than "the doc changed", which is the point when the gist history is the artifact you're keeping.
 
 **Destination is a property of the thread, not the session.** Each thread records its own `{channel, thread_ts?}` target in `thrds.json`; the session-level `prod_channel` is just a default for threads that don't set one. A target with no `thread_ts` posts a new top-level message; with one, the thread's messages go in as replies to that existing message — so "draft a considered reply to someone else's post" and "batch six messages into one channel" are the same mechanism.

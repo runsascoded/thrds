@@ -78,9 +78,10 @@ from . import mirror
 from .doc import Doc
 from .md import diff_docs, parse_doc, serialize_doc, serialize_thread
 from .migrate import apply_migration, plan_migration
+from .replay import ReplayError, plan_replay, verify_plan, write_replay
 from .slack import ScanCapReached, SlackClient
 from .state import STATE_PATH, SessionState, ThreadTarget
-from .threadfile import find_thread, read_threads, thread_files
+from .threadfile import find_thread, read_threads, thread_filename, thread_files
 
 
 def err(*msg):
@@ -890,6 +891,63 @@ def slack_promote(channel: str | None, dry_run: bool, thread_ts: str | None, yes
     err(f"posted {slug}: {result.thread_id}")
     _notify_promoted(client, slug, target.channel, result.thread_id)
     _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: promote {slug} → {target.channel}')
+
+
+@slack_cli.command("replay")
+@click.option('-b', '--branch', default='per-thread', show_default=True, help='Branch to write the rewritten history to.')
+@click.option('-n', '--dry-run', is_flag=True, help='Plan and verify; write no branch.')
+@click.option('-r', '--ref', default='HEAD', show_default=True, help='Ref whose history to rewrite.')
+def slack_replay(branch: str, dry_run: bool, ref: str):
+    """Rewrite this session's git history into the per-thread layout.
+
+    `migrate` converts the working tree; `replay` converts the *history*, so a
+    session collected as a writing example can be read without learning the
+    retired `===` syntax. Every commit is rebuilt with the doc split into
+    `NN-slug.md` files, preserving message, author, committer, and dates.
+
+    Indices are assigned globally, from the final commit's ordering — a slug
+    keeps one number for all time, and a commit where the thread doesn't exist
+    yet just has a gap. Numbering each commit independently would renumber
+    every thread below an insertion, and a rename breaks the per-file history
+    this layout exists to produce.
+
+    Verifies before writing: for every commit, the new files must parse back to
+    exactly the threads the old doc parsed to. Writes a new branch and never
+    force-pushes — inspect it, then move the remote yourself.
+    """
+    state = _load_state(expected_platform='slack')
+    doc_path = state.doc_path
+    if doc_path is None:
+        raise click.UsageError(
+            'This session has no `doc_path` — its history is already per-thread, '
+            'or it was migrated before replaying (replay reads the legacy doc).'
+        )
+    repo = Path.cwd()
+    try:
+        plans, index_by_slug = plan_replay(repo, ref, doc_path)
+        problems = verify_plan(repo, plans, doc_path)
+    except ReplayError as e:
+        raise click.UsageError(str(e))
+
+    err(f'replay {ref}: {len(plans)} commit(s), {len(index_by_slug) - 1} thread(s)')
+    for slug, i in sorted(index_by_slug.items(), key=lambda kv: kv[1]):
+        err(f'  {thread_filename(i, slug)}')
+    for plan in plans:
+        err(f'  {plan.sha[:8]} {plan.subject[:48]:<48s} {len(plan.md_names)} file(s)')
+
+    if problems:
+        err('verification FAILED:')
+        for p in problems:
+            err(f'  {p}')
+        raise click.UsageError('Refusing to write a rewrite that loses content.')
+    err('verification: every commit round-trips identically')
+
+    if dry_run:
+        err('(dry run — no branch written)')
+        return
+    head = write_replay(repo, plans, branch)
+    err(f'wrote {branch} → {head[:8]}')
+    err(f'inspect with: git log --stat {branch}')
 
 
 @slack_cli.command("drop")
