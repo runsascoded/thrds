@@ -248,6 +248,29 @@ class SlackClient:
         }, method="GET")
         return result.get("messages", [])
 
+    @staticmethod
+    def _body_text(m: dict) -> str:
+        """A message's body, preferring its section block over ``text``.
+
+        **Slack strips newlines from ``text`` when a message carries
+        ``blocks``** — ``text`` demotes to a one-line notification fallback,
+        and the section block becomes the faithful copy. Reading ``text``
+        regardless would silently flatten every multi-line staged message on
+        the next pull.
+
+        Only ``section`` blocks are read, never ``context``, so chrome still
+        cannot round-trip into a doc. Falls back to ``text`` for anything not
+        shaped like one of ours (no blocks, or several sections — a foreign
+        message we don't author and won't write back).
+        """
+        sections = [
+            b for b in (m.get("blocks") or [])
+            if b.get("type") == "section" and (b.get("text") or {}).get("text")
+        ]
+        if len(sections) == 1:
+            return sections[0]["text"]["text"]
+        return m.get("text", "")
+
     def list_messages(self, thread_id: str) -> list[Message]:
         result = self._request("conversations.replies", {
             "channel": self.channel,
@@ -259,7 +282,7 @@ class SlackClient:
                 id=m["ts"],
                 # Convert Slack mrkdwn back to our local markdown form so pulled
                 # content is diff-clean against local docs. See `mrkdwn.py`.
-                content=_slack_to_md(m.get("text", "")),
+                content=_slack_to_md(self._body_text(m)),
                 # Slack bot_messages come back with `user: null` and `bot_id`
                 # set; human messages carry `user`. Match either so our own
                 # bot's posts are correctly marked editable.
@@ -1419,11 +1442,12 @@ class SlackClient:
 
         Runs ``to_markdown`` on the raw Slack text so pulled content is in the
         same format the local doc uses — the roundtrip diff is a real content
-        diff rather than a format-mismatch diff.
+        diff rather than a format-mismatch diff. Body comes from
+        :meth:`_body_text`, since a staged message's ``text`` is newline-free.
         """
         user_id, bot_id = self.bot_ids
         ours = raw.get("user") == user_id or (bot_id is not None and raw.get("bot_id") == bot_id)
-        content = _slack_to_md(raw.get("text", ""))
+        content = _slack_to_md(self._body_text(raw))
         if ours:
             return DocMessage(content=content, author=None)
         return DocMessage(content=content, author=self._resolve_user_name(raw["user"]))

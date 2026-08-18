@@ -485,3 +485,58 @@ def test_push_applies_newly_due_chrome_to_an_unchanged_body(monkeypatch, tmp_pat
         '→ <#C0A>  ·  ✓ <https://ex.slack.com/archives/C0A/p99|posted>',
         '⤴ <https://gist.github.com/abc123|01-a.md>',
     ]]
+
+
+# --- _body_text: Slack strips newlines from `text` when blocks are present ---
+
+
+def _msg(text: str, blocks: list[dict] | None = None) -> dict:
+    m = {'ts': '1.1', 'text': text}
+    if blocks is not None:
+        m['blocks'] = blocks
+    return m
+
+
+def _section(text: str) -> dict:
+    return {'type': 'section', 'text': {'type': 'mrkdwn', 'text': text}}
+
+
+def test_body_text_prefers_the_section_over_flattened_text():
+    """The regression this exists for: Slack demotes `text` to a one-line
+    notification fallback once a message carries blocks, so reading `text`
+    would flatten every multi-line staged message on the next pull."""
+    body = 'Line one.\n\n1. item\n2. item'
+    m = _msg('Line one. 1. item 2. item', [_ctx('→ <#C0A>'), _section(body), _ctx('⤴ g')])
+    assert SlackClient._body_text(m) == body
+
+
+def test_body_text_never_reads_a_context_block():
+    """Chrome still can't round-trip into a doc — only sections are read."""
+    m = _msg('', [_ctx('→ <#C0A>'), _ctx('⤴ gist')])
+    assert SlackClient._body_text(m) == ''
+
+
+def test_body_text_falls_back_to_text_without_blocks():
+    assert SlackClient._body_text(_msg('Plain\nbody.')) == 'Plain\nbody.'
+
+
+def test_body_text_falls_back_for_a_foreign_multi_section_message():
+    """Several sections isn't a shape we author; joining them would be a guess."""
+    m = _msg('fallback', [_section('a'), _section('b')])
+    assert SlackClient._body_text(m) == 'fallback'
+
+
+def test_body_text_ignores_an_empty_section():
+    m = _msg('fallback', [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': ''}}])
+    assert SlackClient._body_text(m) == 'fallback'
+
+
+def test_pull_reads_the_section_so_multiline_bodies_survive(monkeypatch):
+    """End to end through `list_messages`, the path a pull actually takes."""
+    body = 'Para one.\n\nPara two.'
+    client = _client()
+    monkeypatch.setattr(SlackClient, 'bot_ids', property(lambda self: ('U0ME', None)))
+    monkeypatch.setattr(client, '_request', lambda *a, **kw: {'messages': [
+        _msg('Para one. Para two.', [_section(body), _ctx('⤴ g')]) | {'user': 'U0ME'},
+    ]})
+    assert [m.content for m in client.list_messages('1.1')] == [body]
