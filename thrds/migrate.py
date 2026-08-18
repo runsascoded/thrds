@@ -20,6 +20,7 @@ lived between its ``===`` header and the next one.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,6 +28,9 @@ from .doc import Doc, DocMessage, DocThread, Frontmatter
 from .md import serialize_thread
 from .state import SessionState, ThreadEntry, ThreadTarget
 from .threadfile import thread_filename, thread_files
+
+# Slack message timestamps: `<epoch-seconds>.<microseconds>`.
+TS_RE = re.compile(r'\d+\.\d+')
 
 
 # The preamble — a bare top-level message with no replies — becomes an ordinary
@@ -59,6 +63,38 @@ class MigrationPlan:
     @property
     def threads_map(self) -> dict[str, ThreadEntry]:
         return {t.slug: t.entry for t in self.threads}
+
+
+def validate_prod_threads(state: SessionState) -> None:
+    """Reject a ``prod_threads`` that isn't ``{channel: {slug: ts}}``.
+
+    Migration reads this map to decide which threads are already `posted`. A
+    differently-shaped one — e.g. hand-backfilled as ``{slug: {channel, ts,
+    …}}`` — matches nothing, so every posted thread would migrate as `draft`:
+    the record of what shipped, silently lost, and the archive gate fooled into
+    thinking the work is still pending. Nothing downstream could detect that,
+    so it has to be caught here.
+    """
+    for channel, by_slug in sorted(state.prod_threads.items()):
+        # Slack ts values are the discriminator: in the canonical shape every
+        # leaf is one, and in any other shape (`{slug: {channel, state, …}}`)
+        # essentially none are. Type-checking alone wouldn't separate them —
+        # a foreign map's values are strings too, just not timestamps.
+        bad = (
+            not isinstance(by_slug, dict)
+            or not by_slug
+            or any(
+                not isinstance(v, str) or not TS_RE.fullmatch(v)
+                for v in by_slug.values()
+            )
+        )
+        if bad:
+            raise ValueError(
+                f"prod_threads[{channel!r}] is not a {{slug: ts}} map; thrds writes "
+                f"prod_threads as {{channel: {{slug: ts}}}}. Rewrite it in that shape, "
+                f"or clear it and re-record each posted thread with "
+                f"`thrds slack adopt` after migrating"
+            )
 
 
 def _prod_placement(state: SessionState, slug: str) -> tuple[str, str] | None:
@@ -128,6 +164,7 @@ def plan_migration(
     override of the session's destination, which is exactly what a per-thread
     target is, only now per thread.
     """
+    validate_prod_threads(state)
     session_slug = state.session_slug or Path(doc_path).stem
 
     default_target: ThreadTarget | None = None

@@ -5,7 +5,7 @@ import pytest
 
 from thrds import Doc, DocMessage, DocThread, Frontmatter, SessionState, ThreadEntry, ThreadTarget
 from thrds.md import parse_doc, parse_thread
-from thrds.migrate import apply_migration, plan_migration
+from thrds.migrate import apply_migration, plan_migration, validate_prod_threads
 
 
 def _doc(*specs: tuple[str, list[str]], preamble: str | None = None) -> Doc:
@@ -277,3 +277,43 @@ def test_apply_state_round_trips_through_save_load(tmp_path):
     apply_migration(tmp_path, state, plan)
     state.save(tmp_path)
     assert SessionState.load(tmp_path).threads == state.threads
+
+
+# --- prod_threads shape validation ---
+
+
+def test_migrate_rejects_a_slug_keyed_prod_threads():
+    """A hand-backfilled `{slug: {channel, ts, …}}` matches nothing, so every
+    posted thread would migrate as `draft` — the record of what shipped,
+    silently lost."""
+    state = SessionState.new(doc_path='d.md', prod_threads={
+        'cw-summary': {'channel': 'C0P', 'ts': '9.9', 'state': 'posted'},
+    })
+    with pytest.raises(ValueError) as e:
+        validate_prod_threads(state)
+    assert str(e.value) == (
+        "prod_threads['cw-summary'] is not a {slug: ts} map; thrds writes "
+        "prod_threads as {channel: {slug: ts}}. Rewrite it in that shape, "
+        "or clear it and re-record each posted thread with "
+        "`thrds slack adopt` after migrating"
+    )
+
+
+def test_migrate_accepts_the_canonical_prod_threads_shape():
+    state = SessionState.new(doc_path='d.md', prod_threads={'C0P': {'a': '9.9'}})
+    assert validate_prod_threads(state) is None
+
+
+def test_migrate_accepts_an_empty_prod_threads():
+    assert validate_prod_threads(SessionState.new(doc_path='d.md')) is None
+
+
+def test_plan_migration_validates_prod_threads():
+    """Wired into the plan, not just available — a bad shape can't reach apply."""
+    doc = parse_doc('=== a\n\nBody.\n')
+    state = SessionState.new(doc_path='d.md', prod_threads={
+        'a': {'channel': 'C0P', 'ts': '9.9'},
+    })
+    with pytest.raises(ValueError) as e:
+        plan_migration(doc, state, 'd.md')
+    assert str(e.value).startswith("prod_threads['a'] is not a {slug: ts} map")

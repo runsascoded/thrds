@@ -957,9 +957,10 @@ def slack_replay(branch: str, dry_run: bool, ref: str):
 @slack_cli.command("adopt")
 @click.option('-c', '--channel', required=True, help='Channel the message already lives in.')
 @click.option('-t', '--ts', required=True, help='Timestamp of the existing prod message.')
+@click.option('-T', '--in-thread', help='Parent thread ts, if the message is a reply.')
 @click.option('-V', '--no-verify', is_flag=True, help='Skip the permalink check on TS.')
 @click.argument('slug')
-def slack_adopt(channel: str, ts: str, no_verify: bool, slug: str):
+def slack_adopt(channel: str, ts: str, in_thread: str | None, no_verify: bool, slug: str):
     """Record an existing prod message as SLUG's posted result, without posting.
 
     For threads that went out before thrds was tracking them — posted by hand,
@@ -973,6 +974,12 @@ def slack_adopt(channel: str, ts: str, no_verify: bool, slug: str):
     also kept (as `posted_url`), so staging chrome and `status` can link to the
     real message without another API call; `-V` skips the check and therefore
     records no URL.
+
+    `-T` records that the message is a *reply* in an existing thread — the
+    "considered response to someone else's post" case, where TS is our message
+    and `-T` is the message we answered. Omitted, an existing target's parent
+    thread in the same channel is kept rather than silently flattened to
+    top-level.
     """
     state = _load_state(expected_platform='slack')
     _require_per_thread(state)
@@ -998,12 +1005,16 @@ def slack_adopt(channel: str, ts: str, no_verify: bool, slug: str):
             client.channel = prev
         err(f"  {link}")
 
-    entry.target = ThreadTarget(channel=resolved)
+    parent = in_thread
+    if parent is None and entry.target is not None and entry.target.channel == resolved:
+        parent = entry.target.thread_ts
+    entry.target = ThreadTarget(channel=resolved, thread_ts=parent)
     entry.posted_ts = ts
     entry.posted_url = link
     entry.state = 'posted'
     state.save()
-    err(f"adopted {slug} → {resolved} @ {ts}")
+    err(f"adopted {slug} → {resolved} @ {ts}"
+        + (f" (in thread {parent})" if parent else ''))
     _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: adopt {slug} → {resolved}')
 
 

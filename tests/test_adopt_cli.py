@@ -183,3 +183,42 @@ def test_adopt_rejects_legacy_session(tmp_path, monkeypatch, spy):
         'Error: This session is still on the legacy single-doc layout; '
         'run `thrds slack migrate` first.'
     )
+
+
+def test_adopt_records_a_reply_target(session, spy):
+    """The "considered response to someone else's post" case: TS is our reply,
+    `-T` is the message we answered."""
+    _run('adopt', 'alpha', '-c', 'C0PROD', '-t', '9.9', '-T', '5.5')
+    assert SessionState.load(session).threads['alpha'].target == ThreadTarget(
+        channel='C0PROD', thread_ts='5.5',
+    )
+
+
+def test_adopt_keeps_an_existing_parent_thread_in_the_same_channel(session, spy):
+    """Re-adopting to backfill a permalink must not flatten a reply target to
+    top-level — that would retarget the thread, not annotate it."""
+    state = SessionState.load(session)
+    state.thread('alpha').target = ThreadTarget(channel='C0PROD', thread_ts='5.5')
+    state.save(session)
+    _run('adopt', 'alpha', '-c', 'C0PROD', '-t', '9.9')
+    assert SessionState.load(session).threads['alpha'].target == ThreadTarget(
+        channel='C0PROD', thread_ts='5.5',
+    )
+
+
+def test_adopt_drops_a_parent_thread_from_a_different_channel(session, spy):
+    """A parent ts is only meaningful within its own channel."""
+    state = SessionState.load(session)
+    state.thread('alpha').target = ThreadTarget(channel='C0OTHER', thread_ts='5.5')
+    state.save(session)
+    _run('adopt', 'alpha', '-c', 'C0PROD', '-t', '9.9')
+    assert SessionState.load(session).threads['alpha'].target == ThreadTarget(
+        channel='C0PROD',
+    )
+
+
+def test_adopt_reports_the_parent_thread(session, spy):
+    result = _run('adopt', 'alpha', '-c', 'C0PROD', '-t', '9.9', '-T', '5.5')
+    assert result.stderr.rstrip().split('\n')[-1] == (
+        'adopted alpha → C0PROD @ 9.9 (in thread 5.5)'
+    )
