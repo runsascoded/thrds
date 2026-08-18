@@ -200,6 +200,16 @@ Add scopes under **OAuth & Permissions** — under **User Token Scopes** for a u
 
 Metadata visibility is app-scoped (Slack only returns your app's metadata to your app), so `slack recover` needs **no** additional scope beyond the ones above.
 
+### `THRDS_NO_PUSH`
+
+Every state-mutating verb auto-commits **and pushes** to the session's gist. Set `THRDS_NO_PUSH=1` to keep the local commits and skip every push:
+
+```bash
+THRDS_NO_PUSH=1 thrds slack migrate    # local commit only; gist untouched
+```
+
+Useful when exercising a real session's code paths without writing to its gist — including from a *copy* of a session dir, which carries `.git` and its remotes along with it, so a copy is not by itself an isolated sandbox. The skip is announced on stderr rather than silent.
+
 ## Used by
 
 - [hudcostreets/nj-crashes] — Slack crash-notification threads (`SlackClient.sync()`)

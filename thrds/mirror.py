@@ -14,15 +14,34 @@ recursion (git treats a dir containing `.git/` as opaque).
 A secret gist created at init becomes the `g` remote. Every state-mutating
 verb (`push`, `pull --write`, `archive`) auto-commits + pushes; the gist
 carries the full state.json + doc.md edit history for multi-machine sync.
+
+Set ``THRDS_NO_PUSH=1`` to keep the local commits but skip every push — the
+escape hatch for exercising a real session's code paths (or a copy of one)
+without writing to its gist.
 """
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from pathlib import Path
+
+
+# Set to any non-empty value to make every `push` a no-op while still
+# committing locally. Exists because *every* mutating verb auto-pushes, so
+# there is otherwise no way to exercise a real session's code paths without
+# writing to its gist — including from a *copy* of a session dir, which
+# carries `.git` and its remotes with it.
+NO_PUSH_ENV = 'THRDS_NO_PUSH'
 
 
 class MirrorError(RuntimeError):
     """Wraps `subprocess.CalledProcessError` with command + stderr for context."""
+
+
+def push_disabled() -> bool:
+    """True when ``THRDS_NO_PUSH`` is set to a non-empty value."""
+    return bool(os.environ.get(NO_PUSH_ENV, ''))
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -104,8 +123,16 @@ def add_remote(session_dir: Path, name: str, url: str) -> None:
 
 def push(session_dir: Path, remote: str = 'g', branch: str = 'main') -> None:
     """``git push <remote> HEAD:<branch>``. No-op if remote isn't configured
-    (a `--no-gist` init leaves no ``g`` remote; commits still happen locally)."""
+    (a `--no-gist` init leaves no ``g`` remote; commits still happen locally).
+
+    Also a no-op when :data:`NO_PUSH_ENV` is set — announced on stderr rather
+    than skipped silently, since "I thought it pushed" is exactly the failure
+    this guard is meant to prevent in the other direction.
+    """
     if not has_remote(session_dir, remote):
+        return
+    if push_disabled():
+        print(f"{NO_PUSH_ENV} set — skipping push to {remote}", file=sys.stderr)
         return
     _run(['git', 'push', '-q', remote, f'HEAD:{branch}'], cwd=session_dir)
 
