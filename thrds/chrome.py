@@ -105,10 +105,16 @@ def _ts_from_permalink(url: str) -> tuple[str | None, str | None]:
     """``(channel, thread_ts)`` from a Slack link; ``(None, None)`` if not one.
 
     The ``thread_ts=`` query parameter wins over the path's ``/pXXXX`` when
-    both are present, because a link copied from a message *inside* a thread
-    carries the reply's own ts in the path and its parent's in the query — and
-    a thread is the only thing you can reply into. Targeting the reply's ts
-    would silently aim the draft at a thread that doesn't exist.
+    both are present. A link copied from a message *inside* a thread carries
+    the reply's own ts in the path and its parent's in the query, and only the
+    parent is a thread anchor — Slack's tree is two levels deep, so a reply is
+    a sibling of every other reply, never a parent.
+
+    Taking the path's ts would be quietly destructive rather than merely
+    wrong: ``conversations.replies`` on a reply ts returns *that one message*,
+    not the thread, so the reconcile would see a one-message thread and either
+    edit that reply into our draft's OP (if it's ours) or post a duplicate
+    beside it (if it isn't).
 
     ``thread_ts`` is None for a channel link, which is exactly the difference
     between "post this at the top of #chan" and "post it into that thread".

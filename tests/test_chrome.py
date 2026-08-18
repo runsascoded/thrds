@@ -222,3 +222,21 @@ def test_parse_names_a_new_thread_by_filename():
 def test_parse_rejects_a_lone_filename_line():
     """Too ordinary a thing to write in prose to claim as chrome."""
     assert parse('04-idea.md') is None
+
+
+def test_parse_prefers_the_parent_over_a_replys_own_ts():
+    """A link copied from inside a thread carries the reply's ts in the path
+    and the parent's in the query. Only the parent is a thread anchor:
+    `conversations.replies` on a reply ts returns that one message, not the
+    thread, so the reconcile would edit it or duplicate beside it."""
+    url = ('https://openathena.slack.com/archives/C0BN20081CH/p1786993740250899'
+           '?thread_ts=1786980761.357209&cid=C0BN20081CH')
+    assert parse(f'→ {url}') == Chrome(
+        channel='C0BN20081CH', thread_ts='1786980761.357209',
+    )
+
+
+def test_parse_uses_the_path_ts_for_a_top_level_message_link():
+    """No `thread_ts=` means the link *is* the anchor."""
+    url = 'https://openathena.slack.com/archives/C0A/p1786980761357209'
+    assert parse(f'→ {url}') == Chrome(channel='C0A', thread_ts='1786980761.357209')
