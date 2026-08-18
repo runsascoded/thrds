@@ -160,7 +160,7 @@ Every commit is rebuilt with the doc split into thread files, preserving message
 
 The body goes out as the message's `text` *and* as a section block, with chrome as `context` blocks around it. That split buys two guarantees for free:
 
-- **Chrome can't leak into a doc.** `pull` reads `text`, so there's no strip step that could fail open and publish a secret-gist URL — the body you promote is byte-identical to the body you reviewed.
+- **Chrome can't leak into a doc.** `pull` reads only the `section` block, never a `context` one, so there's no strip step that could fail open and publish a secret-gist URL — the body you promote is byte-identical to the body you reviewed. (It reads the section rather than `text` because Slack strips newlines from `text` once a message carries blocks, demoting it to a one-line notification fallback.)
 - **Chrome can't unfurl.** Slack only unfurls links found in `text`, and no chrome link is ever in `text`.
 
 (Bodies over Slack's 3000-char section limit post without chrome rather than being split mid-mrkdwn.)
