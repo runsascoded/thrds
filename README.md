@@ -133,6 +133,8 @@ thrds slack pull --write               # pull edits back → each thread's file
 thrds slack status                     # per-thread state + resolved destination
 thrds slack promote cw-mpu             # post ONE thread to its target (confirms first)
 thrds slack drop cw-summary            # mark a thread abandoned without posting
+thrds slack reopen cw-mpu              # un-finalize a posted/dropped thread
+thrds slack reorder                    # renumber thread files to a gapless 01..NN
 thrds slack archive                    # archive staging (once all threads are terminal)
 thrds slack list-sessions #foo         # what thrds sessions exist in #foo
 thrds slack recover -i <sid> #foo      # rebuild a lost session from Slack metadata
@@ -152,7 +154,7 @@ Every commit is rebuilt with the doc split into thread files, preserving message
 
 **Destination is a property of the thread, not the session.** Each thread records its own `{channel, thread_ts?}` target in `thrds.json`; the session-level `prod_channel` is just a default for threads that don't set one. A target with no `thread_ts` posts a new top-level message; with one, the thread's messages go in as replies to that existing message — so "draft a considered reply to someone else's post" and "batch six messages into one channel" are the same mechanism.
 
-**Staging-only chrome.** Staged messages carry one trailing line saying where the draft is aimed, what it became once posted, and which file in the gist it is:
+**Staging-only chrome.** Staged messages carry one extra line saying where the draft is aimed, what it became once posted, and which file in the gist it is:
 
 ```
 → #oa-amazon-trainium · posted · 01-mfu.md
@@ -162,17 +164,33 @@ Every commit is rebuilt with the doc split into thread files, preserving message
 In the second, the arrow itself links to the message being replied to — the `thread_ts` is what a machine needs and a human never reads. The gist link deep-links the file (`#file-01-mfu-md`), not just the gist. Configured in `thrds.json`, never written into doc content:
 
 ```jsonc
-"staging_chrome": { "gist_link": true, "target_link": true, "posted_link": true, "style": "footer" }
+"staging_chrome": {
+  "gist_link": true, "target_link": true, "posted_link": true,
+  "finalize_terminal": true, "style": "footer"
+}
 ```
 
-**Edit the footer to retarget a draft.** Change `→ #some-channel` in Slack and the next `pull` moves the thread's target; paste a message permalink after the arrow and it aims *into* that thread. That's the reason chrome is text and not `blocks`: **Slack removes the Edit affordance from any message carrying blocks**, which would cost a staging channel the one thing it exists for. (An edited *filename* is reported, not applied — renaming a thread file is how you reorder threads, but it breaks the per-file git history the layout exists to give, so it stays a deliberate act.)
+**The chrome line is an input, not just a readout.** Edit it in Slack and the next `pull` acts on it:
 
-Two things keep chrome out of prod, since it's now in the text:
+| write | effect |
+| --- | --- |
+| `→ #some-channel` | retarget the thread |
+| `→ <paste a channel link>` | same |
+| `→ <paste a message link>` | aim it *into* that thread |
+| `→ #chan · 04-idea.md` | rename/renumber the thread's file |
 
-- **Stripped on pull.** The footer is appended after md→mrkdwn conversion and removed before the reverse, so neither direction of the converter ever sees it.
-- **Fail closed at the boundary.** `promote` refuses to post a body that still carries a footer. Stripping is a step that can fail open; publishing a secret-gist URL to a real channel is worth an assertion.
+A push renders it back to canonical form, so the hand-typed shape only has to survive one round trip. It's accepted as the **first or last** line, since leading with where a draft is going is the natural way to write one.
 
-A body that leaves no room for the footer under Slack's 4000-char limit posts without it — a complete body matters more than the affordance.
+**Start a thread by writing one in the staging channel.** Post a top-level message there with a chrome line and the next `pull` adopts it: creates its `NN-slug.md` (named by the chrome line's filename, or slugified from the opening words), records its target, and takes over syncing it. A message with no chrome line stays a note to self — that's what separates the two.
+
+**Reordering.** `slck reorder` renumbers files to a gapless `01..NN`; `slck reorder gamma alpha` puts those first. Only files move — `thrds.json` is keyed by slug, so staging pointers, targets and posted timestamps all follow their thread. Renaming is cheap because a commit records a *tree*: `git log --follow` reconstructs each thread's history across the rename.
+
+**Finalizing.** Once a thread is `posted` or `dropped`, its staged copy re-renders with chrome in a `context` block. Slack strips the Edit affordance from any message carrying blocks — a liability for a draft, and exactly the point for one that's already gone out: the staged copy visibly locks. `slck reopen <slug>` moves it back to `draft` (keeping `posted_ts`, so a later `promote` syncs the existing message rather than posting a second one), and the next push unlocks it. Set `finalize_terminal: false` to keep everything editable.
+
+Two things keep chrome out of prod, since it's in the message rather than beside it:
+
+- **Stripped on pull.** The line is appended after md→mrkdwn conversion and removed before the reverse, so neither direction of the converter ever sees it. (For a finalized message the body is read from its section block — Slack flattens `text` to a one-line notification fallback whenever blocks are present.)
+- **Fail closed at the boundary.** `promote` refuses to post a body that still carries a chrome line. Stripping is a step that can fail open; publishing a secret-gist URL to a real channel is worth an assertion.
 
 **Prod push is per-thread and never whole-doc.** `promote` resolves the destination, prints it with the exact body, asks, then posts only that thread — and never archives the staging channel, because your other drafts are still live. Archiving is its own verb, refusing until every thread is `posted` or `dropped` (`-f` overrides).
 

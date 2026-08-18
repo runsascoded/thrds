@@ -92,6 +92,12 @@ class StagingChrome:
     gist_link: bool = True
     target_link: bool = True
     posted_link: bool = True
+    # Once a thread is `posted` or `dropped`, re-render its staged copy with
+    # chrome in a `context` block. Slack strips the Edit affordance from any
+    # message carrying blocks — a liability for a draft, and precisely the
+    # value for one that's already gone out: the staged copy visibly locks.
+    # `thrds slack reopen` is the way back.
+    finalize_terminal: bool = True
     style: str = 'footer'
 
     def __post_init__(self) -> None:

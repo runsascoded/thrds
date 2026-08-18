@@ -36,19 +36,26 @@ GIST_HOST = 'https://gist.github.com'
 # `<#C0ABCDEF>` or `<#C0ABCDEF|name>` — Slack's channel mention.
 _CHANNEL = r'<#(?P<{name}>[A-Z0-9]+)(?:\|[^>]*)?>'
 
-# A Slack permalink's ts lives in its `/pXXXXXXXXXXYYYYYY` path segment.
-_PERMALINK_TS = re.compile(r'/archives/(?P<channel>[A-Z0-9]+)/p(?P<ts>\d{6,})')
+# A Slack link's channel is its `/archives/<C…>` segment; a *message* link
+# adds `/pXXXXXXXXXXYYYYYY`. Both forms are useful to paste: the first aims a
+# draft at a channel, the second aims it into a thread.
+_PERMALINK_TS = re.compile(r'/archives/(?P<channel>[A-Z0-9]+)(?:/p(?P<ts>\d{6,}))?')
+# Copying a link to a message inside a thread yields the reply's ts in the
+# path and the *parent's* here. Only the parent can be replied into.
+_THREAD_TS_PARAM = re.compile(r'[?&]thread_ts=(?P<ts>\d+\.\d+)')
 
-# The four segment shapes. Anything else in a footer means it isn't one.
-_TOP = re.compile(rf'^{ARROW} {_CHANNEL.format(name="channel")}$')
-_REPLY = re.compile(
-    rf'^<(?P<url>https?://[^>|]+)\|{ARROW}> \({_CHANNEL.format(name="channel")}\)$'
-)
-# Lenient authoring form: `→ <permalink>`. Slack auto-links a pasted URL, so
-# this is what retargeting a draft at someone's message looks like by hand.
-_PASTED = re.compile(rf'^{ARROW} <?(?P<url>https?://[^>\s|]+)>?$')
-_POSTED = re.compile(r'^<(?P<url>https?://[^>|]+)\|posted>$')
-_GIST = re.compile(rf'^<(?P<url>{re.escape(GIST_HOST)}/[^>|]+)\|(?P<filename>[^>]+)>$')
+# Token shapes. `_CHANNEL_RE` is Slack's channel mention, with or without the
+# `|name` it sometimes echoes back.
+_CHANNEL_RE = re.compile(r'<#(?P<channel>[A-Z0-9]+)(?:\|[^>]*)?>')
+_NAME_RE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9._-]*')
+_PAREN_CHANNEL = re.compile(rf'\({_CHANNEL_RE.pattern}\)')
+_LINKED_ARROW = re.compile(rf'<(?P<url>https?://[^>|]+)\|{ARROW}>')
+_POSTED = re.compile(r'<(?P<url>https?://[^>|]+)\|posted>')
+_GIST = re.compile(rf'<(?P<url>{re.escape(GIST_HOST)}/[^>|]+)\|(?P<filename>[^>]+)>')
+# A bare thread filename, for naming a draft written straight into the channel
+# before it has a gist file to link to. Only accepted alongside a target: a
+# lone `foo.md` line is too ordinary a thing to write in prose to claim.
+_BARE_FILE = re.compile(r'(?P<filename>[A-Za-z0-9][A-Za-z0-9._-]*\.md)')
 
 
 def gist_file_url(gist_id: str, filename: str) -> str:
@@ -65,12 +72,13 @@ def gist_file_url(gist_id: str, filename: str) -> str:
 
 @dataclass(frozen=True)
 class ChromeEdit:
-    """What a staged message's footer says that its local state doesn't.
+    """What a staged message's chrome line says that its local state doesn't.
 
-    ``target`` is applied to state by the caller (retargeting is the whole
-    point of an editable footer). ``renamed_to`` is only *reported*: renaming
-    a thread file is how you reorder threads, but it breaks the per-file git
-    history the layout exists to give, so it's a human's call.
+    Both are applied. Renaming is safe: a commit records a *tree*, so a file
+    that changes path is just a different tree, and `git log --follow` /
+    `git diff -M` reconstruct the linkage from content. The ``NN`` prefix says
+    where a thread sorts and nothing else, so editing it in Slack is a
+    perfectly good way to reorder drafts.
     """
     slug: str
     target_was: "object | None" = None
@@ -80,20 +88,40 @@ class ChromeEdit:
 
 @dataclass(frozen=True)
 class Chrome:
-    """A parsed footer: what it says about where this thread is bound."""
+    """A parsed footer: what it says about where this thread is bound.
+
+    ``channel_name`` is the unresolved ``#name`` form, which appears when Slack
+    didn't auto-link what was typed. Callers resolve it to an id; parsing stays
+    offline.
+    """
     channel: str | None = None
+    channel_name: str | None = None
     thread_ts: str | None = None
     filename: str | None = None
     posted_url: str | None = None
 
 
 def _ts_from_permalink(url: str) -> tuple[str | None, str | None]:
-    """``(channel, ts)`` from a Slack permalink; ``(None, None)`` if it isn't one."""
+    """``(channel, thread_ts)`` from a Slack link; ``(None, None)`` if not one.
+
+    The ``thread_ts=`` query parameter wins over the path's ``/pXXXX`` when
+    both are present, because a link copied from a message *inside* a thread
+    carries the reply's own ts in the path and its parent's in the query — and
+    a thread is the only thing you can reply into. Targeting the reply's ts
+    would silently aim the draft at a thread that doesn't exist.
+
+    ``thread_ts`` is None for a channel link, which is exactly the difference
+    between "post this at the top of #chan" and "post it into that thread".
+    """
     m = _PERMALINK_TS.search(url)
     if m is None:
         return None, None
+    parent = _THREAD_TS_PARAM.search(url)
+    if parent is not None:
+        return m.group('channel'), parent.group('ts')
     digits = m.group('ts')
-    return m.group('channel'), f'{digits[:-6]}.{digits[-6:]}'
+    ts = f'{digits[:-6]}.{digits[-6:]}' if digits else None
+    return m.group('channel'), ts
 
 
 def render(
@@ -124,62 +152,107 @@ def render(
     return SEP.join(parts) if parts else None
 
 
-def parse(line: str) -> Chrome | None:
-    """Parse a footer line, or None if ``line`` isn't one.
+# `<…>` (which may contain spaces, e.g. `<url|link text>`) or a bare run of
+# non-space. Tokenizing rather than splitting on ` · ` is what lets a
+# hand-written line separate its parts with plain spaces.
+_TOKEN_RE = re.compile(r'<[^>]*>|\S+')
+_DOT = '·'
 
-    Every segment must match a known shape and at least one must name a
-    destination or a gist file — a body's last line satisfying all of that by
-    accident is not a case worth trading correctness for.
+
+def parse(line: str) -> Chrome | None:
+    """Parse a chrome line, or None if ``line`` isn't one.
+
+    Deliberately lenient, because this is the one line a human writes by hand
+    — Slack's composer can't put a link on the arrow, so the canonical
+    ``<url|→>`` form is unauthorable from the UI, and reaching for ``·``
+    between parts is nobody's instinct. Parts may be separated by ``·`` or
+    just spaces. All of these name the same destination:
+
+    * ``→ <#C0ABCDEF>`` — a mention, what Slack makes of a typed ``#name``
+    * ``→ #some-channel`` — the literal text, when it didn't auto-link
+    * ``→ https://…/archives/C0ABCDEF`` — a pasted channel link
+    * ``→ https://…/archives/C0ABCDEF/p178…`` — a pasted *message* link, which
+      aims the draft into that thread
+    * ``<https://…|→> (<#C0ABCDEF>)`` — what a push renders it back to
+
+    A trailing ``name.md`` names the thread's file. Anything else in the line
+    rejects the whole thing: one stray token means this is prose that happens
+    to start with an arrow, and stripping it would eat a line of the draft.
     """
+    tokens = _TOKEN_RE.findall(line.strip())
+    if not tokens:
+        return None
     chrome = Chrome()
     anchored = False
-    for i, segment in enumerate(line.split(SEP)):
-        m = _TOP.match(segment)
-        if m is not None and i == 0:
-            chrome, anchored = Chrome(**{**vars(chrome), 'channel': m['channel']}), True
-            continue
-        m = _REPLY.match(segment)
-        if m is not None and i == 0:
-            _, ts = _ts_from_permalink(m['url'])
-            chrome = Chrome(**{**vars(chrome), 'channel': m['channel'], 'thread_ts': ts})
-            anchored = True
-            continue
-        m = _PASTED.match(segment)
-        if m is not None and i == 0:
-            channel, ts = _ts_from_permalink(m['url'])
+    i = 0
+
+    def with_(**kw) -> Chrome:
+        return Chrome(**{**vars(chrome), **kw})
+
+    if tokens[0] == ARROW and len(tokens) > 1:
+        target, i = tokens[1], 2
+        m = _CHANNEL_RE.fullmatch(target)
+        if m is not None:
+            chrome, anchored = with_(channel=m['channel']), True
+        elif target.startswith('#') and _NAME_RE.fullmatch(target[1:]):
+            chrome, anchored = with_(channel_name=target[1:]), True
+        else:
+            channel, ts = _ts_from_permalink(target.strip('<>'))
             if channel is None:
                 return None
-            chrome = Chrome(**{**vars(chrome), 'channel': channel, 'thread_ts': ts})
-            anchored = True
+            chrome, anchored = with_(channel=channel, thread_ts=ts), True
+    else:
+        m = _LINKED_ARROW.fullmatch(tokens[0])
+        if m is not None and len(tokens) > 1:
+            paren = _PAREN_CHANNEL.fullmatch(tokens[1])
+            if paren is None:
+                return None
+            _, ts = _ts_from_permalink(m['url'])
+            chrome, anchored = with_(channel=paren['channel'], thread_ts=ts), True
+            i = 2
+
+    for token in tokens[i:]:
+        if token == _DOT:
             continue
-        m = _POSTED.match(segment)
+        m = _POSTED.fullmatch(token)
         if m is not None:
-            chrome = Chrome(**{**vars(chrome), 'posted_url': m['url']})
+            chrome = with_(posted_url=m['url'])
             continue
-        m = _GIST.match(segment)
+        m = _GIST.fullmatch(token)
         if m is not None:
-            chrome = Chrome(**{**vars(chrome), 'filename': m['filename']})
-            anchored = True
+            # A gist URL is distinctive on its own, which is what lets an
+            # untargeted draft still have a chrome line.
+            chrome, anchored = with_(filename=m['filename']), True
+            continue
+        m = _BARE_FILE.fullmatch(token) if anchored else None
+        if m is not None:
+            chrome = with_(filename=m['filename'])
             continue
         return None
     return chrome if anchored else None
 
 
 def split(text: str) -> tuple[str, Chrome | None]:
-    """``(body, chrome)`` — strip a trailing footer off raw Slack text.
+    """``(body, chrome)`` — strip a chrome line off raw Slack text.
+
+    Accepts it as the **first or last** line. A push always renders it last,
+    but writing a new draft in Slack it's natural to lead with where the thing
+    is going, and there's no reason to make that wrong.
 
     Operates on the wire text, before ``to_markdown``, mirroring `render`
-    running after ``to_slack``. Text with no footer comes back untouched, so
+    running after ``to_slack``. Text with no chrome comes back untouched, so
     this is safe to call on every message including other people's.
     """
-    stripped = text.rstrip('\n')
-    head, sep, last = stripped.rpartition('\n')
-    if not sep:
+    lines = text.rstrip('\n').split('\n')
+    if len(lines) < 2:
         return text, None
-    chrome = parse(last.strip())
-    if chrome is None:
-        return text, None
-    return head.rstrip('\n'), chrome
+    chrome = parse(lines[-1].strip())
+    if chrome is not None:
+        return '\n'.join(lines[:-1]).rstrip('\n'), chrome
+    chrome = parse(lines[0].strip())
+    if chrome is not None:
+        return '\n'.join(lines[1:]).lstrip('\n'), chrome
+    return text, None
 
 
 def has_chrome(text: str) -> bool:

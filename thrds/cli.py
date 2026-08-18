@@ -76,6 +76,7 @@ import click
 
 from . import mirror
 from .doc import Doc
+from .chrome import split as split_chrome
 from .md import diff_docs, parse_doc, serialize_doc, serialize_thread
 from .migrate import apply_migration, plan_migration
 from .replay import ReplayError, plan_replay, verify_plan, write_replay
@@ -199,6 +200,47 @@ def _load_doc(state: SessionState, arg: str | None) -> Doc:
     """Parse the doc file identified by ``arg`` (or ``state.doc_path``)."""
     path = _resolve_doc_path(state, arg)
     return parse_doc(Path(path).read_text()).doc
+
+
+def _absorb_file_chrome(
+    session_dir: Path,
+    threads: list,
+    state: SessionState,
+    client,
+    dry_run: bool,
+) -> dict:
+    """Take a chrome line written into a thread *file* as a destination, not text.
+
+    Hand-seeding a draft — writing the body in an editor with `→ #chan` at the
+    top — is the same gesture as writing one in Slack, and should mean the same
+    thing. Left alone it would post as the first line of the message, which is
+    both wrong and hard to notice.
+
+    Applies the target to ``state``, drops the line from the thread's OP, and
+    rewrites the file without it: chrome's home is the staged message, which a
+    push is about to render for real.
+    """
+    applied: dict[str, ThreadTarget] = {}
+    for tf, thread in zip(thread_files(session_dir), threads, strict=True):
+        ours = [m for m in thread.messages if m.author is None]
+        if not ours:
+            continue
+        body, chrome = split_chrome(ours[0].content)
+        if chrome is None:
+            continue
+        ours[0].content = body
+        resolved = client._resolve_chrome_channel(chrome)
+        if resolved is not None:
+            target = ThreadTarget(channel=resolved, thread_ts=chrome.thread_ts)
+            state.thread(tf.slug).target = target
+            applied[tf.slug] = target
+        if not dry_run:
+            tf.path.write_text(serialize_thread(thread))
+    if applied and not dry_run:
+        # Persisted here rather than left to the sync: the target is settled
+        # the moment it's read, and a sync that fails shouldn't lose it.
+        state.save()
+    return applied
 
 
 def _print_sync_summary(kind: str, result) -> None:
@@ -644,6 +686,9 @@ def slack_push(channel: str | None, keep_staging: bool, dry_run: bool, prod: boo
         threads = read_threads(Path.cwd())
         if not threads:
             raise click.UsageError('No thread files (`NN-slug.md`) in this session.')
+        for slug, target in _absorb_file_chrome(Path.cwd(), threads, state, client, dry_run).items():
+            where = target.channel + (f' @ {target.thread_ts}' if target.thread_ts else '')
+            err(f"targeted {slug} → {where} (from a chrome line in its file)")
         result = client.sync_threads_staging(
             threads, state, dry_run=dry_run,
             filenames={f.slug: f.name for f in files},
@@ -712,6 +757,7 @@ def slack_pull(channel: str | None, prod: bool, write: bool, doc_path: str | Non
             )
         threads = client.pull_threads_staging(state, session_dir=session_dir)
         files = {f.slug: f.name for f in thread_files(session_dir)}
+        renames: list[tuple[Path, Path]] = []
         for slug, edit in client.pull_chrome_edits(state, files).items():
             if edit.target_now is not None:
                 where = edit.target_now.channel + (
@@ -719,10 +765,21 @@ def slack_pull(channel: str | None, prod: bool, write: bool, doc_path: str | Non
                 )
                 err(f"retargeted {slug} → {where} (edited in Slack)")
             if edit.renamed_to is not None:
-                err(f"note: {slug}'s footer says {edit.renamed_to}, file is "
-                    f"{files[slug]} — rename it yourself if you meant to; doing it "
-                    f"here would break the file's git history silently")
+                renames.append((session_dir / files[slug], session_dir / edit.renamed_to))
+                err(f"renamed {files[slug]} → {edit.renamed_to} (edited in Slack)")
+
+        adopted = client.adopt_new_staging_threads(state, session_dir)
+        for a in adopted:
+            err(f"adopted {a.filename} (written straight into staging)")
+
         by_slug = {t.slug: t for t in threads}
+        by_slug.update({a.slug: a.thread for a in adopted})
+        if write:
+            for src, dst in renames:
+                src.rename(dst)
+            for a in adopted:
+                (session_dir / a.filename).touch()
+
         written: list[str] = []
         for tf in thread_files(session_dir):
             thread = by_slug.get(tf.slug)
@@ -739,9 +796,10 @@ def slack_pull(channel: str | None, prod: bool, write: bool, doc_path: str | Non
             state.save()
             err(f"wrote {len(written)} thread file(s): {', '.join(written)}")
             emoji_paths = [p.name for p in session_dir.glob('emoji-*') if p.is_file()]
+            removed = [src.name for src, _ in renames]
             _autocommit(
                 session_dir,
-                [*written, str(STATE_PATH), *emoji_paths],
+                [*written, *removed, str(STATE_PATH), *emoji_paths],
                 'thrds: pull staging',
             )
         return
@@ -1029,6 +1087,70 @@ def slack_adopt(channel: str, ts: str, in_thread: str | None, no_verify: bool, s
     _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: adopt {slug} → {resolved}')
 
 
+@slack_cli.command("reorder")
+@click.option('-n', '--dry-run', is_flag=True, help='Show the renames; touch nothing.')
+@click.argument('slugs', nargs=-1)
+def slack_reorder(dry_run: bool, slugs: tuple[str, ...]):
+    """Renumber thread files to a gapless `01..NN` in their current order.
+
+    Pass SLUGS to put those threads first, in that order; anything unnamed
+    keeps its relative position after them. With no SLUGS this just compacts
+    gaps left by adding and dropping threads.
+
+    Only files move. `thrds.json` is keyed by slug, not by index, so the
+    staging messages, targets and posted timestamps all follow their thread
+    without being touched — the number says where a thread sorts, nothing more.
+    """
+    state = _load_state(expected_platform='slack')
+    _require_per_thread(state)
+    session_dir = Path.cwd()
+    files = thread_files(session_dir)
+    if not files:
+        err('No thread files in this session.')
+        return
+
+    by_slug = {f.slug: f for f in files}
+    unknown = [s for s in slugs if s not in by_slug]
+    if unknown:
+        raise click.UsageError(
+            f"No thread(s) {', '.join(unknown)} in this session; "
+            f"available: {', '.join(f.slug for f in files)}"
+        )
+    named = list(dict.fromkeys(slugs))
+    order = [by_slug[s] for s in named] + [f for f in files if f.slug not in set(named)]
+
+    moves = [
+        (f, thread_filename(i, f.slug))
+        for i, f in enumerate(order, start=1)
+        if f.name != thread_filename(i, f.slug)
+    ]
+    if not moves:
+        err('Already gapless and in order; nothing to do.')
+        return
+    for f, new_name in moves:
+        err(f"  {f.name} → {new_name}")
+    if dry_run:
+        err('(dry run — nothing renamed)')
+        return
+
+    # Two-phase, because a reorder is a permutation: renaming 01→02 directly
+    # would clobber the file already at 02.
+    staged: list[tuple[Path, Path]] = []
+    for f, new_name in moves:
+        tmp = session_dir / f'.{f.name}.reorder'
+        f.path.rename(tmp)
+        staged.append((tmp, session_dir / new_name))
+    for tmp, dst in staged:
+        tmp.rename(dst)
+
+    err(f"renumbered {len(moves)} file(s)")
+    _autocommit(
+        session_dir,
+        [f.name for f, _ in moves] + [n for _, n in moves],
+        'thrds: reorder thread files',
+    )
+
+
 @slack_cli.command("drop")
 @click.argument('slug')
 def slack_drop(slug: str):
@@ -1050,6 +1172,37 @@ def slack_drop(slug: str):
     state.save()
     err(f"dropped {slug}")
     _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: drop {slug}')
+
+
+@slack_cli.command("reopen")
+@click.option('-s', '--state', 'to_state', default='draft', show_default=True,
+              type=click.Choice(['draft', 'ready']), help='State to return the thread to.')
+@click.argument('slug')
+def slack_reopen(to_state: str, slug: str):
+    """Move a terminal thread (SLUG) back to `draft`/`ready` so it can be revised.
+
+    The counterpart to finalizing: once a thread is `posted` or `dropped` its
+    staged copy re-renders with chrome in a block, which Slack makes
+    uneditable. That's the signal, and this is the way out of it — the next
+    `push` unlocks the staged message.
+
+    Keeps `posted_ts` and the target: reopening says "I want to revise this",
+    not "this never happened". A subsequent `promote` therefore syncs the
+    already-posted message in place rather than posting a second one.
+    """
+    state = _load_state(expected_platform='slack')
+    _require_per_thread(state)
+    entry = state.thread(slug)
+    if not entry.is_terminal:
+        err(f"{slug} is already {entry.state}; nothing to reopen.")
+        return
+    was = entry.state
+    entry.state = to_state
+    state.save()
+    err(f"reopened {slug}: {was} → {to_state}"
+        + (f" (still posted at {entry.posted_ts})" if entry.posted_ts else ''))
+    err('  run `thrds slack push` to unlock its staged copy')
+    _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: reopen {slug}')
 
 
 @slack_cli.command("status")

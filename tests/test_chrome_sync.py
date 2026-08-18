@@ -410,3 +410,188 @@ def test_reconcile_noop_against_slack_entity_encoding(monkeypatch):
     client, calls = _reconcile_client(monkeypatch, f'Body.\n\n{live}')
     client._chrome_by_content = {'Body.': footer}
     assert client._reconcile_chrome('1.1', 'Body.', pace=0.0, jitter=0.0) is False
+
+
+# --- finalize: a terminal thread's staged copy locks ---
+
+
+def _finalized_client(finalized: bool) -> SlackClient:
+    client = _client()
+    client._chrome_by_content = {'Body.': '→ <#C0T> · posted'}
+    if finalized:
+        client._finalized_content = {'Body.'}
+    return client
+
+
+def test_finalized_chrome_renders_as_blocks():
+    """Which is what makes Slack drop the Edit affordance — the whole signal."""
+    client = _finalized_client(True)
+    data = {'text': 'Body.'}
+    client._attach_chrome(data, 'Body.', 'Body.')
+    assert data['blocks'] == [
+        {'type': 'section', 'text': {'type': 'mrkdwn', 'text': 'Body.'}},
+        {'type': 'context', 'elements': [
+            {'type': 'mrkdwn', 'text': '→ <#C0T> · posted'},
+        ]},
+    ]
+
+
+def test_finalized_chrome_leaves_text_as_the_body_alone():
+    client = _finalized_client(True)
+    data = {'text': 'Body.'}
+    client._attach_chrome(data, 'Body.', 'Body.')
+    assert data['text'] == 'Body.'
+
+
+def test_a_draft_stays_a_plain_editable_text_message():
+    client = _finalized_client(False)
+    data = {'text': 'Body.'}
+    client._attach_chrome(data, 'Body.', 'Body.')
+    assert (data['text'], data['blocks']) == ('Body.\n\n→ <#C0T> · posted', [])
+
+
+def test_finalize_falls_back_to_text_for_an_oversized_body():
+    """Over the section limit, a complete body beats the lock."""
+    from thrds.slack import SLACK_SECTION_LIMIT
+    client = _client()
+    body = 'x' * (SLACK_SECTION_LIMIT + 1)
+    client._chrome_by_content = {body: '→ <#C0T>'}
+    client._finalized_content = {body}
+    data = {'text': body}
+    client._attach_chrome(data, body, body)
+    assert data['blocks'] == []
+
+
+def test_pull_reads_a_finalized_body_from_its_section(monkeypatch):
+    """Slack flattens `text` to one line whenever blocks are present, so a
+    finalized multi-line body must come from the section."""
+    body = 'Para one.\n\nPara two.'
+    client = _client()
+    monkeypatch.setattr(SlackClient, 'bot_ids', property(lambda self: ('U0ME', None)))
+    monkeypatch.setattr(client, '_request', lambda *a, **kw: {'messages': [{
+        'ts': '1.1', 'user': 'U0ME', 'text': 'Para one. Para two.',
+        'blocks': [
+            {'type': 'section', 'text': {'type': 'mrkdwn', 'text': body}},
+            {'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': '→ <#C0T>'}]},
+        ],
+    }]})
+    assert [m.content for m in client.list_messages('1.1')] == [body]
+
+
+def test_push_finalizes_a_posted_thread(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    client = _client()
+    calls: list[dict] = []
+
+    def fake_request(endpoint, data=None, **kw):
+        calls.append({'endpoint': endpoint, **(data or {})})
+        if endpoint == 'conversations.replies':
+            return {'messages': [{'ts': '1.1', 'text': 'Body.', 'user': 'U0ME'}]}
+        return {'ok': True, 'ts': '1.1'}
+
+    monkeypatch.setattr(client, '_request', fake_request)
+    monkeypatch.setattr(SlackClient, 'bot_ids', property(lambda self: ('U0ME', None)))
+    state = _state(staging_channel='C0S', threads={'a': ThreadEntry(
+        staging_ts='1.1', target=ThreadTarget(channel='C0T'),
+        state='posted', posted_ts='9.9', posted_url=POSTED,
+    )})
+    client.sync_threads_staging(
+        [_thread('a', 'Body.')], state, pace=0.0, filenames={'a': '01-a.md'},
+    )
+    updates = [c for c in calls if c['endpoint'] == 'chat.update']
+    assert [[b['type'] for b in u['blocks']] for u in updates] == [['section', 'context']]
+
+
+def test_push_leaves_a_draft_unlocked(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    client = _client()
+    calls: list[dict] = []
+
+    def fake_request(endpoint, data=None, **kw):
+        calls.append({'endpoint': endpoint, **(data or {})})
+        if endpoint == 'conversations.replies':
+            return {'messages': [{'ts': '1.1', 'text': 'Body.', 'user': 'U0ME'}]}
+        return {'ok': True, 'ts': '1.1'}
+
+    monkeypatch.setattr(client, '_request', fake_request)
+    monkeypatch.setattr(SlackClient, 'bot_ids', property(lambda self: ('U0ME', None)))
+    state = _state(staging_channel='C0S', threads={'a': ThreadEntry(
+        staging_ts='1.1', target=ThreadTarget(channel='C0T'),
+    )})
+    client.sync_threads_staging(
+        [_thread('a', 'Body.')], state, pace=0.0, filenames={'a': '01-a.md'},
+    )
+    updates = [c for c in calls if c['endpoint'] == 'chat.update']
+    assert [u['blocks'] for u in updates] == [[]]
+
+
+def test_push_does_not_finalize_when_disabled(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    client = _client()
+    calls: list[dict] = []
+
+    def fake_request(endpoint, data=None, **kw):
+        calls.append({'endpoint': endpoint, **(data or {})})
+        if endpoint == 'conversations.replies':
+            return {'messages': [{'ts': '1.1', 'text': 'Body.', 'user': 'U0ME'}]}
+        return {'ok': True, 'ts': '1.1'}
+
+    monkeypatch.setattr(client, '_request', fake_request)
+    monkeypatch.setattr(SlackClient, 'bot_ids', property(lambda self: ('U0ME', None)))
+    state = _state(
+        staging_channel='C0S',
+        staging_chrome=StagingChrome(finalize_terminal=False),
+        threads={'a': ThreadEntry(
+            staging_ts='1.1', target=ThreadTarget(channel='C0T'),
+            state='posted', posted_ts='9.9',
+        )},
+    )
+    client.sync_threads_staging(
+        [_thread('a', 'Body.')], state, pace=0.0, filenames={'a': '01-a.md'},
+    )
+    updates = [c for c in calls if c['endpoint'] == 'chat.update']
+    assert [u['blocks'] for u in updates] == [[]]
+
+
+def test_reconcile_finalizes_a_dropped_thread_with_unchanged_chrome(monkeypatch):
+    """Dropping a thread locks it without altering a word of its chrome, so
+    comparing text alone would leave it unlocked forever."""
+    client = _client()
+    calls: list[dict] = []
+
+    def fake_request(endpoint, data=None, **kw):
+        calls.append({'endpoint': endpoint, **(data or {})})
+        return {'messages': [{'ts': '1.1', 'text': 'Body.\n\n→ <#C0T>'}], 'ok': True}
+
+    monkeypatch.setattr(client, '_request', fake_request)
+    client._chrome_by_content = {'Body.': '→ <#C0T>'}
+    client._finalized_content = {'Body.'}
+    assert client._reconcile_chrome('1.1', 'Body.', pace=0.0, jitter=0.0) is True
+
+
+def test_reconcile_noop_on_an_already_finalized_thread(monkeypatch):
+    client = _client()
+    monkeypatch.setattr(client, '_request', lambda endpoint, data=None, **kw: {
+        'messages': [{'ts': '1.1', 'text': 'Body.', 'blocks': [
+            {'type': 'section', 'text': {'type': 'mrkdwn', 'text': 'Body.'}},
+            {'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': '→ <#C0T>'}]},
+        ]}],
+    })
+    client._chrome_by_content = {'Body.': '→ <#C0T>'}
+    client._finalized_content = {'Body.'}
+    assert client._reconcile_chrome('1.1', 'Body.', pace=0.0, jitter=0.0) is False
+
+
+def test_reconcile_unlocks_a_reopened_thread(monkeypatch):
+    """Live chrome is in a block, desired is a footer — same words, so only the
+    shape comparison catches it."""
+    client = _client()
+    monkeypatch.setattr(client, '_request', lambda endpoint, data=None, **kw: {
+        'messages': [{'ts': '1.1', 'text': 'Body.', 'blocks': [
+            {'type': 'section', 'text': {'type': 'mrkdwn', 'text': 'Body.'}},
+            {'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': '→ <#C0T>'}]},
+        ]}],
+        'ok': True,
+    })
+    client._chrome_by_content = {'Body.': '→ <#C0T>'}
+    assert client._reconcile_chrome('1.1', 'Body.', pace=0.0, jitter=0.0) is True

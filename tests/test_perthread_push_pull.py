@@ -57,6 +57,9 @@ class SyncSpy:
     def pull_chrome_edits(self, state, filenames=None):
         return {}
 
+    def adopt_new_staging_threads(self, state, session_dir):
+        return []
+
 
 @pytest.fixture
 def spy(monkeypatch):

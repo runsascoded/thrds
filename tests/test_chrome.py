@@ -177,12 +177,48 @@ def test_split_preserves_interior_blank_lines():
     assert split(f'{body}\n\n→ <#C0T>')[0] == body
 
 
-def test_split_ignores_a_footer_shaped_line_mid_body():
-    """Only the last line is chrome; anything above it is content."""
-    text = '→ <#C0T>\n\nActual body.'
+def test_split_accepts_chrome_on_the_first_line():
+    """Writing a new draft in Slack it's natural to lead with where it's going;
+    a push renders it back to the last line."""
+    assert split('→ <#C0T>\n\nActual body.') == ('Actual body.', Chrome(channel='C0T'))
+
+
+def test_split_prefers_the_last_line_when_both_look_like_chrome():
+    assert split('→ <#C0FIRST>\n\nBody.\n\n→ <#C0LAST>') == (
+        '→ <#C0FIRST>\n\nBody.', Chrome(channel='C0LAST'),
+    )
+
+
+def test_split_ignores_a_chrome_shaped_line_in_the_middle():
+    text = 'Body above.\n\n→ <#C0T>\n\nBody below.'
     assert split(text) == (text, None)
 
 
 def test_has_chrome_is_the_promote_guard():
     assert has_chrome('Body.\n\n→ <#C0T>') is True
     assert has_chrome('Body.') is False
+
+
+# --- lenient target forms (what a human can actually type in Slack) ---
+
+
+def test_parse_bare_channel_name():
+    """Slack didn't auto-link it; resolution to an id is the caller's job."""
+    assert parse('→ #marin-alerts') == Chrome(channel_name='marin-alerts')
+
+
+def test_parse_pasted_channel_link_has_no_thread_ts():
+    """A channel link means top-level; a message link means into that thread.
+    That's the whole difference between the two."""
+    assert parse('→ https://openathena.slack.com/archives/C0BQDAK2BRT') == Chrome(
+        channel='C0BQDAK2BRT',
+    )
+
+
+def test_parse_names_a_new_thread_by_filename():
+    assert parse('→ <#C0T> · 04-idea.md') == Chrome(channel='C0T', filename='04-idea.md')
+
+
+def test_parse_rejects_a_lone_filename_line():
+    """Too ordinary a thing to write in prose to claim as chrome."""
+    assert parse('04-idea.md') is None

@@ -15,10 +15,12 @@ One file per thread makes per-file history exactly that message's revision
 trajectory.
 
 The ``NN`` prefix gives deterministic ordering for the batch case (post six
-messages in a known order) and costs nothing for the reply case. The ``slug``
-is the thread's identity: it keys ``thrds.json``'s ``threads`` map, is stamped
+messages in a known order) and costs nothing for the reply case. It carries no
+identity: the ``slug`` is what keys ``thrds.json``'s ``threads`` map, is stamped
 into each posted message's Slack metadata, and is the target of ``[text](#slug)``
-cross-references from sibling threads.
+cross-references from sibling threads. So renumbering is cheap — `reorder` (or
+editing the name in a staged message's chrome line) moves files and nothing
+else, and git reconstructs each thread's history across the rename from content.
 """
 from __future__ import annotations
 
@@ -35,6 +37,10 @@ from .doc import DocThread
 THREAD_FILE_RE = re.compile(r'^(\d{2})-([a-zA-Z0-9_-]+)\.md$')
 
 INDEX_WIDTH = 2
+
+# The slug charset on its own, for validating a name that arrived without an
+# index (a chrome line naming a new thread `cuda-graph.md`).
+SLUG_RE = re.compile(r'[a-zA-Z0-9_-]+')
 
 
 @dataclass(frozen=True, order=True)
@@ -142,8 +148,39 @@ def find_thread(session_dir: Path | str, slug: str) -> tuple[ThreadFile, DocThre
 def next_index(files: list[ThreadFile]) -> int:
     """The index a newly-added thread should take: one past the highest in use.
 
-    Gaps are preserved rather than compacted — renumbering would rename files,
-    and a rename breaks the per-file git history that is the whole point of
-    the one-file-per-thread layout.
+    Gaps are left alone rather than compacted, so adding a thread never
+    renumbers an existing one. Deliberate compaction is `renumber`.
     """
     return max((f.index for f in files), default=0) + 1
+
+
+def slugify(text: str, max_words: int = 6) -> str:
+    """A slug from a message's opening words, for naming an adopted thread.
+
+    Reads the first line only — a draft's first line is its subject far more
+    often than any other heuristic would find. Markdown emphasis, links and
+    code fences are stripped so ``**MFU** update`` yields ``mfu-update``.
+    Returns ``''`` when nothing survives, which callers turn into a fallback.
+    """
+    line = text.strip().split('\n')[0]
+    line = re.sub(r'<[^>|]*\|([^>]*)>', r'\1', line)   # `<url|text>` → `text`
+    line = re.sub(r'[*_`~]', '', line)
+    words = re.findall(r'[a-zA-Z0-9]+', line.lower())
+    return '-'.join(words[:max_words])
+
+
+def dedupe_thread_filename(index: int, slug: str, taken: set[str]) -> str:
+    """``NN-slug.md``, suffixed until it doesn't collide with ``taken``.
+
+    Collisions are real: two drafts opening with the same words slugify the
+    same. Suffixing the *slug* rather than bumping the index keeps the number
+    meaning "where this sorts" instead of quietly meaning "how many retries".
+    """
+    candidate = thread_filename(index, slug)
+    if candidate not in taken:
+        return candidate
+    for n in range(2, 100):
+        candidate = thread_filename(index, f'{slug}-{n}')
+        if candidate not in taken:
+            return candidate
+    raise ValueError(f"Could not find a free filename for {slug!r} at index {index}")

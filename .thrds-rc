@@ -28,6 +28,7 @@ alias tss='slck status'                 # per-thread state + destination
 alias tspr='slck promote'               # post ONE thread to its target
 alias tsdr='slck drop'                  # mark a thread abandoned
 alias tsad='slck adopt'                 # record an already-posted message
+alias tsro='slck reorder'               # renumber thread files → gapless 01..NN
 alias tsm='slck migrate'                # legacy doc → per-thread files
 alias tsrp='slck replay'                # rewrite history → per-thread files
 

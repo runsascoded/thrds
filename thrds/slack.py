@@ -11,6 +11,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 from .chrome import (
+    Chrome,
     ChromeEdit,
     has_chrome,
     parse as parse_chrome,
@@ -41,11 +42,30 @@ from .refs import (
     thread_has_refs,
     validate_refs,
 )
-from .state import SessionState, ThreadTarget
+from .state import SessionState, ThreadEntry, ThreadTarget
+from .threadfile import (
+    SLUG_RE,
+    dedupe_thread_filename,
+    next_index,
+    parse_thread_filename,
+    slugify,
+    thread_files,
+)
 
 THRDS_METADATA_EVENT_TYPE = 'thrds'
 
 SLACK_MESSAGE_LIMIT = 4000
+# A `section` block's text maxes out below the 4000 a plain `text` message
+# allows, so a body in between finalizes as text rather than being split.
+SLACK_SECTION_LIMIT = 3000
+
+
+@dataclass(frozen=True)
+class AdoptedThread:
+    """A thread discovered in the staging channel and taken into the session."""
+    slug: str
+    filename: str
+    thread: DocThread
 
 
 def _slack_icon_url(msg: dict) -> str | None:
@@ -149,6 +169,8 @@ class SlackClient:
         self._metadata_by_content: dict[str, dict] | None = None
         self._chrome_by_content: dict[str, str] | None = None
         self._chrome_by_slug: dict[str, str] | None = None
+        self._finalized_content: set[str] = set()
+        self._finalized_slugs: set[str] = set()
         self._skip_op: bool = False
         self._bot_ids: tuple[str, str | None] | None = None
         self._user_name_cache: dict[str, str] = {}
@@ -254,12 +276,25 @@ class SlackClient:
 
     @staticmethod
     def _raw_body(m: dict) -> str:
-        """A message's body, with any staging-chrome footer stripped.
+        """A message's body, with any staging chrome removed.
 
-        Runs on the wire text, before ``to_markdown``, mirroring the footer
-        being appended after ``to_slack``. This is what makes chrome unable to
-        round-trip into a doc; `promote_thread` backstops it.
+        Two shapes, because chrome renders two ways. A live draft carries it as
+        a trailing text line, stripped here — running on the wire text, before
+        ``to_markdown``, mirrors it being appended after ``to_slack``. A
+        *finalized* thread carries it as blocks, in which case the body is the
+        section block: Slack flattens ``text`` to a one-line notification
+        fallback whenever blocks are present, so reading ``text`` there would
+        silently destroy every multi-line body.
+
+        Only ``section`` blocks are read, never ``context``, so chrome can't
+        round-trip into a doc either way; `promote_thread` backstops it.
         """
+        sections = [
+            b for b in (m.get("blocks") or [])
+            if b.get("type") == "section" and (b.get("text") or {}).get("text")
+        ]
+        if len(sections) == 1:
+            return sections[0]["text"]["text"]
         return split_chrome(m.get("text", ""))[0]
 
     def list_messages(self, thread_id: str) -> list[Message]:
@@ -413,24 +448,41 @@ class SlackClient:
         return Message(id=message_id, content=content)
 
     def _attach_chrome(self, data: dict, content: str, wire: str) -> None:
-        """Append this content's staging-chrome footer to the outgoing text.
+        """Render this content's staging chrome into the outgoing payload.
 
-        Appended to ``wire`` — after md→mrkdwn conversion, so the converter
-        never sees it, mirroring `split_chrome` running before the reverse.
+        Two shapes, chosen by whether the thread is finalized:
 
-        Every message in a staging sync is sent with ``blocks: []``, whether or
-        not it gets a footer: `chat.update` leaves existing blocks in place
-        unless told otherwise, and a message still carrying them from the
-        block-based version of chrome would stay uneditable in Slack forever.
+        * **draft** — chrome is a trailing line appended to ``wire``, after
+          md→mrkdwn conversion so the converter never sees it, mirroring
+          `split_chrome` running before the reverse. The message stays a plain
+          text message, so it stays editable in Slack.
+        * **finalized** — chrome becomes a ``context`` block under a ``section``
+          body. Slack strips the Edit affordance from any message carrying
+          blocks, which is a liability for a draft and exactly the point for a
+          thread that has already gone out: the staged copy visibly locks, and
+          `reopen` is the only way back.
 
-        Skipped when the footer wouldn't fit under Slack's message limit — a
-        complete body matters more than the affordance.
+        Every message in a staging sync is sent with an explicit ``blocks``,
+        even an empty one: `chat.update` leaves existing blocks in place unless
+        told otherwise, so a thread that got reopened would stay locked.
+
+        A footer that wouldn't fit under Slack's message limit is dropped, and
+        a body over the per-section limit stays a text message rather than
+        being split mid-mrkdwn — a complete body beats the affordance.
         """
         if self._chrome_by_content is None:
             return
         data["blocks"] = []
         footer = self._chrome_by_content.get(content)
-        if not footer or len(wire) + len(footer) + 2 > SLACK_MESSAGE_LIMIT:
+        if not footer:
+            return
+        if content in self._finalized_content and len(wire) <= SLACK_SECTION_LIMIT:
+            data["blocks"] = [
+                {"type": "section", "text": {"type": "mrkdwn", "text": wire}},
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]},
+            ]
+            return
+        if len(wire) + len(footer) + 2 > SLACK_MESSAGE_LIMIT:
             return
         data["text"] = f"{wire}\n\n{footer}"
 
@@ -999,12 +1051,17 @@ class SlackClient:
             filename=filename,
         )
 
-    def _live_chrome_line(self, op_ts: str) -> str | None:
-        """The footer currently on the staged message at ``op_ts``, if any.
+    def _live_chrome(self, op_ts: str) -> tuple[str | None, bool]:
+        """``(chrome line, is_finalized)`` for the staged message at ``op_ts``.
+
+        Both halves matter to the reconcile. The line can be identical while
+        the *shape* changes — dropping a thread finalizes it without altering a
+        word of its chrome — so comparing text alone would leave it unlocked
+        forever.
 
         Entity-decoded, because Slack HTML-encodes ``&`` on storage: a
-        permalink's ``&cid=`` comes back as ``&amp;cid=``, and comparing that
-        against the footer we generate would report drift on every push and
+        permalink's ``&cid=`` comes back ``&amp;cid=``, and comparing that
+        against freshly-rendered chrome would report drift on every push and
         re-edit every message forever.
         """
         result = self._request("conversations.replies", {
@@ -1012,13 +1069,26 @@ class SlackClient:
             "ts": op_ts,
             "limit": 1,
         }, method="GET")
-        messages = result.get("messages") or [{}]
-        text = _decode_entities(messages[0].get("text", ""))
-        stripped = text.rstrip("\n")
-        _, sep, last = stripped.rpartition("\n")
-        if not sep or parse_chrome(last.strip()) is None:
-            return None
-        return last.strip()
+        message = (result.get("messages") or [{}])[0]
+        contexts = [
+            b for b in (message.get("blocks") or []) if b.get("type") == "context"
+        ]
+        if contexts:
+            line = _decode_entities("".join(
+                e.get("text", "") for e in contexts[0].get("elements", [])
+                if e.get("type") == "mrkdwn"
+            ))
+            return (line or None), True
+        text = _decode_entities(message.get("text", ""))
+        lines = text.rstrip("\n").split("\n")
+        if len(lines) < 2:
+            return None, False
+        last = lines[-1].strip()
+        return (last, False) if parse_chrome(last) is not None else (None, False)
+
+    def _live_chrome_line(self, op_ts: str) -> str | None:
+        """Just the chrome line — what `pull_chrome_edits` reads."""
+        return self._live_chrome(op_ts)[0]
 
     def _reconcile_chrome(
         self,
@@ -1041,7 +1111,8 @@ class SlackClient:
         footer = (self._chrome_by_content or {}).get(content)
         if not footer:
             return False
-        if self._live_chrome_line(op_ts) == footer:
+        want = (footer, content in self._finalized_content)
+        if self._live_chrome(op_ts) == want:
             return False
         if pace > 0:
             time.sleep(pace + random.uniform(0, jitter))
@@ -1111,6 +1182,8 @@ class SlackClient:
             if line is None:
                 continue
             ours = [m for m in thread.messages if m.author is None]
+            if ours and thread.slug in self._finalized_slugs:
+                self._finalized_content.add(ours[0].content)
             if ours:
                 self._chrome_by_content[ours[0].content] = line
 
@@ -1161,6 +1234,13 @@ class SlackClient:
         self._chrome_by_slug = self._chrome_for_threads(
             phase2_doc.threads, state, filenames or {},
         )
+        # A terminal thread's staged copy finalizes: chrome moves into blocks,
+        # which Slack renders more quietly and — the point — makes uneditable.
+        # `reopen` is the way back.
+        self._finalized_slugs = {
+            slug for slug, e in state.threads.items()
+            if e.is_terminal and state.staging_chrome.finalize_terminal
+        }
         self._register_chrome(doc.threads)
         self._register_chrome(phase2_doc.threads)
         try:
@@ -1225,6 +1305,8 @@ class SlackClient:
             self.channel = prev_channel
             self._chrome_by_content = None
             self._chrome_by_slug = None
+            self._finalized_content = set()
+            self._finalized_slugs = set()
 
     def promote_thread(
         self,
@@ -1883,22 +1965,30 @@ class SlackClient:
             doc = self._resolve_custom_emoji(doc, state, session_dir)
         return doc.threads
 
+    def _resolve_chrome_channel(self, chrome: Chrome) -> str | None:
+        """The channel id a parsed chrome line names, resolving ``#name`` if needed."""
+        if chrome.channel is not None:
+            return chrome.channel
+        if chrome.channel_name is None:
+            return None
+        by_name = {n.lower(): cid for n, cid in self.list_channels_by_name().items()}
+        return by_name.get(chrome.channel_name.lower())
+
     def pull_chrome_edits(
         self,
         state: SessionState,
         filenames: dict[str, str] | None = None,
     ) -> dict[str, ChromeEdit]:
-        """Read each staged OP's footer and apply what it declares.
+        """Read each staged OP's chrome line and apply what it declares.
 
-        The affordance the footer exists for, and the reason it can't live in
+        The affordance chrome exists for, and the reason it can't live in
         blocks: editing "→ #some-channel" in Slack is how you point a draft
         somewhere else, and pasting a message permalink after the arrow aims
         it *into* that thread.
 
-        Retargets are applied to ``state``. A changed filename is reported but
-        not acted on — see :class:`ChromeEdit`. Terminal threads are skipped
-        entirely: a `posted` thread's target is a record of where it went, not
-        an instruction.
+        Retargets and renames are both applied — see :class:`ChromeEdit` for
+        why renaming is safe. Terminal threads are skipped: a `posted` thread's
+        target is a record of where it went, not an instruction.
         """
         if state.staging_channel is None or not state.staging_chrome.any_enabled:
             return {}
@@ -1913,10 +2003,12 @@ class SlackClient:
                 if chrome is None:
                     continue
                 was, now = entry.target, None
-                if state.staging_chrome.target_link and chrome.channel is not None:
-                    candidate = ThreadTarget(
-                        channel=chrome.channel, thread_ts=chrome.thread_ts,
-                    )
+                channel = (
+                    self._resolve_chrome_channel(chrome)
+                    if state.staging_chrome.target_link else None
+                )
+                if channel is not None:
+                    candidate = ThreadTarget(channel=channel, thread_ts=chrome.thread_ts)
                     if candidate != was:
                         entry.target = candidate
                         now = candidate
@@ -1932,6 +2024,100 @@ class SlackClient:
         finally:
             self.channel = prev_channel
         return edits
+
+    def adopt_new_staging_threads(
+        self,
+        state: SessionState,
+        session_dir: Path,
+    ) -> list[AdoptedThread]:
+        """Adopt top-level messages written straight into the staging channel.
+
+        Starting a thread shouldn't require leaving Slack: post a draft in the
+        staging channel, give it a chrome line naming where it's going, and the
+        next pull turns it into a thread with its own file and state entry.
+
+        A message qualifies only if it's ours, top-level, not already a known
+        thread, and carries a chrome line — that last condition is what
+        separates "a new draft" from "a note to self in the scratchpad".
+
+        Oldest first, so several new drafts get indices in the order they were
+        written. ``state`` gains an entry for each; the caller writes the files.
+        """
+        if state.staging_channel is None:
+            return []
+        known = {e.staging_ts for e in state.threads.values() if e.staging_ts is not None}
+        user_id, bot_id = self.bot_ids
+        files = thread_files(session_dir)
+        taken = {f.name for f in files}
+        index = next_index(files)
+        adopted: list[AdoptedThread] = []
+        prev_channel, self.channel = self.channel, state.staging_channel
+        try:
+            history = self.list_channel_history(state.staging_channel, limit=200)
+            for raw in sorted(history, key=lambda m: m.get("ts", "")):
+                ts = raw.get("ts")
+                if ts is None or ts in known or raw.get("subtype"):
+                    continue
+                ours = raw.get("user") == user_id or (
+                    bot_id is not None and raw.get("bot_id") == bot_id
+                )
+                if not ours:
+                    continue
+                text = _decode_entities(raw.get("text", ""))
+                body, chrome = split_chrome(text)
+                if chrome is None:
+                    continue
+                name = self._name_for_adopted(chrome, body, index, taken)
+                parsed = parse_thread_filename(name)
+                assert parsed is not None  # _name_for_adopted only emits valid names
+                slug = parsed[1]
+                if slug in state.threads:
+                    continue
+                taken.add(name)
+                index = max(index, parsed[0] + 1)
+                channel = self._resolve_chrome_channel(chrome)
+                state.threads[slug] = ThreadEntry(
+                    staging_ts=ts,
+                    target=(
+                        ThreadTarget(channel=channel, thread_ts=chrome.thread_ts)
+                        if channel is not None else None
+                    ),
+                )
+                adopted.append(AdoptedThread(
+                    slug=slug,
+                    filename=name,
+                    thread=DocThread(
+                        messages=self._pull_thread_docmessages(ts), slug=slug,
+                    ),
+                ))
+        finally:
+            self.channel = prev_channel
+        return adopted
+
+    @staticmethod
+    def _name_for_adopted(
+        chrome: Chrome,
+        body: str,
+        index: int,
+        taken: set[str],
+    ) -> str:
+        """The ``NN-slug.md`` name for a thread adopted out of the staging channel.
+
+        An explicit filename in the chrome line wins — that's the author saying
+        what to call it and where to sort it. Otherwise the slug comes from the
+        message's first line and the index is the next free one, so adopting
+        never renumbers an existing thread.
+        """
+        if chrome.filename is not None:
+            parsed = parse_thread_filename(chrome.filename)
+            if parsed is not None:
+                return dedupe_thread_filename(parsed[0], parsed[1], taken)
+            # `cuda-graph.md` — a name without a number. The author cared what
+            # it's called, not where it sorts, so take the next free index.
+            stem = chrome.filename[:-3] if chrome.filename.endswith('.md') else ''
+            if SLUG_RE.fullmatch(stem):
+                return dedupe_thread_filename(index, stem, taken)
+        return dedupe_thread_filename(index, slugify(body) or 'untitled', taken)
 
     def pull_doc_staging(
         self,
