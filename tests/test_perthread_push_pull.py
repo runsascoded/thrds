@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import pytest
 from click.testing import CliRunner
 
-from thrds import DocMessage, DocThread, SessionState, ThreadEntry
+from thrds import DocMessage, DocThread, SessionState, ThreadEntry, ThreadTarget
 from thrds.cli import SLACK_TOKEN_ENV, cli
 from thrds.doc import DocSyncResult
 
@@ -25,6 +25,7 @@ class SyncSpy:
     staging_calls: list[dict] = field(default_factory=list)
     pull_calls: list[str] = field(default_factory=list)
     pull_returns: list[DocThread] = field(default_factory=list)
+    prod_returns: list[DocThread] = field(default_factory=list)
 
     def __init__(self, *, token, channel):
         self.token = token
@@ -32,6 +33,7 @@ class SyncSpy:
         self.staging_calls = []
         self.pull_calls = []
         self.pull_returns = []
+        self.prod_returns = []
 
     def list_channels_by_name(self) -> dict[str, str]:
         return {}
@@ -56,6 +58,9 @@ class SyncSpy:
 
     def pull_chrome_edits(self, state, filenames=None):
         return {}
+
+    def pull_promoted_threads(self, state, session_dir=None):
+        return self.prod_returns
 
     def adopt_new_staging_threads(self, state, session_dir):
         return []
@@ -194,6 +199,23 @@ def test_pull_skips_threads_absent_from_slack(session, spy):
     before = (session / '02-beta.md').read_text()
     _run('pull')
     assert (session / '02-beta.md').read_text() == before
+
+
+def test_pull_promoted_thread_takes_prod_state_over_staging(session, spy):
+    """Once promoted, prod is canonical — hand-edits to the posted message
+    must land in the local file even though the staging copy is stale."""
+    state = SessionState.load(session)
+    entry = state.thread('alpha')
+    entry.state = 'posted'
+    entry.target = ThreadTarget(channel='C0PROD', thread_ts='0.1')
+    entry.posted_msg_ts = ['7.7']
+    state.save(session)
+    spy.pull_returns = _threads(('alpha', ['Stale staging copy.']), ('beta', ['B.']))
+    spy.prod_returns = _threads(('alpha', ['Prod copy, hand-edited.']))
+    result = _run('pull')
+    assert result.exit_code == 0, result.output
+    assert (session / '01-alpha.md').read_text() == 'Prod copy, hand-edited.\n'
+    assert (session / '02-beta.md').read_text() == 'B.\n'
 
 
 def test_pull_prod_rejected_on_per_thread_session(session, spy):

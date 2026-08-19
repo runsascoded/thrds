@@ -2028,6 +2028,45 @@ class SlackClient:
             doc = self._resolve_custom_emoji(doc, state, session_dir)
         return doc.threads
 
+    def pull_promoted_threads(
+        self,
+        state: SessionState,
+        session_dir: Path | None = None,
+    ) -> list[DocThread]:
+        """Fetch each promoted thread's current PROD state (its own messages only).
+
+        Staging pull covers drafts; once a thread is promoted, its canonical
+        copy lives at the target, where it can be hand-edited after the fact.
+        This reads each posted slug's recorded messages (``posted_msg_ts``,
+        falling back to ``posted_ts``) from the target channel so the local
+        file — and the gist mirror — track the prod record. Staging copies
+        are deliberately left alone: a promoted thread's staged copy is a
+        frozen artifact of the drafting phase, not a second source of truth.
+        """
+        out: list[DocThread] = []
+        for slug, entry in sorted(state.threads.items()):
+            if entry.state != 'posted' or entry.target is None:
+                continue
+            own = set(entry.posted_msg_ts or ([entry.posted_ts] if entry.posted_ts else []))
+            root = entry.target.thread_ts or entry.posted_ts
+            if not own or root is None:
+                continue
+            prev_channel, self.channel = self.channel, entry.target.channel
+            try:
+                msgs = [m for m in self.list_messages(root) if m.id in own]
+            finally:
+                self.channel = prev_channel
+            if not msgs:
+                continue
+            out.append(DocThread(
+                slug=slug,
+                messages=[DocMessage(content=m.content) for m in msgs],
+            ))
+        doc = Doc(threads=out)
+        if session_dir is not None:
+            doc = self._resolve_custom_emoji(doc, state, session_dir)
+        return doc.threads
+
     def _resolve_chrome_channel(self, chrome: Chrome) -> str | None:
         """The channel id a parsed chrome line names, resolving ``#name`` if needed."""
         if chrome.channel is not None:

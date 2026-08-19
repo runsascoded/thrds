@@ -784,6 +784,12 @@ def slack_pull(channel: str | None, dry_run: bool, prod: bool, doc_path: str | N
 
         by_slug = {t.slug: t for t in threads}
         by_slug.update({a.slug: a.thread for a in adopted})
+        # Promoted threads: prod is canonical (hand-edits happen there), so it
+        # overrides whatever the frozen staging copy says. Staging is NOT
+        # re-synced to match — the staged copy is a drafting artifact.
+        for t in client.pull_promoted_threads(state, session_dir=session_dir):
+            by_slug[t.slug] = t
+            err(f"pulled prod state for {t.slug} (posted)")
         if write:
             for src, dst in renames:
                 src.rename(dst)
