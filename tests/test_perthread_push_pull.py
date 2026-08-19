@@ -50,7 +50,7 @@ class SyncSpy:
             deleted_slugs=[],
         )
 
-    def pull_threads_staging(self, state, session_dir=None):
+    def pull_threads_staging(self, state, session_dir=None, slugs=None):
         self.pull_calls.append(state.staging_channel)
         return self.pull_returns
 

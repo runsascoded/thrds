@@ -251,6 +251,29 @@ def serialize_thread(thread: DocThread, frontmatter: Frontmatter | None = None) 
     return '\n\n'.join(parts) + '\n'
 
 
+def diff_texts(
+    a: str,
+    b: str,
+    from_label: str,
+    to_label: str,
+    context: int = 3,
+) -> str:
+    """Unified diff of two `.md` texts; empty string when they're identical.
+
+    The per-thread counterpart to :func:`diff_docs` compares a working-tree
+    file byte-for-byte against what `pull` would write, so it needs a diff that
+    does *not* canonicalize its left side — non-canonical local formatting is a
+    change `pull` would make, and hiding it would misreport.
+    """
+    return "".join(difflib.unified_diff(
+        a.splitlines(keepends=True),
+        b.splitlines(keepends=True),
+        fromfile=from_label,
+        tofile=to_label,
+        n=context,
+    ))
+
+
 def diff_docs(
     a: Doc,
     b: Doc,
@@ -265,15 +288,13 @@ def diff_docs(
     that round-trip to the same canonical form don't leak into the diff.
     Returns an empty string when the two Docs are canonically identical.
     """
-    a_lines = serialize_doc(a).splitlines(keepends=True)
-    b_lines = serialize_doc(b).splitlines(keepends=True)
-    return "".join(difflib.unified_diff(
-        a_lines,
-        b_lines,
-        fromfile=from_label,
-        tofile=to_label,
-        n=context,
-    ))
+    return diff_texts(
+        serialize_doc(a),
+        serialize_doc(b),
+        from_label=from_label,
+        to_label=to_label,
+        context=context,
+    )
 
 
 def serialize_doc(doc: Doc, frontmatter: Frontmatter | None = None) -> str:

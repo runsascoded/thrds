@@ -130,6 +130,7 @@ slck init draft.md                     # scaffold session dir + gist mirror
 slck migrate                           # split the doc into per-thread NN-slug.md files
 slck push                              # sync every thread to staging PC (terraform)
 slck pull                              # pull edits back → each thread's file (-n to preview)
+slck diff [<slug>]                     # what `pull` would change, per thread
 slck status                            # per-thread state + resolved destination
 slck promote cw-mpu                    # post ONE thread to its target (confirms first)
 slck drop cw-summary                   # mark a thread abandoned without posting
@@ -191,6 +192,8 @@ Two things keep chrome out of prod, since it's in the message rather than beside
 
 - **Stripped on pull.** The line is appended after md→mrkdwn conversion and removed before the reverse, so neither direction of the converter ever sees it. (For a finalized message the body is read from its section block — Slack flattens `text` to a one-line notification fallback whenever blocks are present.)
 - **Fail closed at the boundary.** `promote` refuses to post a body that still carries a chrome line. Stripping is a step that can fail open; publishing a secret-gist URL to a real channel is worth an assertion.
+
+**`diff` is the comparison; `pull -n` is the dump.** `slck diff` renders each staged thread's Slack side back to markdown and diffs it against that thread's file — one unified diff per changed thread, nothing for unchanged ones, always exit 0. `pull -n` prints what Slack currently holds without comparing it to anything, and `git diff HEAD~1` answers the same question as `diff` but only *after* the write. The local side is the file verbatim rather than its canonical re-serialization, since `pull` overwrites the file: formatting that wouldn't survive a round trip is a pending change, not noise to hide.
 
 **Prod push is per-thread and never whole-doc.** `promote` resolves the destination, prints it with the exact body, asks, then posts only that thread — and never archives the staging channel, because your other drafts are still live. Archiving is its own verb, refusing until every thread is `posted` or `dropped` (`-f` overrides).
 

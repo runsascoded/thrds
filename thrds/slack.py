@@ -5,6 +5,7 @@ import random
 import re
 import time
 import urllib.request
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.error import HTTPError
@@ -1590,6 +1591,7 @@ class SlackClient:
         channel: str,
         preamble_ts: str | None,
         thread_ts_by_slug: dict[str, str],
+        only: set[str] | None = None,
     ) -> Doc:
         """Fetch a doc's content from ``channel`` given the state pointers.
 
@@ -1598,6 +1600,11 @@ class SlackClient:
 
         Applies ``_reverse_cross_refs`` on each message's content so pulled
         text uses ``#slug`` refs (symmetric with local doc format).
+
+        ``only`` restricts which threads are *fetched* without narrowing
+        ``thread_ts_by_slug``, which stays whole: it's the map cross-refs
+        resolve against, so filtering it would leave a link to an unfetched
+        sibling as a raw permalink and report that as a change.
         """
         prev_channel = self.channel
         self.channel = channel
@@ -1614,6 +1621,8 @@ class SlackClient:
             sorted_slugs = sorted(thread_ts_by_slug, key=lambda s: float(thread_ts_by_slug[s]))
             threads = []
             for slug in sorted_slugs:
+                if only is not None and slug not in only:
+                    continue
                 msgs = self._pull_thread_docmessages(thread_ts_by_slug[slug])
                 threads.append(DocThread(
                     slug=slug,
@@ -1958,6 +1967,7 @@ class SlackClient:
         self,
         state: SessionState,
         session_dir: Path | None = None,
+        slugs: Iterable[str] | None = None,
     ) -> list[DocThread]:
         """Fetch each per-thread draft's current state from the staging PC.
 
@@ -1966,6 +1976,9 @@ class SlackClient:
         callers write each back to its own ``NN-slug.md``, which is what makes
         an edit (or a *deletion*) made in Slack land as a version of that one
         message rather than as a change to a shared doc.
+
+        ``slugs`` limits the fetch to those threads — ``diff <slug>`` shouldn't
+        cost one API round trip per unrelated draft in the session.
         """
         if state.staging_channel is None:
             raise ValueError(
@@ -1976,7 +1989,8 @@ class SlackClient:
             for slug, e in sorted(state.threads.items())
             if e.staging_ts is not None
         }
-        doc = self._pull_doc(state.staging_channel, None, roots)
+        only = None if slugs is None else set(slugs)
+        doc = self._pull_doc(state.staging_channel, None, roots, only=only)
         if session_dir is not None:
             doc = self._resolve_custom_emoji(doc, state, session_dir)
         return doc.threads

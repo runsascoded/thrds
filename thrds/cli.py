@@ -77,12 +77,18 @@ import click
 from . import mirror
 from .doc import Doc
 from .chrome import split as split_chrome
-from .md import diff_docs, parse_doc, serialize_doc, serialize_thread
+from .md import diff_docs, diff_texts, parse_doc, serialize_doc, serialize_thread
 from .migrate import apply_migration, plan_migration
 from .replay import ReplayError, plan_replay, verify_plan, write_replay
 from .slack import ScanCapReached, SlackClient
 from .state import STATE_PATH, SessionState, ThreadTarget
-from .threadfile import find_thread, read_threads, thread_filename, thread_files
+from .threadfile import (
+    find_thread,
+    parse_thread_filename,
+    read_threads,
+    thread_filename,
+    thread_files,
+)
 
 
 def err(*msg):
@@ -827,20 +833,105 @@ def slack_pull(channel: str | None, dry_run: bool, prod: bool, doc_path: str | N
         click.echo(text, nl=False)
 
 
+def _thread_slug_arg(arg: str) -> str:
+    """The slug an argument names, accepting a filename as well as a bare slug.
+
+    ``diff 05-grug.md`` is what shell completion produces and what anyone
+    looking at the directory listing types, so both spellings resolve.
+    """
+    name = Path(arg).name
+    parsed = parse_thread_filename(name if name.endswith('.md') else f'{name}.md')
+    return parsed[1] if parsed is not None else name
+
+
+def _diff_threads(
+    client: SlackClient,
+    state: SessionState,
+    session_dir: Path,
+    slug_arg: str | None,
+) -> None:
+    """Print each staged thread's local↔Slack diff; nothing for unchanged ones."""
+    files = {tf.slug: tf for tf in thread_files(session_dir)}
+    staged = {slug for slug, e in state.threads.items() if e.staging_ts is not None}
+
+    if slug_arg is not None:
+        slug = _thread_slug_arg(slug_arg)
+        if slug not in files and slug not in staged:
+            available = ', '.join(sorted(files)) or '(none)'
+            raise click.UsageError(
+                f"No thread {slug!r} in this session; available: {available}"
+            )
+        if slug not in staged:
+            err(f"{slug}: never pushed to staging — nothing on the Slack side to compare.")
+            return
+        wanted = [slug]
+    else:
+        # File order first (the NN prefix is post order), then any thread that
+        # exists in state but has no file — a locally-deleted draft still has a
+        # Slack side, and "pull would restore it" is exactly what diff reports.
+        wanted = [tf.slug for tf in sorted(files.values()) if tf.slug in staged]
+        wanted += sorted(staged - set(files))
+        if not wanted:
+            err('No staged threads to diff.')
+            return
+
+    threads = {
+        t.slug: t
+        for t in client.pull_threads_staging(state, session_dir=session_dir, slugs=wanted)
+    }
+    for slug in wanted:
+        tf = files.get(slug)
+        name = tf.name if tf is not None else f'{slug}.md'
+        local = tf.path.read_text() if tf is not None else ''
+        thread = threads.get(slug)
+        # A thread whose OP was deleted in Slack comes back with no messages;
+        # `serialize_thread` of that is a lone newline, which would read as
+        # "one blank line remains" rather than "it's gone".
+        remote = serialize_thread(thread) if thread is not None and thread.messages else ''
+        click.echo(
+            diff_texts(local, remote, f'{name} (local)', f'{name} (slack)'),
+            nl=False,
+        )
+
+
 @slack_cli.command("diff")
 @click.option('-c', '--channel', help='Prod channel override (only with --prod).')
-@click.option('-p', '--prod', is_flag=True, help='Diff against prod channel.')
-@click.argument('doc_path', required=False)
-def slack_diff(channel: str | None, prod: bool, doc_path: str | None):
-    """Diff local DOC_PATH against Slack's current state. Default: staging PC."""
+@click.option('-p', '--prod', is_flag=True, help='Diff against prod channel (legacy sessions only).')
+@click.argument('target', required=False)
+def slack_diff(channel: str | None, prod: bool, target: str | None):
+    """Show what `pull` would change: local content vs. Slack's current state.
+
+    Per-thread sessions diff each thread that has a `staging_ts` against its
+    own file, emitting one unified diff per changed thread and nothing for
+    unchanged ones. TARGET restricts that to a single thread (slug or
+    filename). Always exits 0 — this is a report, not a gate.
+
+    The local side is the working-tree file verbatim, not its canonical
+    re-serialization, because `pull` overwrites the file: local formatting
+    that doesn't survive a round trip *is* a pending change, and canonicalizing
+    first would hide it.
+
+    Legacy single-doc sessions diff DOC_PATH against the whole staging (or,
+    with `--prod`, prod) doc.
+    """
     state = _load_state(expected_platform='slack')
     if not prod and channel is not None:
         raise click.UsageError('--channel requires --prod.')
-    local_doc = _load_doc(state, doc_path)
     client = _make_slack_client()
     if channel is not None:
         channel = _resolve_channel(client, channel)
     session_dir = Path.cwd()
+
+    if not state.is_legacy:
+        if prod:
+            raise click.UsageError(
+                'Per-thread sessions diff against staging only; a promoted thread '
+                'is tracked by its `posted_ts`.'
+            )
+        _diff_threads(client, state, session_dir, target)
+        return
+
+    local_doc = _load_doc(state, target)
     slack_doc = (
         client.pull_doc_prod(state, channel=channel, session_dir=session_dir)
         if prod
