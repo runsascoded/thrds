@@ -126,18 +126,18 @@ Foreign (non-editable) messages — e.g. human replies in a bot thread — are a
 Installing `thrds` also installs **`slck`**, which *is* the `thrds slack` group — same click group object, so every verb, flag and help string is shared and `slck push` ≡ `thrds slack push`. (An alias list would need one entry per verb and go stale as verbs are added; an entry point picks up new ones for free.)
 
 ```bash
-thrds slack init draft.md              # scaffold session dir + gist mirror
-thrds slack migrate                    # split the doc into per-thread NN-slug.md files
-thrds slack push                       # sync every thread to staging PC (terraform)
-thrds slack pull                       # pull edits back → each thread's file (-n to preview)
-thrds slack status                     # per-thread state + resolved destination
-thrds slack promote cw-mpu             # post ONE thread to its target (confirms first)
-thrds slack drop cw-summary            # mark a thread abandoned without posting
-thrds slack reopen cw-mpu              # un-finalize a posted/dropped thread
-thrds slack reorder                    # renumber thread files to a gapless 01..NN
-thrds slack archive                    # archive staging (once all threads are terminal)
-thrds slack list-sessions #foo         # what thrds sessions exist in #foo
-thrds slack recover -i <sid> #foo      # rebuild a lost session from Slack metadata
+slck init draft.md                     # scaffold session dir + gist mirror
+slck migrate                           # split the doc into per-thread NN-slug.md files
+slck push                              # sync every thread to staging PC (terraform)
+slck pull                              # pull edits back → each thread's file (-n to preview)
+slck status                            # per-thread state + resolved destination
+slck promote cw-mpu                    # post ONE thread to its target (confirms first)
+slck drop cw-summary                   # mark a thread abandoned without posting
+slck reopen cw-mpu                     # un-finalize a posted/dropped thread
+slck reorder                           # renumber thread files to a gapless 01..NN
+slck archive                           # archive staging (once all threads are terminal)
+slck list-sessions #foo                # what thrds sessions exist in #foo
+slck recover -i <sid> #foo             # rebuild a lost session from Slack metadata
 ```
 
 **Converting an existing session.** `migrate` converts the working tree; `replay` converts the *git history*, so a session kept as a writing example can be read without learning the retired `===` syntax:
