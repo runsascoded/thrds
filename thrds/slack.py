@@ -534,6 +534,7 @@ class SlackClient:
         jitter: float = 0.0,
         suppress_unfurls: bool = True,
         metadata: dict[str, dict] | None = None,
+        only_ts: set[str] | None = None,
     ) -> SyncResult:
         """Sync a thread to the desired state.
 
@@ -549,6 +550,10 @@ class SlackClient:
                             "event_payload": {"ACCID": "123"},
                         },
                     }
+            only_ts: Restrict the reconcile to these message ts; everything
+                else in the thread — including our own token's messages — is
+                preserved in place like a foreign message. See
+                ``SyncOptions.only_ids``.
         """
         self._suppress_unfurls = suppress_unfurls
         self._metadata_by_content = metadata
@@ -562,6 +567,7 @@ class SlackClient:
                     pace=pace,
                     jitter=jitter,
                     suppress_unfurls=suppress_unfurls,
+                    only_ids=only_ts,
                 ),
             )
         finally:
@@ -1344,11 +1350,14 @@ class SlackClient:
         - ``target.thread_ts is None`` → the thread's messages become a new
           top-level message plus its replies.
         - ``target.thread_ts`` set → the messages go *into* that existing
-          thread as replies. Slack messages we don't own come back
-          ``editable=False`` (see :meth:`list_messages`), so ``core.sync``
-          preserves the other person's OP and replies and reconciles only
-          ours — which is what makes "draft a considered reply to someone
-          else's message" the same code path as everything else.
+          thread as replies, and the reconcile is scoped to the messages
+          THIS SLUG previously posted there (``entry.posted_msg_ts``). Every
+          other message is preserved in place — foreign users' via
+          ``editable=False``, and, critically, our own token's messages from
+          other slugs or manual posts via ``only_ts``. A first promote has an
+          empty scope and is therefore strictly append-only. (Converging the
+          whole thread here once edited/deleted three unrelated posts — see
+          ``specs/promote-shared-thread-safety.md``.)
 
         Deliberately does **not** archive the staging channel: other threads in
         the session are still live drafts. Archiving is its own verb, gated on
@@ -1370,6 +1379,25 @@ class SlackClient:
                 f"trailing footer line) before promoting."
             )
 
+        entry = state.thread(slug)
+        only_ts: set[str] | None
+        if target.thread_ts is not None:
+            # Shared thread: reconcile only what this slug posted before.
+            # Legacy entries predate `posted_msg_ts`; their `posted_ts` is
+            # trustworthy unless it recorded the thread root (an old bug),
+            # which is someone else's message and must stay out of scope.
+            if entry.posted_msg_ts is not None:
+                only_ts = set(entry.posted_msg_ts)
+            elif entry.posted_ts and entry.posted_ts != target.thread_ts:
+                only_ts = {entry.posted_ts}
+            else:
+                only_ts = set()
+        else:
+            # Our own (new or previously-created) thread: every editable
+            # message in it is this slug's; foreign replies are already
+            # protected by `editable=False`.
+            only_ts = None
+
         prev_channel = self.channel
         self.channel = target.channel
         try:
@@ -1380,17 +1408,22 @@ class SlackClient:
             }
             result = self.sync(
                 core_thread,
-                thread_ts=target.thread_ts or state.thread(slug).posted_ts,
+                thread_ts=target.thread_ts or entry.posted_ts,
                 dry_run=dry_run,
                 pace=pace,
                 jitter=jitter,
                 suppress_unfurls=suppress_unfurls,
                 metadata=metadata,
+                only_ts=only_ts,
             )
             if not dry_run:
-                entry = state.thread(slug)
-                entry.posted_ts = result.thread_id
-                entry.posted_url = self.permalink(result.thread_id)
+                # Record OUR messages: `posted_ts` is the first of ours (the
+                # thread root only when the thread is ours), and the full list
+                # is the whitelist for the next re-promote.
+                entry.posted_msg_ts = list(result.message_ids)
+                first_ours = result.message_ids[0] if result.message_ids else result.thread_id
+                entry.posted_ts = first_ours
+                entry.posted_url = self.permalink(first_ours)
                 entry.target = target
                 entry.state = 'posted'
             return result

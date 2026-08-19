@@ -68,6 +68,7 @@ metadata to your app); no extra scope required for ``slack recover``.
 from __future__ import annotations
 
 import os
+import sys
 import time
 import webbrowser
 from pathlib import Path
@@ -75,6 +76,7 @@ from pathlib import Path
 import click
 
 from . import mirror
+from .core import ActionType
 from .doc import Doc
 from .chrome import split as split_chrome
 from .md import diff_docs, diff_texts, parse_doc, serialize_doc, serialize_thread
@@ -1039,18 +1041,26 @@ def slack_promote(channel: str | None, dry_run: bool, thread_ts: str | None, yes
         + (f" @ {target.thread_ts}" if target.thread_ts else ''))
     if entry.state == 'posted':
         err(f"  note: already posted (ts {entry.posted_ts}) — this will sync it in place")
+
+    # ALWAYS compute and show the real action plan (a dry-run sync against the
+    # live thread) before anything fires. Rendering only the draft body once
+    # let a promote silently edit and delete unrelated messages — the plan is
+    # the thing being approved, not the prose. See
+    # specs/promote-shared-thread-safety.md.
+    plan = client.promote_thread(slug, thread, target, state, dry_run=True)
     err('  ---')
-    for i, m in enumerate(m for m in thread.messages if m.author is None):
-        prefix = '  OP   ' if i == 0 else f'  +{i:<4d}'
-        for j, line in enumerate(m.content.split('\n')):
-            err(f"{prefix if j == 0 else '       '} {line}")
+    err(plan.format_preview(color=sys.stderr.isatty(), prefix='  '))
     err('  ---')
+    destructive = [a for a in plan.actions if a.type in (ActionType.EDIT, ActionType.DELETE)]
+    if destructive:
+        err(f"  ⚠ plan touches {len(destructive)} existing message(s) "
+            f"({', '.join(a.type.name for a in destructive)}) — all must be this thread's own prior posts")
 
     if dry_run:
         err('(dry run — nothing posted)')
         return
     if not yes:
-        click.confirm('Post it?', abort=True, err=True)
+        click.confirm('Apply this plan?', abort=True, err=True)
 
     result = client.promote_thread(slug, thread, target, state)
     state.save()

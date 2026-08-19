@@ -159,6 +159,11 @@ class ThreadEntry:
     state: str = DEFAULT_THREAD_STATE
     posted_ts: str | None = None
     posted_url: str | None = None
+    # Every message ts this slug has posted at its target — the reconcile
+    # whitelist for re-promotes into shared threads. None = never promoted
+    # under the whitelist regime (legacy entries fall back to `posted_ts`
+    # when it isn't the thread root; see promote_thread).
+    posted_msg_ts: list[str] | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.target, dict):

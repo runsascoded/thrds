@@ -14,7 +14,7 @@ from click.testing import CliRunner
 
 from thrds import SessionState, ThreadEntry, ThreadTarget
 from thrds.cli import SLACK_TOKEN_ENV, cli
-from thrds.core import SyncResult
+from thrds.core import Action, ActionType, SyncResult
 
 
 @dataclass
@@ -36,6 +36,7 @@ class PromoteSpy:
     user_id: str = 'U0ME'
     permalink_returns: str = 'https://ex.slack.com/archives/C0D/p9900000'
     permalink_raises: Exception | None = None
+    plan_actions: list[Action] | None = None
 
     def __init__(self, *, token, channel):
         self.token = token
@@ -48,6 +49,7 @@ class PromoteSpy:
         self.user_id = 'U0ME'
         self.permalink_returns = 'https://ex.slack.com/archives/C0D/p9900000'
         self.permalink_raises = None
+        self.plan_actions = None
 
     @property
     def bot_ids(self):
@@ -65,18 +67,30 @@ class PromoteSpy:
     def list_channels_by_name(self) -> dict[str, str]:
         return dict(self.channels_by_name)
 
-    def promote_thread(self, slug, thread, target, state, **kw):
+    def promote_thread(self, slug, thread, target, state, dry_run=False, **kw):
         self.promote_calls.append({
             'slug': slug,
             'channel': target.channel,
             'thread_ts': target.thread_ts,
             'messages': [m.content for m in thread.messages],
+            'dry_run': dry_run,
         })
+        actions = self.plan_actions if self.plan_actions is not None else [
+            Action(type=ActionType.POST, index=i, content=m.content)
+            for i, m in enumerate(thread.messages)
+        ]
+        if dry_run:
+            return SyncResult(thread_id=target.thread_ts or self.posted_ts, message_ids=[], actions=actions)
         entry = state.thread(slug)
         entry.posted_ts = self.posted_ts
+        entry.posted_msg_ts = [self.posted_ts]
         entry.target = target
         entry.state = 'posted'
-        return SyncResult(thread_id=self.posted_ts, message_ids=[self.posted_ts], actions=[])
+        return SyncResult(thread_id=self.posted_ts, message_ids=[self.posted_ts], actions=actions)
+
+    @property
+    def real_calls(self):
+        return [c for c in self.promote_calls if not c['dry_run']]
 
     def archive_channel(self, channel: str) -> None:
         self.archive_calls.append(channel)
@@ -124,7 +138,7 @@ def test_promote_uses_per_thread_target(session, spy):
     state.save(session)
     result = _run('promote', 'alpha', '-y')
     assert result.exit_code == 0, result.output
-    assert [c['channel'] for c in spy.promote_calls] == ['C0ALPHA']
+    assert [c['channel'] for c in spy.real_calls] == ['C0ALPHA']
 
 
 def test_promote_falls_back_to_session_prod_channel(session, spy):
@@ -132,7 +146,7 @@ def test_promote_falls_back_to_session_prod_channel(session, spy):
     state.prod_channel = 'C0DEFAULT'
     state.save(session)
     _run('promote', 'alpha', '-y')
-    assert [c['channel'] for c in spy.promote_calls] == ['C0DEFAULT']
+    assert [c['channel'] for c in spy.real_calls] == ['C0DEFAULT']
 
 
 def test_promote_channel_flag_overrides(session, spy):
@@ -140,13 +154,13 @@ def test_promote_channel_flag_overrides(session, spy):
     state.thread('alpha').target = ThreadTarget(channel='C0RECORDED')
     state.save(session)
     _run('promote', 'alpha', '-c', 'C0OVERRIDE', '-y')
-    assert [c['channel'] for c in spy.promote_calls] == ['C0OVERRIDE']
+    assert [c['channel'] for c in spy.real_calls] == ['C0OVERRIDE']
 
 
 def test_promote_resolves_channel_name_to_id(session, spy):
     spy.channels_by_name['marin-alerts'] = 'C0RESOLVED'
     _run('promote', 'alpha', '-c', '#marin-alerts', '-y')
-    assert [c['channel'] for c in spy.promote_calls] == ['C0RESOLVED']
+    assert [c['channel'] for c in spy.real_calls] == ['C0RESOLVED']
 
 
 def test_promote_carries_recorded_thread_ts_for_reply(session, spy):
@@ -154,7 +168,7 @@ def test_promote_carries_recorded_thread_ts_for_reply(session, spy):
     state.thread('alpha').target = ThreadTarget(channel='C0A', thread_ts='1786980761.357209')
     state.save(session)
     _run('promote', 'alpha', '-y')
-    assert [c['thread_ts'] for c in spy.promote_calls] == ['1786980761.357209']
+    assert [c['thread_ts'] for c in spy.real_calls] == ['1786980761.357209']
 
 
 def test_promote_thread_ts_flag_overrides_recorded(session, spy):
@@ -162,7 +176,7 @@ def test_promote_thread_ts_flag_overrides_recorded(session, spy):
     state.thread('alpha').target = ThreadTarget(channel='C0A', thread_ts='old.1')
     state.save(session)
     _run('promote', 'alpha', '-t', 'new.2', '-y')
-    assert [c['thread_ts'] for c in spy.promote_calls] == ['new.2']
+    assert [c['thread_ts'] for c in spy.real_calls] == ['new.2']
 
 
 def test_promote_errors_with_no_target(session, spy):
@@ -199,7 +213,7 @@ def test_promote_posts_only_the_named_thread(session, spy):
     state.prod_channel = 'C0D'
     state.save(session)
     _run('promote', 'alpha', '-y')
-    assert [c['slug'] for c in spy.promote_calls] == ['alpha']
+    assert [c['slug'] for c in spy.real_calls] == ['alpha']
 
 
 def test_promote_sends_that_threads_messages(session, spy):
@@ -207,7 +221,7 @@ def test_promote_sends_that_threads_messages(session, spy):
     state.prod_channel = 'C0D'
     state.save(session)
     _run('promote', 'alpha', '-y')
-    assert [c['messages'] for c in spy.promote_calls] == [['Alpha OP.', 'Alpha reply.']]
+    assert [c['messages'] for c in spy.real_calls] == [['Alpha OP.', 'Alpha reply.']]
 
 
 def test_promote_never_archives_staging(session, spy):
@@ -245,7 +259,8 @@ def test_promote_dry_run_posts_nothing(session, spy):
     state.save(session)
     result = _run('promote', 'alpha', '-n')
     assert result.exit_code == 0
-    assert spy.promote_calls == []
+    assert spy.real_calls == []
+    assert [c['dry_run'] for c in spy.promote_calls] == [True]
 
 
 def test_promote_dry_run_renders_destination_and_body(session, spy):
@@ -256,8 +271,10 @@ def test_promote_dry_run_renders_destination_and_body(session, spy):
     assert result.stderr.rstrip().split('\n') == [
         'promote alpha → new thread in C0D',
         '  ---',
-        '  OP    Alpha OP.',
-        '  +1    Alpha reply.',
+        '  POST [0]',
+        '    +Alpha OP.',
+        '  POST [1]',
+        '    +Alpha reply.',
         '  ---',
         '(dry run — nothing posted)',
     ]
@@ -279,7 +296,7 @@ def test_promote_declined_at_prompt_posts_nothing(session, spy):
     state.save(session)
     result = CliRunner().invoke(cli, ['slack', 'promote', 'alpha'], input='n\n')
     assert result.exit_code == 1
-    assert spy.promote_calls == []
+    assert spy.real_calls == []
 
 
 def test_promote_confirmed_at_prompt_posts(session, spy):
@@ -288,7 +305,41 @@ def test_promote_confirmed_at_prompt_posts(session, spy):
     state.save(session)
     result = CliRunner().invoke(cli, ['slack', 'promote', 'alpha'], input='y\n')
     assert result.exit_code == 0
-    assert [c['slug'] for c in spy.promote_calls] == ['alpha']
+    assert [c['slug'] for c in spy.real_calls] == ['alpha']
+
+
+def test_promote_computes_plan_before_posting(session, spy):
+    """The real post must be preceded by a dry-run plan of the SAME promote —
+    the plan is what the confirmation approves (see
+    specs/promote-shared-thread-safety.md)."""
+    state = SessionState.load(session)
+    state.prod_channel = 'C0D'
+    state.save(session)
+    _run('promote', 'alpha', '-y')
+    assert [c['dry_run'] for c in spy.promote_calls] == [True, False]
+
+
+def test_promote_plan_with_deletes_warns_loudly(session, spy):
+    spy.plan_actions = [
+        Action(type=ActionType.EDIT, index=0, message_id='2.0', content='new', prior_content='old'),
+        Action(type=ActionType.DELETE, index=1, message_id='3.0', prior_content='gone'),
+    ]
+    state = SessionState.load(session)
+    state.prod_channel = 'C0D'
+    state.save(session)
+    result = _run('promote', 'alpha', '-n')
+    assert result.stderr.rstrip().split('\n') == [
+        'promote alpha → new thread in C0D',
+        '  ---',
+        '  EDIT [0]',
+        '    -old',
+        '    +new',
+        '  DELETE [1]',
+        '    -gone',
+        '  ---',
+        "  ⚠ plan touches 2 existing message(s) (EDIT, DELETE) — all must be this thread's own prior posts",
+        '(dry run — nothing posted)',
+    ]
 
 
 def test_promote_warns_when_already_posted(session, spy):

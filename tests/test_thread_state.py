@@ -105,6 +105,7 @@ def test_threads_serialize_as_nested_json(tmp_path):
             'state': 'draft',
             'posted_ts': None,
             'posted_url': None,
+            'posted_msg_ts': None,
         },
     }
 

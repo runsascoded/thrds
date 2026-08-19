@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -338,6 +338,13 @@ class SyncOptions:
     pace: float = 0.0
     jitter: float = 0.0
     sender_change: SenderChangePolicy | None = None
+    # When set, only messages whose id is in this set are reconciled; all
+    # others are preserved in place exactly like foreign (non-editable) ones.
+    # This is how `promote` scopes a sync to the messages *it* posted in a
+    # shared thread — same-author messages from other slugs or manual posts
+    # are ours to Slack but not ours to converge (see
+    # specs/promote-shared-thread-safety.md). None = no restriction.
+    only_ids: set[str] | None = None
 
 
 def sync(
@@ -367,6 +374,13 @@ def sync(
         all_existing = client.list_messages(thread_id)
     else:
         all_existing = []
+    if opts.only_ids is not None:
+        # Demote out-of-scope messages to foreign for EVERY downstream check
+        # (reconcile list, sender-cascade crossing guard), not just this filter.
+        all_existing = [
+            m if m.id in opts.only_ids else replace(m, editable=False)
+            for m in all_existing
+        ]
     existing = [m for m in all_existing if m.editable]
 
     M = len(desired.messages)
