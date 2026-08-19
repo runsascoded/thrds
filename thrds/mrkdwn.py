@@ -110,6 +110,59 @@ _SLACK_ITALIC = re.compile(
 _VS_16 = re.compile(r'[︎️]')
 
 
+# A fence is a run of 3+ backticks. Slack's mrkdwn treats ```` ```x ```` as a
+# block opener; CommonMark reads the `x` as an info string and drops it from
+# the rendered content.
+_FENCE = re.compile(r'`{3,}')
+
+# An info string is a language tag: one token, no whitespace. A first line
+# with a space in it is content that Slack simply didn't wrap.
+_INFO_STRING = re.compile(r'\S+')
+
+
+def normalize_fences(text: str) -> str:
+    """Re-inflate Slack's compact code fences into valid CommonMark.
+
+    Slack lets a fenced block open and close flush against its content
+    (```` ```7.53 TiB … 0.00 TiB``` ````) and renders it correctly. CommonMark
+    doesn't: the opening fence eats the first line as an info string and the
+    closing fence, not starting a line, is shown literally. So a block composed
+    in the Slack UI arrives readable in Slack and broken everywhere the gist is
+    read. See `specs/pull-fence-normalization.md`.
+
+    Inserts newlines only — content is preserved byte-for-byte, including
+    leading whitespace, since in a code block that indentation is data.
+
+    A first line that *looks* like an info string (one token, no whitespace,
+    with real content on later lines) is left attached, because ```` ```python ````
+    round-tripped from a local doc has to come back unchanged. That leaves one
+    irreducible ambiguity: a Slack-composed block whose first line is a single
+    bare word is indistinguishable from a language tag, and stays attached.
+
+    Unpaired trailing fences are left alone rather than guessed at.
+    """
+    fences = list(_FENCE.finditer(text))
+    if len(fences) < 2:
+        return text
+    out: list[str] = []
+    prev_end = 0
+    for i in range(0, len(fences) - 1, 2):
+        opener, closer = fences[i], fences[i + 1]
+        out.append(text[prev_end:opener.end()])
+        body = text[opener.end():closer.start()]
+        if body:
+            first_line, sep, _ = body.partition('\n')
+            is_info_string = bool(sep) and bool(_INFO_STRING.fullmatch(first_line))
+            if not body.startswith('\n') and not is_info_string:
+                out.append('\n')
+            if not body.endswith('\n'):
+                body += '\n'
+        out.append(body)
+        prev_end = closer.start()
+    out.append(text[prev_end:])
+    return ''.join(out)
+
+
 def decode_entities(text: str) -> str:
     """Undo the HTML encoding Slack applies on storage.
 
@@ -136,12 +189,15 @@ def to_markdown(text: str) -> str:
       workspace emoji (``:claude:`` etc.) don't match any standard alias,
       so ``emojize`` leaves them untouched — Slack round-trips those as
       literal text anyway.
+    - Compact code fences are re-inflated to valid CommonMark
+      (see `normalize_fences`).
     - HTML entities Slack HTML-encodes on storage: ``&amp;`` → ``&``,
       ``&lt;`` → ``<``, ``&gt;`` → ``>``.
 
     Entity decode runs AFTER link rewriting so a `&` inside a URL query
     string stays inside the resulting markdown-link `(...)`.
     """
+    text = normalize_fences(text)
     text = _SLACK_LINK.sub(r'[\2](\1)', text)
     text = _SLACK_BOLD.sub(r'**\1**', text)
     text = _SLACK_ITALIC.sub(r'*\1*', text)
