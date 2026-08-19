@@ -287,8 +287,11 @@ def _comment_fields(comment: dict, head_id: str, is_head: bool, meta: dict) -> d
 # Pull
 # ---------------------------------------------------------------------------
 
-def pull(owner: str, repo: str, number: str, dry_run: bool = False) -> tuple[int, int, int]:
+def pull(owner: str, repo: str, number: str) -> tuple[int, int, int]:
     """Pull review threads to local flat files. Stages changes (does not commit).
+
+    Overwrites local files with remote content, so callers that must not clobber
+    the user's work run this inside a scratch worktree (see `commands/fetch.py`).
 
     Returns (threads, new_comments, updated_comments).
     """
@@ -318,22 +321,15 @@ def pull(owner: str, repo: str, number: str, dry_run: bool = False) -> tuple[int
             new_text = build_comment_text(fields, body)
 
             if not target.exists():
-                if dry_run:
-                    err(f"[DRY-RUN] Would add review comment {comment['id']} by {author}")
-                else:
-                    target.write_text(new_text)
-                    proc.run('git', 'add', str(target), log=None)
+                target.write_text(new_text)
+                proc.run('git', 'add', str(target), log=None)
                 new_comments += 1
             elif target.read_text() != new_text:
-                if dry_run:
-                    err(f"[DRY-RUN] Would update review comment {comment['id']}")
-                else:
-                    target.write_text(new_text)
-                    proc.run('git', 'add', str(target), log=None)
+                target.write_text(new_text)
+                proc.run('git', 'add', str(target), log=None)
                 updated_comments += 1
 
-        if not dry_run:
-            write_baseline(head_id, g['meta']['resolved'])
+        write_baseline(head_id, g['meta']['resolved'])
 
     n_threads = len(grouped)
     if new_comments or updated_comments:

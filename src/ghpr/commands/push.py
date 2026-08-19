@@ -17,14 +17,15 @@ from ..config import get_pr_info_from_path
 from ..files import read_description_from_git, get_expected_description_filename, process_images_in_description
 from ..gist import add_gist_footer, create_gist, GIST_URL_WITH_USER_PATTERN, DEFAULT_GIST_REMOTE, find_gist_remote
 from ..patterns import extract_title_from_first_line
+from ..refs import REMOTE_REF, set_remote_ref
 from ..render import render_comment_diff, render_unified_diff
 
 
 _GHPR_FILE_GLOBS = ['DESCRIPTION.md', '*#*.md', '[0-9]*.md', 'new*.md', 'z-*.md']
 
 
-def _warn_uncommitted_ghpr_files() -> None:
-    """Warn if any ghpr-managed file has uncommitted WT changes.
+def _warn_uncommitted_ghpr_files() -> list[str]:
+    """Warn if any ghpr-managed file has uncommitted WT changes; return their names.
 
     `ghpr push` syncs the *committed* state of every file (description, top-level
     comments, drafts, review threads) to GitHub + gist. WT changes that aren't
@@ -34,7 +35,7 @@ def _warn_uncommitted_ghpr_files() -> None:
     try:
         lines = proc.lines('git', 'status', '--porcelain', log=None)
     except Exception:
-        return  # not a git repo / git missing — out of scope
+        return []  # not a git repo / git missing — out of scope
     dirty = []
     for line in lines:
         if len(line) < 4:
@@ -56,6 +57,7 @@ def _warn_uncommitted_ghpr_files() -> None:
             f"(push syncs HEAD; commit + re-run to include):")
         for name in dirty:
             err(f"    {name}")
+    return dirty
 
 
 def push(
@@ -75,7 +77,8 @@ def push(
     owner, repo, number = get_pr_info_from_path()
     item_type = None
 
-    _warn_uncommitted_ghpr_files()
+    dirty_files = _warn_uncommitted_ghpr_files()
+    others_skipped = 0
 
     if not all([owner, repo, number]):
         # Try git config
@@ -360,7 +363,6 @@ def push(
 
             comments_pushed = 0
             comments_skipped = 0
-            others_skipped = 0
 
             for comment_file_path in comment_files:
                 comment_id = get_comment_id_from_filename(comment_file_path)
@@ -458,6 +460,22 @@ def push(
             reviews.diff(owner, repo, number, use_color=use_color, current_user=current_user)
         else:
             reviews.push(owner, repo, number, current_user=current_user, force_others=force_others)
+
+    # GitHub now matches HEAD, so HEAD is the base future pulls reconcile against
+    # (see ghpr/refs.py). Only advance the ref when the push was complete: if
+    # anything was held back (dirty files, others' comments, --no-comments), the
+    # remote still differs from HEAD, and claiming otherwise would let the next
+    # pull treat a local edit as already-pushed and silently drop it.
+    if not dry_run:
+        held_back = {
+            'uncommitted file(s)': len(dirty_files),
+            "other user(s)' comment(s)": others_skipped,
+            '--no-comments': int(no_comments),
+        }
+        if reasons := [k for k, v in held_back.items() if v]:
+            err(f"Not advancing {REMOTE_REF} (not fully synced: {', '.join(reasons)})")
+        else:
+            set_remote_ref('HEAD')
 
 
 def sync_to_gist(

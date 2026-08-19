@@ -194,6 +194,7 @@ from .commands import show as show_cmd
 from .commands import open as open_cmd
 from .commands import upload as upload_cmd
 from .commands import diff as diff_cmd
+from .commands import fetch as fetch_cmd
 from .commands import pull as pull_cmd
 from .commands import clone as clone_cmd
 from .commands import create as create_cmd
@@ -206,6 +207,7 @@ show_cmd.register(cli)
 open_cmd.register(cli)
 upload_cmd.register(cli)
 diff_cmd.register(cli)
+fetch_cmd.register(cli)
 pull_cmd.register(cli)
 clone_cmd.register(cli)
 create_cmd.register(cli)

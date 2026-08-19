@@ -16,6 +16,7 @@ from ..config import get_pr_info_from_path
 from ..files import get_expected_description_filename, write_description_with_link_ref
 from ..gist import extract_gist_footer, add_gist_footer, create_gist, DEFAULT_GIST_REMOTE, find_gist_remote
 from ..patterns import parse_pr_spec, GIST_ID_PATTERN, GITHUB_ITEM_URL_PATTERN
+from ..refs import set_remote_ref
 
 
 def _detect_current_branch_pr() -> tuple[str | None, str | None, str | None, str | None]:
@@ -286,6 +287,10 @@ def clone(
                 if gist_remote:
                     proc.run('git', 'push', gist_remote, 'main', '--force', log=None)
                     err("Pushed review threads to gist")
+
+    # Everything committed so far mirrors GitHub, so it's the base future pulls
+    # reconcile against (see ghpr/refs.py).
+    set_remote_ref('HEAD')
 
     # Check if we should ingest user-attachments
     should_ingest = environ.get('GHPR_INGEST_ATTACHMENTS', '1') != '0'

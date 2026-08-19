@@ -28,6 +28,9 @@ ghprc() {                              # clone PR and cd into directory
 alias ghprp='ghpr push'                # push to PR (auto-adds footer if gist exists)
 alias ghprpn='ghpr push -n'            # dry-run push
 alias ghprl='ghpr pull'                # pull from PR (and optionally push back)
+alias ghprln='ghpr pull -n'            # dry-run pull (no local or remote changes)
+alias ghprf='ghpr fetch'               # snapshot GitHub into refs/ghpr/remote only
+alias ghprfn='ghpr fetch -n'           # dry-run fetch
 alias ghprpg='ghpr push -g'            # push with gist backup (auto-footer)
 alias ghprpo='ghpr push -o'            # push and open in browser
 alias ghprpF='ghpr push -F'            # push WITHOUT footer
