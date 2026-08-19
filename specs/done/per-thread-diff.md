@@ -37,6 +37,8 @@ Edge cases, each with a test:
 | unknown slug | `UsageError` listing available slugs |
 | `--prod` on a per-thread session | `UsageError`, mirroring `pull --prod` |
 
-Verified live against both sessions (`cw-quickwins`, `trainium-2026-07-31`): both report clean, and a deliberately perturbed `05-grug-deleted.md` — the file from the original bug report — diffs correctly under both `diff` and `diff 05-grug-deleted.md`.
+**Promoted threads diff against prod, not staging.** `pull` gained `pull_promoted_threads` (`e62fa81`) while this was being written: for a `posted` slug, prod is canonical and overrides the frozen staging copy. `diff` has to apply the same precedence or it reports a hand-edit made at the target as a change `pull` would undo — so it fetches both and overlays, including the fallback to staging when the prod copy is unfetchable (a deleted message, as with `cuda-graph`). `pull_promoted_threads` got the same `slugs=` filter.
+
+Verified live against both sessions (`cw-quickwins`, `trainium-2026-07-31`): both report clean, and a deliberately perturbed `05-grug-deleted.md` — the file from the original bug report — diffs correctly under both `diff` and `diff 05-grug-deleted.md`. Caveat on the prod-precedence path: `cw-quickwins`' staging and prod copies currently agree, so live it only exercises the code path, not the divergence; the `cuda-graph` fallback (posted, prod copy deleted) is live-exercised, and divergence is covered by unit tests.
 
 Not done, deliberately: `diff` reports content only. Retargets and renames pending in a Slack-side chrome edit are `pull`'s business and would cost extra API calls to surface here.

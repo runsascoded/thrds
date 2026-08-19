@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import pytest
 from click.testing import CliRunner
 
-from thrds import DocMessage, DocThread, SessionState, ThreadEntry
+from thrds import DocMessage, DocThread, SessionState, ThreadEntry, ThreadTarget
 from thrds.cli import SLACK_TOKEN_ENV, cli
 
 
@@ -20,21 +20,29 @@ from thrds.cli import SLACK_TOKEN_ENV, cli
 class PullSpy:
     """SlackClient stand-in returning canned Slack-side threads."""
     returns: dict[str, DocThread] = field(default_factory=dict)
+    prod_returns: dict[str, DocThread] = field(default_factory=dict)
     slug_calls: list[list[str] | None] = field(default_factory=list)
 
     def __init__(self, *, token, channel):
         self.returns = {}
+        self.prod_returns = {}
         self.slug_calls = []
 
     def list_channels_by_name(self) -> dict[str, str]:
         return {}
 
+    @staticmethod
+    def _filter(canned, slugs):
+        return list(canned.values()) if slugs is None else [
+            t for s, t in canned.items() if s in set(slugs)
+        ]
+
     def pull_threads_staging(self, state, session_dir=None, slugs=None):
         self.slug_calls.append(None if slugs is None else list(slugs))
-        wanted = self.returns if slugs is None else {
-            s: t for s, t in self.returns.items() if s in set(slugs)
-        }
-        return list(wanted.values())
+        return self._filter(self.returns, slugs)
+
+    def pull_promoted_threads(self, state, session_dir=None, slugs=None):
+        return self._filter(self.prod_returns, slugs)
 
 
 def thread(slug: str, *contents: str) -> DocThread:
@@ -150,8 +158,47 @@ def test_unpushed_thread_arg_reports_rather_than_diffing(session, spy, tmp_path)
     assert result.exit_code == 0
     assert result.stdout == ''
     assert result.stderr.splitlines() == [
-        'gamma: never pushed to staging — nothing on the Slack side to compare.'
+        'gamma: never pushed to Slack — nothing to compare against.'
     ]
+
+
+def _promote(session_dir, slug: str) -> None:
+    state = SessionState.load(session_dir)
+    entry = state.thread(slug)
+    entry.state = 'posted'
+    entry.target = ThreadTarget(channel='C0PROD', thread_ts='0.1')
+    entry.posted_msg_ts = ['7.7']
+    state.save(session_dir)
+
+
+def test_promoted_thread_diffs_against_prod_not_staging(session, spy):
+    """`pull` overrides a posted thread with prod, so diff must compare there —
+    otherwise a hand-edit made at the target reads as a change pull would undo."""
+    _promote(session, 'alpha')
+    spy.returns = {'alpha': thread('alpha', 'Frozen staging copy.'), 'beta': thread('beta', 'Beta OP.')}
+    spy.prod_returns = {'alpha': thread('alpha', 'Alpha OP.')}
+    assert _run().stdout == ''
+
+
+def test_promoted_thread_reports_a_prod_side_edit(session, spy):
+    _promote(session, 'alpha')
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    spy.prod_returns = {'alpha': thread('alpha', 'Alpha OP, hand-edited in prod.')}
+    assert _run().stdout.splitlines() == [
+        '--- 01-alpha.md (local)',
+        '+++ 01-alpha.md (slack)',
+        '@@ -1 +1 @@',
+        '-Alpha OP.',
+        '+Alpha OP, hand-edited in prod.',
+    ]
+
+
+def test_promoted_thread_falls_back_to_staging_when_prod_returns_nothing(session, spy):
+    """Mirrors `pull`: an unfetchable prod copy leaves the staging copy standing."""
+    _promote(session, 'alpha')
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    spy.prod_returns = {}
+    assert _run().stdout == ''
 
 
 def test_unpushed_threads_are_skipped_in_the_all_threads_case(session, spy, tmp_path):

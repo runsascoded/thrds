@@ -860,25 +860,28 @@ def _diff_threads(
 ) -> None:
     """Print each staged thread's local↔Slack diff; nothing for unchanged ones."""
     files = {tf.slug: tf for tf in thread_files(session_dir)}
-    staged = {slug for slug, e in state.threads.items() if e.staging_ts is not None}
+    tracked = {
+        slug for slug, e in state.threads.items()
+        if e.staging_ts is not None or (e.state == 'posted' and e.target is not None)
+    }
 
     if slug_arg is not None:
         slug = _thread_slug_arg(slug_arg)
-        if slug not in files and slug not in staged:
+        if slug not in files and slug not in tracked:
             available = ', '.join(sorted(files)) or '(none)'
             raise click.UsageError(
                 f"No thread {slug!r} in this session; available: {available}"
             )
-        if slug not in staged:
-            err(f"{slug}: never pushed to staging — nothing on the Slack side to compare.")
+        if slug not in tracked:
+            err(f"{slug}: never pushed to Slack — nothing to compare against.")
             return
         wanted = [slug]
     else:
         # File order first (the NN prefix is post order), then any thread that
         # exists in state but has no file — a locally-deleted draft still has a
         # Slack side, and "pull would restore it" is exactly what diff reports.
-        wanted = [tf.slug for tf in sorted(files.values()) if tf.slug in staged]
-        wanted += sorted(staged - set(files))
+        wanted = [tf.slug for tf in sorted(files.values()) if tf.slug in tracked]
+        wanted += sorted(tracked - set(files))
         if not wanted:
             err('No staged threads to diff.')
             return
@@ -887,6 +890,13 @@ def _diff_threads(
         t.slug: t
         for t in client.pull_threads_staging(state, session_dir=session_dir, slugs=wanted)
     }
+    # Same precedence `pull` applies: for a promoted thread prod is canonical
+    # and overrides the frozen staging copy. Diffing against staging instead
+    # would report a hand-edit made at the target as a change `pull` would undo.
+    threads.update({
+        t.slug: t
+        for t in client.pull_promoted_threads(state, session_dir=session_dir, slugs=wanted)
+    })
     for slug in wanted:
         tf = files.get(slug)
         name = tf.name if tf is not None else f'{slug}.md'

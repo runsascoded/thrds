@@ -2032,6 +2032,7 @@ class SlackClient:
         self,
         state: SessionState,
         session_dir: Path | None = None,
+        slugs: Iterable[str] | None = None,
     ) -> list[DocThread]:
         """Fetch each promoted thread's current PROD state (its own messages only).
 
@@ -2042,10 +2043,15 @@ class SlackClient:
         file — and the gist mirror — track the prod record. Staging copies
         are deliberately left alone: a promoted thread's staged copy is a
         frozen artifact of the drafting phase, not a second source of truth.
+
+        ``slugs`` limits the fetch, for callers scoped to one thread.
         """
+        only = None if slugs is None else set(slugs)
         out: list[DocThread] = []
         for slug, entry in sorted(state.threads.items()):
             if entry.state != 'posted' or entry.target is None:
+                continue
+            if only is not None and slug not in only:
                 continue
             own = set(entry.posted_msg_ts or ([entry.posted_ts] if entry.posted_ts else []))
             root = entry.target.thread_ts or entry.posted_ts
