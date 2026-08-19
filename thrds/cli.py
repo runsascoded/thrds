@@ -731,16 +731,18 @@ def slack_push(channel: str | None, keep_staging: bool, dry_run: bool, prod: boo
 
 @slack_cli.command("pull")
 @click.option('-c', '--channel', help='Prod channel override (only with --prod).')
+@click.option('-n', '--dry-run', is_flag=True, help='Print the pulled state to stdout instead of writing files.')
 @click.option('-p', '--prod', is_flag=True, help='Pull from prod channel.')
-@click.option('-w', '--write', is_flag=True, help='Write the pulled doc back to DOC_PATH.')
 @click.argument('doc_path', required=False)
-def slack_pull(channel: str | None, prod: bool, write: bool, doc_path: str | None):
+def slack_pull(channel: str | None, dry_run: bool, prod: bool, doc_path: str | None):
     """Pull the doc's current state from Slack. Default: staging PC.
 
-    Without ``--write`` the doc is printed to stdout (frontmatter omitted).
-    With ``--write``, DOC_PATH is overwritten and (if the session is a git
-    repo) auto-committed + pushed to the gist mirror.
+    Writes each pulled thread back to its file and (if the session is a git
+    repo) auto-commits + pushes to the gist mirror — the mirror image of
+    ``push``, which syncs by default too. With ``--dry-run`` the pulled state
+    is printed to stdout (frontmatter omitted) and nothing is written.
     """
+    write = not dry_run
     state = _load_state(expected_platform='slack')
     if not prod and channel is not None:
         raise click.UsageError('--channel requires --prod.')

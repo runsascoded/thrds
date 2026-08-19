@@ -147,44 +147,44 @@ def _threads(*specs):
     ]
 
 
-def test_pull_write_rewrites_each_thread_file(session, spy):
+def test_pull_rewrites_each_thread_file(session, spy):
     spy.pull_returns = _threads(
         ('alpha', ['Alpha OP edited in Slack.', 'Alpha reply.']),
         ('beta', ['Beta OP.']),
     )
-    result = _run('pull', '-w')
+    result = _run('pull')
     assert result.exit_code == 0, result.output
     assert (session / '01-alpha.md').read_text() == (
         'Alpha OP edited in Slack.\n\n+++\n\nAlpha reply.\n'
     )
 
 
-def test_pull_write_captures_a_deleted_reply(session, spy):
+def test_pull_captures_a_deleted_reply(session, spy):
     """Deleting a reply in Slack must land as a version of that file — that's
     how a draft gets retracted without losing the record that it existed."""
     spy.pull_returns = _threads(('alpha', ['Alpha OP.']), ('beta', ['Beta OP.']))
-    _run('pull', '-w')
+    _run('pull')
     assert (session / '01-alpha.md').read_text() == 'Alpha OP.\n'
 
 
-def test_pull_write_reports_files_written(session, spy):
+def test_pull_reports_files_written(session, spy):
     spy.pull_returns = _threads(('alpha', ['A.']), ('beta', ['B.']))
-    result = _run('pull', '-w')
+    result = _run('pull')
     assert result.stderr.rstrip().split('\n')[-1] == (
         'wrote 2 thread file(s): 01-alpha.md, 02-beta.md'
     )
 
 
-def test_pull_without_write_leaves_files_untouched(session, spy):
+def test_pull_dry_run_leaves_files_untouched(session, spy):
     spy.pull_returns = _threads(('alpha', ['Changed.']), ('beta', ['B.']))
     before = (session / '01-alpha.md').read_text()
-    _run('pull')
+    _run('pull', '-n')
     assert (session / '01-alpha.md').read_text() == before
 
 
-def test_pull_without_write_prints_each_thread_to_stdout(session, spy):
+def test_pull_dry_run_prints_each_thread_to_stdout(session, spy):
     spy.pull_returns = _threads(('alpha', ['A body.']), ('beta', ['B body.']))
-    result = _run('pull')
+    result = _run('pull', '-n')
     assert result.stdout == 'A body.\nB body.\n'
 
 
@@ -192,7 +192,7 @@ def test_pull_skips_threads_absent_from_slack(session, spy):
     """A file with no staging counterpart is left alone rather than emptied."""
     spy.pull_returns = _threads(('alpha', ['Only alpha came back.']))
     before = (session / '02-beta.md').read_text()
-    _run('pull', '-w')
+    _run('pull')
     assert (session / '02-beta.md').read_text() == before
 
 

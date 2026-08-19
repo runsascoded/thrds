@@ -129,7 +129,7 @@ Installing `thrds` also installs **`slck`**, which *is* the `thrds slack` group 
 thrds slack init draft.md              # scaffold session dir + gist mirror
 thrds slack migrate                    # split the doc into per-thread NN-slug.md files
 thrds slack push                       # sync every thread to staging PC (terraform)
-thrds slack pull --write               # pull edits back → each thread's file
+thrds slack pull                       # pull edits back → each thread's file (-n to preview)
 thrds slack status                     # per-thread state + resolved destination
 thrds slack promote cw-mpu             # post ONE thread to its target (confirms first)
 thrds slack drop cw-summary            # mark a thread abandoned without posting

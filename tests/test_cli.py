@@ -447,7 +447,7 @@ def test_push_dry_run_does_not_autocommit(in_tmp, monkeypatch, spy):
 
 # --- pull ---
 
-def test_pull_writes_to_disk_with_write_flag(in_tmp, monkeypatch):
+def test_pull_writes_to_disk_by_default(in_tmp, monkeypatch):
     session = _init_session(in_tmp, monkeypatch)
 
     def factory(*, token, channel):
@@ -456,13 +456,13 @@ def test_pull_writes_to_disk_with_write_flag(in_tmp, monkeypatch):
         return s
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
 
-    result = CliRunner().invoke(cli, ['slack', 'pull', '-w'])
+    result = CliRunner().invoke(cli, ['slack', 'pull'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert (session / 'trainium.md').read_text() == "=== x\n\nPulled OP.\n"
 
 
-def test_pull_write_autocommits_doc(in_tmp, monkeypatch):
-    """Pull --write commits the updated doc to session git."""
+def test_pull_autocommits_doc(in_tmp, monkeypatch):
+    """Pull commits the updated doc to session git."""
     session = _init_session(in_tmp, monkeypatch)
 
     def factory(*, token, channel):
@@ -471,7 +471,7 @@ def test_pull_write_autocommits_doc(in_tmp, monkeypatch):
         return s
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
 
-    CliRunner().invoke(cli, ['slack', 'pull', '-w'])
+    CliRunner().invoke(cli, ['slack', 'pull'])
     log = subprocess.run(
         ['git', 'log', '--format=%s'],
         cwd=session, capture_output=True, text=True, check=True,
@@ -479,17 +479,19 @@ def test_pull_write_autocommits_doc(in_tmp, monkeypatch):
     assert log == ['thrds: pull staging → trainium.md', 'thrds: init trainium']
 
 
-def test_pull_prints_to_stdout_without_write(in_tmp, monkeypatch):
-    _init_session(in_tmp, monkeypatch)
+def test_pull_dry_run_prints_to_stdout(in_tmp, monkeypatch):
+    session = _init_session(in_tmp, monkeypatch)
+    before = (session / 'trainium.md').read_text()
 
     def factory(*, token, channel):
         s = SlackSpy(token=token, channel=channel)
         s.pull_returns = Doc(threads=[DocThread(slug='x', messages=[DocMessage('Pulled OP.')])])
         return s
     monkeypatch.setattr('thrds.cli.SlackClient', factory)
-    result = CliRunner().invoke(cli, ['slack', 'pull'])
+    result = CliRunner().invoke(cli, ['slack', 'pull', '-n'])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert result.output == "=== x\n\nPulled OP.\n"
+    assert (session / 'trainium.md').read_text() == before
 
 
 def test_pull_prod_passes_channel(in_tmp, monkeypatch, spy):
