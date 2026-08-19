@@ -50,15 +50,35 @@ Resolution order in `_raw_body` becomes:
 
 ## Round-trip requirement
 
-Same bar as the fence spec, and the one real risk: `rich_text_to_markdown(slack_parse(to_slack(x)))` must equal `x` for every doc already in a session, or the first pull after this lands rewrites files wholesale and every drift check fires.
+Same bar as the fence spec: reading a session back must not rewrite files that nobody edited.
 
-This is not obviously true — Slack normalizes as it parses (collapsing adjacent styles, its own list/quote handling), so the mapping back to *our* markdown dialect has to be chosen to invert `to_slack`, not to be canonical CommonMark. Gate it:
+Verified against both live sessions before landing. Every message in the trainium prod thread and both live staging channels was rendered both ways and diffed; the trainium session round-trips **byte-identically** (no commit produced by a `pull -w`).
 
-- Golden-file test over every thread file in the trainium and cw-quickwins sessions: push, read back both ways, require byte equality with the file on disk.
-- Ship behind `THRDS_RICH_TEXT=1` for one session's worth of use before making it the default.
+## Outcome
+
+Implemented as `thrds/richtext.py` (`render`), selected in `SlackClient._message_markdown`, which now resolves a body from three sources in descending fidelity: a lone `section` block (our own finalized posts) → `rich_text` → the flat `text` field.
+
+**Deviation: shipped default-on**, with `THRDS_RICH_TEXT=0` as the escape hatch, rather than opt-in-then-promote. The evidence inverted the risk. The regex path is *actively corrupting data*: `01-cw-quickwins.md` contained
+
+```
+`marin/normalized/nemotron_cc_v2{,*1}` … `finetranslations**`
+```
+
+where the author wrote ``` `nemotron_cc_v2{,_1}` ``` and ``` `finetranslations_*` ```. `_SLACK_ITALIC` had spanned the two underscores — *across a code span* — turning both into asterisks on a previous pull. Slack's tree has them intact. Leaving the regex path as the default would have meant leaving that in place, so the cautious option was the worse one. The corrected line is the single content change this landed, committed to the cw-quickwins gist.
+
+Things the live data taught that the spec didn't anticipate:
+
+- **`rich_text` fields are HTML-encoded too.** A permalink's `&cid=` arrives as `&amp;cid=` inside `url`, not just in the flat `text`. Caught by a live round-trip that rewrote one trainium link; `render` now applies `decode_entities` exactly where `to_markdown` does.
+- **An emoji element may carry no `name`.** A unicode emoji typed directly arrives as `{"type": "emoji", "unicode": "26a0-fe0f"}`, and reading only `name` renders `::`. Falls back to decoding the codepoints.
+- **Emphasis spans runs.** Slack splits ``**`x`, and y**`` into a `{code, bold}` run and a `{bold}` run; marking each run separately puts the markers in the wrong place and leaves a dangling pair. Consecutive runs are grouped by their non-code style.
+- **A nested list is a *sibling* block**, not a child — `rich_text_list` with `indent: 1` follows its parent. Without an inserted newline every sub-item lands glued to the parent's last line.
+- **Slack rewrites `- item` to `• item`** in the stored `text`, which is how `03-cw-mpu.md` ended up with bullet characters. The tree leaves the marker to us, so the local dialect survives.
+- **A URL pasted into the composer** is stored as `<url|shortened-display>` with `truncated: true`; the ellipsis label is a rendering artifact, so it renders as a bare URL.
+
+Chrome needed one piece of new machinery: it's authored in Slack mrkdwn (`<#C…>`, `<url|→>`), so it can't be re-parsed out of *rendered markdown* without a second grammar. `chrome.locate` returns its line index instead, and the `richtext` path drops that line by position — always an extremity, so a re-inflated fence in the middle can't shift it.
 
 ## Non-goals
 
 - Emitting `rich_text` blocks on send. Uneditable messages are a non-starter for staging.
 - A CommonMark parser for the md → mrkdwn direction. `markdown-it-py` would be the reusable choice if we ever want one (it's the maintained CommonMark reference port, and `mdformat` renders its AST back to normalized markdown), but `to_slack` is emitting a *simpler* format than it consumes, which is the easy direction. Not worth a dependency yet.
-- Retiring `normalize_fences`. It stays for path 3.
+- Retiring `normalize_fences`. It stays for the `text` fallback.

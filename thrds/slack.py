@@ -13,7 +13,9 @@ from urllib.parse import urlencode
 from .chrome import (
     Chrome,
     ChromeEdit,
+    drop_line as drop_chrome_line,
     has_chrome,
+    locate as locate_chrome,
     parse as parse_chrome,
     render as render_chrome,
     split as split_chrome,
@@ -42,6 +44,7 @@ from .refs import (
     thread_has_refs,
     validate_refs,
 )
+from .richtext import render as render_rich_text, rich_text_enabled
 from .state import SessionState, ThreadEntry, ThreadTarget
 from .threadfile import (
     SLUG_RE,
@@ -275,27 +278,40 @@ class SlackClient:
         return result.get("messages", [])
 
     @staticmethod
-    def _raw_body(m: dict) -> str:
-        """A message's body, with any staging chrome removed.
+    def _message_markdown(m: dict) -> str:
+        """A message's body as local markdown, with staging chrome removed.
 
-        Two shapes, because chrome renders two ways. A live draft carries it as
-        a trailing text line, stripped here — running on the wire text, before
-        ``to_markdown``, mirrors it being appended after ``to_slack``. A
-        *finalized* thread carries it as blocks, in which case the body is the
-        section block: Slack flattens ``text`` to a one-line notification
-        fallback whenever blocks are present, so reading ``text`` there would
-        silently destroy every multi-line body.
+        Three sources, in descending fidelity:
 
-        Only ``section`` blocks are read, never ``context``, so chrome can't
-        round-trip into a doc either way; `promote_thread` backstops it.
+        1. A lone ``section`` block — one of our own *finalized* posts, whose
+           chrome lives in a sibling ``context`` block and so never reaches
+           here. Its text is wire mrkdwn.
+        2. Slack's ``rich_text`` block — Slack's own parse of the message,
+           which is structured rather than re-derived. See `thrds.richtext`.
+        3. The flat ``text`` field, reverse-engineered with regexes. The
+           original path, now the fallback for shapes we don't recognize.
+
+        Chrome comes off differently per source because it's authored in Slack
+        mrkdwn: in (3) it's parsed and stripped directly; in (2) the body has
+        already been rendered to markdown, so the line is dropped by the
+        *position* `chrome.locate` found in the raw text — which is always an
+        extremity, and doesn't require a second grammar for rendered chrome.
         """
         sections = [
             b for b in (m.get("blocks") or [])
             if b.get("type") == "section" and (b.get("text") or {}).get("text")
         ]
         if len(sections) == 1:
-            return sections[0]["text"]["text"]
-        return split_chrome(m.get("text", ""))[0]
+            return _slack_to_md(sections[0]["text"]["text"])
+        raw = m.get("text", "")
+        if rich_text_enabled():
+            rendered = render_rich_text(m.get("blocks"))
+            if rendered is not None:
+                found = locate_chrome(raw)
+                if found is not None:
+                    return drop_chrome_line(rendered, found[0])
+                return rendered
+        return _slack_to_md(split_chrome(raw)[0])
 
     def list_messages(self, thread_id: str) -> list[Message]:
         result = self._request("conversations.replies", {
@@ -308,7 +324,7 @@ class SlackClient:
                 id=m["ts"],
                 # Convert Slack mrkdwn back to our local markdown form so pulled
                 # content is diff-clean against local docs. See `mrkdwn.py`.
-                content=_slack_to_md(self._raw_body(m)),
+                content=self._message_markdown(m),
                 # Slack bot_messages come back with `user: null` and `bot_id`
                 # set; human messages carry `user`. Match either so our own
                 # bot's posts are correctly marked editable.
@@ -1516,11 +1532,11 @@ class SlackClient:
         Runs ``to_markdown`` on the raw Slack text so pulled content is in the
         same format the local doc uses — the roundtrip diff is a real content
         diff rather than a format-mismatch diff. Body comes from
-        :meth:`_raw_body`, which strips any staging-chrome footer.
+        :meth:`_message_markdown`, which prefers Slack's own parse tree.
         """
         user_id, bot_id = self.bot_ids
         ours = raw.get("user") == user_id or (bot_id is not None and raw.get("bot_id") == bot_id)
-        content = _slack_to_md(self._raw_body(raw))
+        content = self._message_markdown(raw)
         if ours:
             return DocMessage(content=content, author=None)
         return DocMessage(content=content, author=self._resolve_user_name(raw["user"]))

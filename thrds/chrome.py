@@ -238,27 +238,50 @@ def parse(line: str) -> Chrome | None:
     return chrome if anchored else None
 
 
-def split(text: str) -> tuple[str, Chrome | None]:
-    """``(body, chrome)`` — strip a chrome line off raw Slack text.
+def locate(text: str) -> tuple[int, Chrome] | None:
+    """``(line index, chrome)`` for a chrome line, or None if there isn't one.
 
     Accepts it as the **first or last** line. A push always renders it last,
     but writing a new draft in Slack it's natural to lead with where the thing
     is going, and there's no reason to make that wrong.
 
+    The index is what lets the `richtext` path drop the same line from its
+    *rendered markdown*: chrome is authored in Slack mrkdwn (``<#C…>``,
+    ``<url|→>``) and re-parsing it after rendering would mean a second grammar.
+    Its position is the durable fact, and it's always at an extremity.
+    """
+    lines = text.rstrip('\n').split('\n')
+    if len(lines) < 2:
+        return None
+    chrome = parse(lines[-1].strip())
+    if chrome is not None:
+        return len(lines) - 1, chrome
+    chrome = parse(lines[0].strip())
+    if chrome is not None:
+        return 0, chrome
+    return None
+
+
+def drop_line(text: str, index: int) -> str:
+    """Remove line ``index`` (0 or last) and the blank space it left behind."""
+    lines = text.rstrip('\n').split('\n')
+    if index == 0:
+        return '\n'.join(lines[1:]).lstrip('\n')
+    return '\n'.join(lines[:-1]).rstrip('\n')
+
+
+def split(text: str) -> tuple[str, Chrome | None]:
+    """``(body, chrome)`` — strip a chrome line off raw Slack text.
+
     Operates on the wire text, before ``to_markdown``, mirroring `render`
     running after ``to_slack``. Text with no chrome comes back untouched, so
     this is safe to call on every message including other people's.
     """
-    lines = text.rstrip('\n').split('\n')
-    if len(lines) < 2:
+    found = locate(text)
+    if found is None:
         return text, None
-    chrome = parse(lines[-1].strip())
-    if chrome is not None:
-        return '\n'.join(lines[:-1]).rstrip('\n'), chrome
-    chrome = parse(lines[0].strip())
-    if chrome is not None:
-        return '\n'.join(lines[1:]).lstrip('\n'), chrome
-    return text, None
+    index, chrome = found
+    return drop_line(text, index), chrome
 
 
 def has_chrome(text: str) -> bool:

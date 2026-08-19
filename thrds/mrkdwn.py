@@ -163,6 +163,17 @@ def normalize_fences(text: str) -> str:
     return ''.join(out)
 
 
+def decode_emoji(text: str) -> str:
+    """``:shortcode:`` → unicode, with variation selectors stripped.
+
+    Split out so the `richtext` renderer can reuse it: emoji arrive there as
+    ``{"type": "emoji", "name": …}`` elements, which render to shortcodes and
+    then need the same treatment. Custom workspace emoji match no standard
+    alias, so `emojize` leaves them for `substitute_custom_emoji`.
+    """
+    return _VS_16.sub('', emoji.emojize(text, language='alias'))
+
+
 def decode_entities(text: str) -> str:
     """Undo the HTML encoding Slack applies on storage.
 
@@ -202,7 +213,7 @@ def to_markdown(text: str) -> str:
     text = _SLACK_BOLD.sub(r'**\1**', text)
     text = _SLACK_ITALIC.sub(r'*\1*', text)
     text = decode_entities(text)
-    text = _VS_16.sub('', emoji.emojize(text, language='alias'))
+    text = decode_emoji(text)
     return text
 
 
