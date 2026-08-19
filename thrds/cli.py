@@ -1064,8 +1064,8 @@ def slack_promote(channel: str | None, dry_run: bool, thread_ts: str | None, yes
 
     result = client.promote_thread(slug, thread, target, state)
     state.save()
-    err(f"posted {slug}: {result.thread_id}")
-    _notify_promoted(client, slug, target.channel, result.thread_id)
+    err(f"posted {slug}: {entry.posted_ts}")
+    _notify_promoted(client, slug, target.channel, entry.posted_ts)
     _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: promote {slug} → {target.channel}')
 
 
