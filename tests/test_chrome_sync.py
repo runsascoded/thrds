@@ -595,3 +595,77 @@ def test_reconcile_unlocks_a_reopened_thread(monkeypatch):
     })
     client._chrome_by_content = {'Body.': '→ <#C0T>'}
     assert client._reconcile_chrome('1.1', 'Body.', pace=0.0, jitter=0.0) is True
+
+
+# --- condensed posted chrome ---
+
+
+def _posted_state(**kw) -> SessionState:
+    return _state(threads={'a': ThreadEntry(
+        target=ThreadTarget(channel='C0T'), state='posted',
+        posted_ts='9.9', posted_url=POSTED,
+    )}, **kw)
+
+
+def test_line_condenses_once_the_channel_name_is_known():
+    state = _posted_state(channel_names={'C0T': 'marin-alerts'})
+    assert SlackClient._chrome_line(state, 'a', '01-a.md') == (
+        f'✅ <{POSTED}|#marin-alerts> · '
+        f'<https://gist.github.com/abc123#file-01-a-md|01-a.md>'
+    )
+
+
+def _naming_client(monkeypatch, names: dict[str, str], fail: bool = False):
+    """Client whose `conversations.info` answers from ``names``."""
+    client = _client()
+    calls: list[str] = []
+
+    def fake_request(endpoint, data=None, **kw):
+        assert endpoint == 'conversations.info'
+        # Slack answers a JSON POST here with `invalid_arguments`; only the
+        # urlencoded GET works. Pinned because a fake that accepts any method
+        # let exactly this bug ship green.
+        assert kw.get('method') == 'GET'
+        calls.append(data['channel'])
+        if fail:
+            raise RuntimeError('channel_not_found')
+        return {'channel': {'id': data['channel'], 'name': names[data['channel']]}}
+
+    monkeypatch.setattr(client, '_request', fake_request)
+    return client, calls
+
+
+def test_resolve_channel_names_caches_into_state(monkeypatch):
+    state = _posted_state()
+    client, calls = _naming_client(monkeypatch, {'C0T': 'marin-alerts'})
+    client._resolve_channel_names(state, ['a'])
+    assert (state.channel_names, calls) == ({'C0T': 'marin-alerts'}, ['C0T'])
+
+
+def test_resolve_channel_names_skips_what_is_already_cached(monkeypatch):
+    """A session pays at most once — the cache persists in `thrds.json`."""
+    state = _posted_state(channel_names={'C0T': 'marin-alerts'})
+    client, calls = _naming_client(monkeypatch, {'C0T': 'marin-alerts'})
+    client._resolve_channel_names(state, ['a'])
+    assert calls == []
+
+
+def test_resolve_channel_names_ignores_unposted_threads(monkeypatch):
+    """Only the condensed footer names its channel in text; a draft's
+    `<#C…>` mention lets Slack do the naming, for free."""
+    state = _state(threads={'a': ThreadEntry(target=ThreadTarget(channel='C0T'))})
+    client, calls = _naming_client(monkeypatch, {'C0T': 'marin-alerts'})
+    client._resolve_channel_names(state, ['a'])
+    assert (state.channel_names, calls) == ({}, [])
+
+
+def test_resolve_channel_names_swallows_failures(monkeypatch):
+    """A name we can't resolve degrades the footer; it doesn't fail the push."""
+    state = _posted_state()
+    client, calls = _naming_client(monkeypatch, {}, fail=True)
+    client._resolve_channel_names(state, ['a'])
+    assert (state.channel_names, calls) == ({}, ['C0T'])
+    assert SlackClient._chrome_line(state, 'a', '01-a.md') == (
+        f'→ <#C0T> · <{POSTED}|posted> · '
+        f'<https://gist.github.com/abc123#file-01-a-md|01-a.md>'
+    )

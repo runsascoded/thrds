@@ -240,3 +240,116 @@ def test_parse_uses_the_path_ts_for_a_top_level_message_link():
     """No `thread_ts=` means the link *is* the anchor."""
     url = 'https://openathena.slack.com/archives/C0A/p1786980761357209'
     assert parse(f'→ {url}') == Chrome(channel='C0A', thread_ts='1786980761.357209')
+
+
+# --- condensed posted form ---
+
+GIST_LINK = 'https://gist.github.com/g1#file-02-cw-summary-md|02-cw-summary.md'
+
+
+def test_render_condenses_once_posted():
+    """One link, channel name as anchor text, `✅` for the word "posted"."""
+    assert _render(
+        channel='C0P', posted_url=POSTED, channel_name='marin-alerts',
+    ) == f'✅ <{POSTED}|#marin-alerts>'
+
+
+def test_render_condensed_keeps_the_gist_link():
+    assert _render(
+        channel='C0P', posted_url=POSTED, channel_name='marin-alerts',
+        gist_id='g1', filename='02-cw-summary.md',
+    ) == f'✅ <{POSTED}|#marin-alerts> · <{GIST_LINK}>'
+
+
+def test_render_condensed_drops_the_target_arrow_entirely():
+    """The permalink carries the thread root, so `→` is spent once posted."""
+    assert _render(
+        channel='C0P', thread_ts='1786980761.357209', target_url=PARENT,
+        posted_url=POSTED, channel_name='marin-alerts',
+    ) == f'✅ <{POSTED}|#marin-alerts>'
+
+
+def test_render_degrades_to_the_long_form_without_a_channel_name():
+    """Rather than anchoring the link on a channel id, or reaching for the
+    network — `render` is called once per thread per push and stays offline."""
+    assert _render(channel='C0P', posted_url=POSTED) == (
+        f'→ <#C0P> · <{POSTED}|posted>'
+    )
+
+
+def test_render_drafts_are_untouched_by_the_condensed_form():
+    """A name is cached as soon as a thread is posted, so drafts sharing that
+    channel would condense too if the glyph keyed off the name alone."""
+    assert _render(channel='C0P', channel_name='marin-alerts') == '→ <#C0P>'
+
+
+def test_parse_condensed_recovers_the_channel_id_from_the_permalink():
+    """The `#name` is display text; the id rides along in the URL."""
+    assert parse(f'✅ <{POSTED}|#marin-alerts>') == Chrome(
+        channel='C0P', channel_name='marin-alerts', posted_url=POSTED,
+    )
+
+
+def test_parse_condensed_with_a_gist_link():
+    assert parse(f'✅ <{POSTED}|#marin-alerts> · <{GIST_LINK}>') == Chrome(
+        channel='C0P', channel_name='marin-alerts', posted_url=POSTED,
+        filename='02-cw-summary.md',
+    )
+
+
+def test_condensed_round_trips_render_to_parse():
+    line = _render(
+        channel='C0P', posted_url=POSTED, channel_name='marin-alerts',
+        gist_id='g1', filename='02-cw-summary.md',
+    )
+    assert parse(line) == Chrome(
+        channel='C0P', channel_name='marin-alerts', posted_url=POSTED,
+        filename='02-cw-summary.md',
+    )
+
+
+def test_parse_condensed_never_invents_a_thread_ts():
+    """This is *our* message's permalink. For a thread we started, taking its
+    path ts would name our own OP as the thread to reply into — a fact
+    rendering invented, which the target never asserted."""
+    url = 'https://openathena.slack.com/archives/C0P/p1786993740250899'
+    assert parse(f'✅ <{url}|#marin-alerts>').thread_ts is None
+
+
+def test_parse_accepts_the_shortcode_spelling_of_the_glyph():
+    """Slack may hand back `:white_check_mark:` for what we sent as `✅`.
+    Comparing rendered against live is text equality, so a spelling flip would
+    read as permanent drift and re-edit every OP on every push."""
+    assert parse(f':white_check_mark: <{POSTED}|#marin-alerts>') == parse(
+        f'✅ <{POSTED}|#marin-alerts>'
+    )
+
+
+def test_split_strips_a_condensed_footer():
+    """The leak guard. A posted thread's staging copy is still read by
+    `pull_threads_staging`, so a footer `parse` rejects would land in the
+    pulled markdown as a stray line of content."""
+    body = f'The summary.\n\n✅ <{POSTED}|#marin-alerts> · <{GIST_LINK}>'
+    assert split(body) == (
+        'The summary.',
+        Chrome(channel='C0P', channel_name='marin-alerts', posted_url=POSTED,
+               filename='02-cw-summary.md'),
+    )
+
+
+def test_has_chrome_catches_the_condensed_form():
+    """`promote_thread` refuses a body still carrying a footer."""
+    assert has_chrome(f'Body.\n\n✅ <{POSTED}|#marin-alerts>') is True
+
+
+def test_parse_rejects_a_glyph_on_a_non_channel_link():
+    """`✅ <url|see here>` is prose with a checkmark, not chrome."""
+    assert parse(f'✅ <{POSTED}|see here>') is None
+
+
+def test_parse_rejects_a_lone_glyph_line():
+    assert parse('✅') is None
+
+
+def test_parse_rejects_a_glyph_followed_by_prose():
+    assert parse('✅ shipped it') is None

@@ -158,11 +158,12 @@ Every commit is rebuilt with the doc split into thread files, preserving message
 **Staging-only chrome.** Staged messages carry one extra line saying where the draft is aimed, what it became once posted, and which file in the gist it is:
 
 ```
-→ #oa-amazon-trainium · posted · 01-mfu.md
-→ (#marin-alerts) · posted · 02-cw-summary.md
+→ #oa-amazon-trainium · 01-mfu.md
+→ (#marin-alerts) · 02-cw-summary.md
+✅ #marin-alerts · 02-cw-summary.md
 ```
 
-In the second, the arrow itself links to the message being replied to — the `thread_ts` is what a machine needs and a human never reads. The gist link deep-links the file (`#file-01-mfu-md`), not just the gist. Configured in `thrds.json`, never written into doc content:
+In the second, the arrow itself links to the message being replied to — the `thread_ts` is what a machine needs and a human never reads. The third is a posted thread: `→` is an affordance (edit it and the draft goes elsewhere), so once it's spent, the line condenses to one link — our posted permalink, channel name as anchor text — and `✅` replaces the word "posted". Nothing is lost, since that permalink carries the thread root as `?thread_ts=` and `thrds.json` holds the machine-readable copy. The gist link deep-links the file (`#file-01-mfu-md`), not just the gist. Configured in `thrds.json`, never written into doc content:
 
 ```jsonc
 "staging_chrome": {

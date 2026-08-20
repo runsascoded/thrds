@@ -17,6 +17,7 @@ from .chrome import (
     drop_line as drop_chrome_line,
     has_chrome,
     locate as locate_chrome,
+    normalize_glyphs,
     parse as parse_chrome,
     render as render_chrome,
     split as split_chrome,
@@ -1072,6 +1073,9 @@ class SlackClient:
             posted_url=posted,
             gist_id=state.gist_id if chrome.gist_link else None,
             filename=filename,
+            channel_name=(
+                state.channel_names.get(target.channel) if target is not None else None
+            ),
         )
 
     def _live_chrome(self, op_ts: str) -> tuple[str | None, bool]:
@@ -1085,7 +1089,8 @@ class SlackClient:
         Entity-decoded, because Slack HTML-encodes ``&`` on storage: a
         permalink's ``&cid=`` comes back ``&amp;cid=``, and comparing that
         against freshly-rendered chrome would report drift on every push and
-        re-edit every message forever.
+        re-edit every message forever. Glyphs are normalized for the same
+        reason — see :data:`thrds.chrome.GLYPH_ALIASES`.
         """
         result = self._request("conversations.replies", {
             "channel": self.channel,
@@ -1097,12 +1102,12 @@ class SlackClient:
             b for b in (message.get("blocks") or []) if b.get("type") == "context"
         ]
         if contexts:
-            line = _decode_entities("".join(
+            line = normalize_glyphs(_decode_entities("".join(
                 e.get("text", "") for e in contexts[0].get("elements", [])
                 if e.get("type") == "mrkdwn"
-            ))
+            )))
             return (line or None), True
-        text = _decode_entities(message.get("text", ""))
+        text = normalize_glyphs(_decode_entities(message.get("text", "")))
         lines = text.rstrip("\n").split("\n")
         if len(lines) < 2:
             return None, False
@@ -1161,6 +1166,36 @@ class SlackClient:
                 continue
         return urls
 
+    def _resolve_channel_names(self, state: SessionState, slugs: list[str]) -> None:
+        """Cache ``channel id → name`` for each posted thread's target.
+
+        Only posted threads need one: their condensed footer names the channel
+        in link text, where a draft's ``<#C…>`` mention lets Slack do the
+        naming. One `conversations.info` per channel — versus paginating
+        `conversations.list` over the whole workspace for a display string —
+        and it persists in `thrds.json`, so a session pays at most once.
+
+        Failures are swallowed like `_target_urls`': a name we can't resolve
+        means the footer renders its longer form, not that the push fails.
+        """
+        for slug in slugs:
+            entry = state.threads.get(slug)
+            target = state.target_for(slug)
+            if entry is None or entry.posted_url is None or target is None:
+                continue
+            if target.channel in state.channel_names:
+                continue
+            try:
+                # GET, not JSON POST — same constraint as `list_channels_by_name`:
+                # `conversations.info` answers a JSON POST with `invalid_arguments`.
+                r = self._request(
+                    'conversations.info', {'channel': target.channel}, method='GET',
+                )
+            except Exception:  # noqa: BLE001 — best-effort affordance
+                continue
+            if name := (r.get('channel') or {}).get('name'):
+                state.channel_names[target.channel] = name
+
     def _chrome_for_threads(
         self,
         threads: list[DocThread],
@@ -1170,7 +1205,9 @@ class SlackClient:
         """Map each thread's slug → its footer line."""
         if not state.staging_chrome.any_enabled:
             return {}
-        target_urls = self._target_urls(state, [t.slug for t in threads])
+        slugs = [t.slug for t in threads]
+        target_urls = self._target_urls(state, slugs)
+        self._resolve_channel_names(state, slugs)
         by_slug: dict[str, str] = {}
         for thread in threads:
             line = self._chrome_line(
