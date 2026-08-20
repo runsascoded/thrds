@@ -128,10 +128,18 @@ Verified live against a throwaway copy of `cw-quickwins` (remotes stripped, `THR
 
 33 tests (`test_tracking.py`, `test_fetch_cli.py`); suite at 973.
 
+## Implementation notes (step 2, 2026-08-20)
+
+As specified, with one refinement: **a local-only change flips the diff's direction.** The two-way convention was local → slack ("what `pull` would change"), but a hunk classified *changed locally* is `push`'s to send, and printing it as something Slack would remove says the opposite of what's true. So: changed-in-Slack and CONFLICT read local → slack; changed-locally reads slack → local. Each changed thread gets one stderr line naming the verb; unchanged threads stay silent, including the both-changed-to-the-same-content case (converged is converged). A thread absent from the base (pushed since the last fetch) classifies against an empty base — if local and Slack then disagree, CONFLICT is the honest answer.
+
+Without a fetched base, `diff` keeps the two-way behavior and prints a one-line stderr hint naming `slck fetch` — only when there's a diff to classify, so clean sessions stay silent. `diff` reads Slack but never advances the refs: `fetch` is the verb that moves the base.
+
+Verified live in a throwaway copy of `cw-quickwins`: silent before and after `fetch` (clean), a local edit classifies as `changed locally — \`push\` sends it` with the flipped direction (both bare `diff` and `diff <slug>`), and reverting returns to silence.
+
 ## Phasing
 
 1. ~~`tracking.py` + `fetch` with `-n`, nop semantics, honest bootstrap.~~ **Done** — `git diff slack/remote HEAD` works today.
-2. `diff` three-way classification. Small, once the base exists.
+2. ~~`diff` three-way classification.~~ **Done.**
 3. `pull` reconcile modes + dirty-worktree abort.
 4. `push` gate + post-write verification.
 5. `promote` gate; `DELETE` pre-flight content check.

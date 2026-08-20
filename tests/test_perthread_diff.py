@@ -7,12 +7,13 @@ compared against an empty doc, and reported every thread as deleted.
 """
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 
 import pytest
 from click.testing import CliRunner
 
-from thrds import DocMessage, DocThread, SessionState, ThreadEntry, ThreadTarget
+from thrds import DocMessage, DocThread, SessionState, ThreadEntry, ThreadTarget, tracking
 from thrds.cli import SLACK_TOKEN_ENV, cli
 
 
@@ -266,3 +267,128 @@ def test_session_with_no_staged_threads_says_so(tmp_path, monkeypatch, spy):
     assert result.exit_code == 0
     assert result.stdout == ''
     assert result.stderr.splitlines() == ['No staged threads to diff.']
+
+
+# --- three-way classification (with a fetched base) ---
+
+
+def _set_base(session_dir, files: dict[str, str]) -> None:
+    """Init a git repo and plant `slack/remote` at ``files``, as `fetch` would."""
+    for args in (['init', '-q', '-b', 'main'],
+                 ['config', 'user.email', 't@example.com'],
+                 ['config', 'user.name', 'T']):
+        subprocess.run(['git', *args], cwd=session_dir, check=True, capture_output=True)
+    ref = tracking.ref_name('slack', tracking.COMPOSITE)
+    tree = tracking.build_tree(session_dir, files)
+    tracking.snapshot(session_dir, ref, 'slack/remote', tree, 'thrds: fetch remote')
+
+
+BOTH_BASES = {'01-alpha.md': 'Alpha OP.\n', '02-beta.md': 'Beta OP.\n'}
+
+
+def test_remote_only_change_classifies_as_pulls(session, spy):
+    """base == local, Slack moved: the hunk is Slack's, `pull` applies it."""
+    _set_base(session, BOTH_BASES)
+    spy.returns = {
+        'alpha': thread('alpha', 'Alpha OP, edited in Slack.'),
+        'beta': thread('beta', 'Beta OP.'),
+    }
+    result = _run()
+    assert result.stderr.splitlines() == [
+        '01-alpha.md: changed in Slack — `pull` applies it',
+    ]
+    assert result.stdout.splitlines() == [
+        '--- 01-alpha.md (local)',
+        '+++ 01-alpha.md (slack)',
+        '@@ -1 +1 @@',
+        '-Alpha OP.',
+        '+Alpha OP, edited in Slack.',
+    ]
+
+
+def test_local_only_change_classifies_as_pushs_and_flips_direction(session, spy):
+    """base == remote, we moved: the hunk is ours, and the diff reads
+    slack → local — what `push` sends, not what `pull` would undo."""
+    _set_base(session, BOTH_BASES)
+    (session / '01-alpha.md').write_text('Alpha OP, edited locally.\n')
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    result = _run()
+    assert result.stderr.splitlines() == [
+        '01-alpha.md: changed locally — `push` sends it',
+    ]
+    assert result.stdout.splitlines() == [
+        '--- 01-alpha.md (slack)',
+        '+++ 01-alpha.md (local)',
+        '@@ -1 +1 @@',
+        '-Alpha OP.',
+        '+Alpha OP, edited locally.',
+    ]
+
+
+def test_both_sides_changed_is_a_conflict(session, spy):
+    _set_base(session, BOTH_BASES)
+    (session / '01-alpha.md').write_text('Alpha OP, edited locally.\n')
+    spy.returns = {
+        'alpha': thread('alpha', 'Alpha OP, edited in Slack.'),
+        'beta': thread('beta', 'Beta OP.'),
+    }
+    result = _run()
+    assert result.stderr.splitlines() == [
+        '01-alpha.md: CONFLICT — both sides changed since the last fetch',
+    ]
+    assert result.stdout.splitlines() == [
+        '--- 01-alpha.md (local)',
+        '+++ 01-alpha.md (slack)',
+        '@@ -1 +1 @@',
+        '-Alpha OP, edited locally.',
+        '+Alpha OP, edited in Slack.',
+    ]
+
+
+def test_both_sides_converged_is_silent(session, spy):
+    """local == remote is nothing-to-do regardless of what the base says."""
+    _set_base(session, BOTH_BASES)
+    (session / '01-alpha.md').write_text('Same everywhere now.\n')
+    spy.returns = {
+        'alpha': thread('alpha', 'Same everywhere now.'),
+        'beta': thread('beta', 'Beta OP.'),
+    }
+    result = _run()
+    assert (result.stdout, result.stderr) == ('', '')
+
+
+def test_thread_missing_from_the_base_still_classifies(session, spy):
+    """A thread pushed since the last fetch has an empty base: local matches
+    nothing recorded, Slack matches local — silent; if they differ, both
+    moved relative to '' and CONFLICT is the honest answer."""
+    _set_base(session, {'01-alpha.md': 'Alpha OP.\n'})
+    (session / '02-beta.md').write_text('Beta OP, v2.\n')
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    result = _run()
+    assert result.stderr.splitlines() == [
+        '02-beta.md: CONFLICT — both sides changed since the last fetch',
+    ]
+
+
+def test_no_base_prints_the_plain_diff_with_a_hint(session, spy):
+    """Sessions that never ran `fetch` keep the two-way behavior; the hint
+    names the verb that upgrades it, once, on stderr."""
+    spy.returns = {
+        'alpha': thread('alpha', 'Alpha OP, edited in Slack.'),
+        'beta': thread('beta', 'Beta OP, edited in Slack.'),
+    }
+    result = _run()
+    assert result.stderr.splitlines() == [
+        '(run `slck fetch` first to classify changes as local vs. Slack-side)',
+    ]
+    assert [l for l in result.stdout.splitlines() if l.startswith('---')] == [
+        '--- 01-alpha.md (local)',
+        '--- 02-beta.md (local)',
+    ]
+
+
+def test_no_base_and_no_changes_stays_silent(session, spy):
+    """The hint earns its line only when there's a diff to classify."""
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    result = _run()
+    assert (result.stdout, result.stderr) == ('', '')

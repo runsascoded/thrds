@@ -853,6 +853,26 @@ def _thread_slug_arg(arg: str) -> str:
     return parsed[1] if parsed is not None else name
 
 
+def _base_texts(session_dir: Path, platform: str) -> dict[str, str] | None:
+    """slug → text at the last-fetched composite; None if `fetch` never ran.
+
+    The merge base is what turns a two-way diff into a classification: a hunk
+    in local↔Slack is equally "Slack edited this" and "you edited this", and
+    those want opposite verbs. Comparing each side against the base instead
+    says which one moved.
+    """
+    ref = tracking.ref_name(platform, tracking.COMPOSITE)
+    base = tracking.read_ref(session_dir, ref)
+    if base is None:
+        return None
+    texts: dict[str, str] = {}
+    for name in tracking.tree_names(session_dir, f'{base}^{{tree}}'):
+        parsed = parse_thread_filename(name)
+        if parsed is not None:
+            texts[parsed[1]] = tracking.read_tree_file(session_dir, base, name)
+    return texts
+
+
 def _diff_threads(
     client: SlackClient,
     state: SessionState,
@@ -898,6 +918,8 @@ def _diff_threads(
         t.slug: t
         for t in client.pull_promoted_threads(state, session_dir=session_dir, slugs=wanted)
     })
+    bases = _base_texts(session_dir, state.platform)
+    hinted = False
     for slug in wanted:
         tf = files.get(slug)
         name = tf.name if tf is not None else f'{slug}.md'
@@ -907,10 +929,31 @@ def _diff_threads(
         # `serialize_thread` of that is a lone newline, which would read as
         # "one blank line remains" rather than "it's gone".
         remote = serialize_thread(thread) if thread is not None and thread.messages else ''
-        click.echo(
-            diff_texts(local, remote, f'{name} (local)', f'{name} (slack)'),
-            nl=False,
-        )
+        if local == remote:
+            # Includes both-changed-to-the-same-content: converged is converged.
+            continue
+        # `pull` applies Slack's side, so its diff reads local → slack; a
+        # local-only change is `push`'s to send, so that one reads slack → local.
+        pull_diff = diff_texts(local, remote, f'{name} (local)', f'{name} (slack)')
+        if bases is None:
+            if not hinted:
+                err('(run `slck fetch` first to classify changes as local vs. Slack-side)')
+                hinted = True
+            click.echo(pull_diff, nl=False)
+            continue
+        base = bases.get(slug, '')
+        if base == local:
+            err(f'{name}: changed in Slack — `pull` applies it')
+            click.echo(pull_diff, nl=False)
+        elif base == remote:
+            err(f'{name}: changed locally — `push` sends it')
+            click.echo(
+                diff_texts(remote, local, f'{name} (slack)', f'{name} (local)'),
+                nl=False,
+            )
+        else:
+            err(f'{name}: CONFLICT — both sides changed since the last fetch')
+            click.echo(pull_diff, nl=False)
 
 
 def _remote_files(
@@ -1009,12 +1052,20 @@ def slack_fetch(dry_run: bool):
 @click.option('-p', '--prod', is_flag=True, help='Diff against prod channel (legacy sessions only).')
 @click.argument('target', required=False)
 def slack_diff(channel: str | None, prod: bool, target: str | None):
-    """Show what `pull` would change: local content vs. Slack's current state.
+    """Show how local content and Slack's current state differ, per thread.
 
     Per-thread sessions diff each thread that has a `staging_ts` against its
     own file, emitting one unified diff per changed thread and nothing for
     unchanged ones. TARGET restricts that to a single thread (slug or
     filename). Always exits 0 — this is a report, not a gate.
+
+    With a fetched base (`slck fetch`), each changed thread is also classified
+    by which side moved: changed in Slack (`pull` applies it, diff reads
+    local → slack), changed locally (`push` sends it, diff reads slack →
+    local), or CONFLICT (both moved since the last fetch). Without one, a hunk
+    is equally "Slack edited this" and "you edited this and `pull` will eat
+    it" — and those want opposite verbs. Reads Slack but moves no refs;
+    `fetch` is the verb that advances the base.
 
     The local side is the working-tree file verbatim, not its canonical
     re-serialization, because `pull` overwrites the file: local formatting

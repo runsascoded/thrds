@@ -176,6 +176,21 @@ def tree_names(session_dir: Path, tree: str) -> tuple[str, ...]:
     return tuple(out.splitlines()) if out else ()
 
 
+def read_tree_file(session_dir: Path, rev: str, name: str) -> str:
+    """``name``'s exact content at ``rev`` — no stripping, unlike :func:`_git`,
+    because a trailing newline is part of the bytes being compared."""
+    try:
+        r = subprocess.run(
+            ['git', 'show', f'{rev}:{name}'],
+            cwd=session_dir, check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise MirrorError(
+            f"git show {rev}:{name} failed (exit {e.returncode}):\n{e.stderr.rstrip()}"
+        ) from e
+    return r.stdout
+
+
 def changed_paths(session_dir: Path, before: str, after: str) -> tuple[str, ...]:
     """Paths differing between two trees or commits."""
     out = _git(session_dir, 'diff', '--name-only', before, after)
