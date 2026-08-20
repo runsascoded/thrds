@@ -84,6 +84,7 @@ from .migrate import apply_migration, plan_migration
 from .replay import ReplayError, plan_replay, verify_plan, write_replay
 from .slack import ScanCapReached, SlackClient
 from .state import STATE_PATH, SessionState, ThreadTarget
+from . import tracking
 from .threadfile import (
     find_thread,
     parse_thread_filename,
@@ -910,6 +911,97 @@ def _diff_threads(
             diff_texts(local, remote, f'{name} (local)', f'{name} (slack)'),
             nl=False,
         )
+
+
+def _remote_files(
+    client: SlackClient,
+    state: SessionState,
+    session_dir: Path,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """``(staging, prod)`` as ``{filename: text}`` — what `pull` would write.
+
+    A thread whose OP was deleted in Slack comes back with no messages; it's
+    *absent* from the tree rather than present-and-empty, so the fetch records
+    the file going away instead of a lone blank line.
+    """
+    names = {tf.slug: tf.name for tf in thread_files(session_dir)}
+
+    def render(threads) -> dict[str, str]:
+        return {
+            names.get(t.slug, f'{t.slug}.md'): serialize_thread(t)
+            for t in threads if t.messages
+        }
+
+    return (
+        render(client.pull_threads_staging(state, session_dir=session_dir)),
+        render(client.pull_promoted_threads(state, session_dir=session_dir)),
+    )
+
+
+def _composite_tree(session_dir: Path, files: dict[str, str]) -> str:
+    """HEAD's tree with the observed threads overlaid — the merge base's tree.
+
+    ``prune`` is every thread file HEAD carries, so a thread Slack has dropped
+    disappears while `README.md` and friends pass through untouched.
+    """
+    head = tracking.read_ref(session_dir, 'HEAD')
+    if head is None:
+        return tracking.build_tree(session_dir, files)
+    tracked = {
+        name for name in tracking.tree_names(session_dir, f'{head}^{{tree}}')
+        if parse_thread_filename(name) is not None
+    }
+    return tracking.overlay_tree(session_dir, f'{head}^{{tree}}', files, tracked)
+
+
+@slack_cli.command("fetch")
+@click.option('-n', '--dry-run', is_flag=True, help="Report what would be fetched, without moving any ref.")
+def slack_fetch(dry_run: bool):
+    """Record Slack's current state in remote-tracking refs.
+
+    The read-only half of `pull`: it advances `refs/remotes/slack/{staging,
+    prod,remote}` and touches nothing else — not the working tree, not the
+    index, not the branch. `git diff slack/remote HEAD` afterwards is "what
+    have I changed that Slack hasn't seen"; `git show slack/remote` is "what
+    changed on Slack since I last looked".
+
+    A nop when Slack projects byte-identically to what the refs already hold.
+    """
+    state = _load_state(expected_platform='slack')
+    if state.is_legacy:
+        raise click.UsageError(
+            'Remote-tracking refs are per-thread only; run `thrds slack migrate` first.'
+        )
+    session_dir = Path.cwd()
+    if not mirror.is_git_repo(session_dir):
+        raise click.UsageError(
+            f'{session_dir} is not a git repo; nothing to track refs in.'
+        )
+    client = _make_slack_client()
+    staging, prod = _remote_files(client, state, session_dir)
+    # Same precedence `pull` applies: for a posted thread prod is canonical and
+    # overrides the frozen staging copy.
+    composite = {**staging, **prod}
+    # Sources are sparse — they hold what that channel actually has. The
+    # composite is HEAD's tree with the threads overlaid, because it's a merge
+    # base: a tree missing `README.md` / `thrds.json` / `emoji-*.png` would have
+    # `pull`'s rebase delete them.
+    trees = [
+        (tracking.STAGING, tracking.build_tree(session_dir, staging)),
+        (tracking.PROD, tracking.build_tree(session_dir, prod)),
+        (tracking.COMPOSITE, _composite_tree(session_dir, composite)),
+    ]
+    for source, tree in trees:
+        snap = tracking.snapshot(
+            session_dir,
+            tracking.ref_name(state.platform, source),
+            tracking.short_ref(state.platform, source),
+            tree,
+            f'thrds: fetch {source}',
+            write=not dry_run,
+        )
+        prefix = '[dry-run] ' if dry_run and snap.changed else ''
+        err(f'{prefix}{snap.label}: {snap.summary()}')
 
 
 @slack_cli.command("diff")

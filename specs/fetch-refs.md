@@ -30,9 +30,11 @@ The gist stays a genuine remote (`refs/remotes/g/main`). So: `g` is the mirror w
 
 ## `fetch`
 
-    slck fetch [-n] [--prod|--staging]
+    slck fetch [-n]
 
-Build a commit whose tree is Slack's current state, parented on the current ref; advance the ref. Never touches the working tree, index, or branch — the snapshot is built in a throwaway worktree under the git dir (`.git/thrds/fetch-wt`), which is also what makes `-n` genuinely side-effect-free. `-n` reports without advancing.
+Build a commit whose tree is Slack's current state, parented on the current ref; advance the ref. Never touches the working tree, index, or branch. `-n` reports without advancing.
+
+No `--staging` / `--prod`: a partial fetch would leave the composite describing a mix of two moments, and the composite is the thing `pull` reconciles against. Both sources are read on every fetch — `pull` already makes both API calls — and all three refs move together.
 
 **Nop semantics.** The comparison is content equality of the projected tree: stage the rebuilt files, and commit only if `git diff --cached` is non-empty. So `fetch` is a nop iff Slack projects byte-identically to what we last recorded, and otherwise the ref moves and there is an implied commit whose diff *is* the remote delta — `git diff slack/remote@{1} slack/remote`, or `git show slack/remote`. That is the model asked for, and it's what ghpr already does.
 
@@ -110,9 +112,25 @@ Same output format as today (`diff_texts`, `NN-slug.md (local)` / `(slack)` head
 
 3. **Legacy single-doc sessions** get the same refs with a one-file tree, or are simply excluded until migrated. Excluded is fine — `migrate` exists.
 
+## Implementation notes (step 1, 2026-08-20)
+
+Landed as `thrds/tracking.py` — not `refs.py`, which is taken by the cross-thread `#slug` resolver.
+
+**Plumbing, not a scratch worktree.** ghpr needs one because it reuses the same file-writing code that normally targets the working tree. We build the projection ourselves, so `hash-object` / `mktree` / `commit-tree` suffice: nothing outside the object database and the ref is touched. That makes `-n` side-effect-free *by construction* rather than by remembering to honour a flag — which is the bug this whole design exists to prevent — and leaves no worktree to leak if we die mid-fetch.
+
+**The composite overlays HEAD's tree; the sources stay sparse.** Caught by live-running against a copy of `cw-quickwins`, where `git diff slack/remote HEAD` reported `README.md`, `thrds.json` and two `emoji-*.png` as files HEAD had and the remote didn't. Cosmetic in a diff, fatal in step 3: `git rebase --onto slack/remote` replays commits onto that tree, so every file absent from it would be **deleted**. The composite is therefore "what the tree would look like after `pull`" — HEAD's tree with observed threads written over it, and threads Slack has dropped removed. Pruning is scoped to names that parse as thread files, so an unrelated file is never a removal candidate. The source refs stay sparse, because they're observations: `slack/prod` holds the posted threads and nothing else, since that's all the target channel has.
+
+**The drift query is `git diff --diff-filter=M slack/staging slack/prod`.** The two sources are sparse in different ways, so a plain diff reports every draft as "deleted from prod". Restricting to files present in both leaves exactly the posted threads whose frozen staged copy has diverged from what's live.
+
+**Reporting** distinguishes three cases, because "initialized" and "unchanged" are different facts: `initialized (N files)` / `initialized empty` on a first fetch (nothing to have changed *from*, so listing every file says nothing), `up to date`, or `N files (names…)`.
+
+Verified live against a throwaway copy of `cw-quickwins` (remotes stripped, `THRDS_NO_PUSH=1`): `fetch -n` moves no ref, `fetch` creates all three, a second `fetch` is a clean nop on all three, HEAD and `git status` are byte-identical throughout, `git diff slack/remote HEAD` is empty, and `git reflog slack/remote` works — the payoff for the `refs/remotes/` namespace.
+
+33 tests (`test_tracking.py`, `test_fetch_cli.py`); suite at 973.
+
 ## Phasing
 
-1. `refs.py` (read/set/ensure, per-platform namespace) + `fetch` with `-n`, scratch worktree, nop semantics, honest bootstrap. Independently useful: `git diff slack/remote HEAD` the moment it lands.
+1. ~~`tracking.py` + `fetch` with `-n`, nop semantics, honest bootstrap.~~ **Done** — `git diff slack/remote HEAD` works today.
 2. `diff` three-way classification. Small, once the base exists.
 3. `pull` reconcile modes + dirty-worktree abort.
 4. `push` gate + post-write verification.
