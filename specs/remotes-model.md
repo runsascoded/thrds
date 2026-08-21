@@ -67,6 +67,28 @@ The `slack/remote` → `slack/upstream` proposal went to ghpr's session, which a
 
 The platform prefix is gone entirely: a session is single-platform (stamped at init), so it was namespace noise. ghpr's own `github/remote` stays put for now — theirs genuinely is one remote's state, so it's a cosmetic wart on their side, and they migrated that namespace once already this week.
 
+## Next: per-remote thread pointers (design)
+
+The prerequisite everything else queues behind (config section, `push`/`pull` remote args, per-remote chrome). Today `ThreadEntry` hardcodes the two-remote topology in its field names: `staging_ts` is "my ts at the staging remote", and `target`/`posted_ts`/`posted_msg_ts` are "my location and message ids at the prod remote". Generalized:
+
+```jsonc
+// ThreadEntry
+{
+  "state": "posted",
+  "upstream": "prod",              // which remote is canonical now (today: derived from state)
+  "remotes": {                     // remote name → this thread's pointers there
+    "staging": {"ts": "1.1"},
+    "prod": {"channel": "C0PROD", "thread_ts": "0.1", "ts": "9.9", "msg_ts": ["9.9"], "url": "…"}
+  }
+}
+```
+
+- One pointer shape for both roles: `ts` (our root message), `msg_ts` (our message ids — the re-promote whitelist), `channel`+`thread_ts` (where, and what we replied into; staging omits them, inheriting the session's staging channel). `posted_url` folds in as `url`.
+- `entry.state` stays (it carries `ready`/`dropped`, which aren't upstream facts) but `posted` becomes verifiable against `upstream != 'staging'`.
+- **Migration**: on load, old fields rewrite to `remotes` entries (`staging_ts` → `remotes.staging.ts`, `target`+`posted_*` → `remotes.prod.*`); saved back on the next state write. Old fields dropped after migration — BC shim lives in `__post_init__` only.
+- **Readers become channel-parameterized**: `pull_threads_staging` / `pull_promoted_threads` collapse toward one `pull_thread_states(remote, …)` keyed off each thread's pointers at that remote — which is what makes a second staging-role remote (Discord's own-server staging) or N prod targets real rather than declared.
+- Then the `remotes:` session config section lands honestly, `promote` becomes `push -u prod <thread>` sugar, and audit friction 2 (`prod` ref conflating N targets) resolves per-remote.
+
 ## Observations are now write-free (2026-08-21)
 
 The one leak in "fetch touches nothing": staging/prod pulls download `emoji-*` files into the session dir as a side effect of custom-emoji substitution. Fixed via `download_emoji=False` on the pull methods — the substituted text only depends on the deterministic filename (`emoji-<name>.<ext>` from the workspace URL), not on the file existing, so an observation renders byte-identically to what `pull` would write while writing nothing. `remotes.observe` (feeding `fetch` and the push/promote gates) and `diff` pass it; `pull` still downloads, since it writes and commits the files anyway. Divergence window: a download that would *fail* leaves `pull`'s text literal where an observation substituted — transient, and the next pull surfaces it as an honest delta.
