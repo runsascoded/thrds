@@ -132,11 +132,10 @@ def test_fetch_records_a_slack_side_edit(session, spy):
 def test_composite_takes_prod_over_staging_for_a_posted_thread(session, spy):
     """The same precedence `pull` applies. A merge base built under different
     rules would disagree with the merge."""
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    _run()  # confirmed bootstrap
     _promote(session, 'alpha')
-    spy.returns = {
-        'alpha': thread('alpha', 'Frozen staging copy.'),
-        'beta': thread('beta', 'Beta OP.'),
-    }
+    spy.returns['alpha'] = thread('alpha', 'Frozen staging copy.')
     spy.prod_returns = {'alpha': thread('alpha', 'Live prod copy.')}
     _run()
     assert _git(session, 'show', f'{REMOTE}:01-alpha.md') == 'Live prod copy.'
@@ -185,7 +184,7 @@ def test_a_thread_deleted_in_slack_leaves_the_tree(session, spy):
 
 def test_head_is_the_first_snapshots_parent(session, spy):
     """So `slack/remote..HEAD` starts empty: nothing local to replay."""
-    spy.returns = {'alpha': thread('alpha', 'Alpha OP.')}
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
     _run()
     assert _git(session, 'rev-list', '--count', f'{REMOTE}..HEAD') == '0'
 
@@ -234,7 +233,9 @@ def test_composite_drops_a_thread_slack_no_longer_has(session, spy):
     (session / 'README.md').write_text('Session notes.\n')
     _git(session, 'add', 'README.md')
     _git(session, 'commit', '-q', '-m', 'notes')
-    spy.returns = {'alpha': thread('alpha', 'Alpha OP.')}
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    _run()  # confirmed bootstrap
+    del spy.returns['beta']
     _run()
     assert sorted(_git(session, 'ls-tree', '--name-only', REMOTE).splitlines()) == [
         '01-alpha.md', 'README.md', 'thrds.json',
@@ -263,3 +264,26 @@ def test_drift_between_the_staged_copy_and_what_is_live(session, spy):
     assert _git(
         session, 'diff', '--name-only', '--diff-filter=M', STAGING, PROD,
     ) == '01-alpha.md'
+
+
+def test_ambiguous_bootstrap_withholds_the_composite(session, spy):
+    """A first fetch that disagrees with HEAD has no evidence of which side is
+    ahead — 'remote ahead' reverts unpushed local work, 'local ahead' pushes
+    stale content over a newer remote. Sources are observations and always
+    land; the merge base is a claim, and an unconfirmed claim isn't made."""
+    spy.returns = {
+        'alpha': thread('alpha', 'Alpha OP, who knows whose.'),
+        'beta': thread('beta', 'Beta OP.'),
+    }
+    result = _run()
+    assert result.exit_code == 0
+    assert result.stderr.splitlines() == [
+        'slack/staging: initialized (2 files)',
+        'slack/prod: initialized empty',
+        'slack/remote: not set — first fetch and HEAD disagree (01-alpha.md); '
+        'resolve with `slck pull -m overwrite` (Slack wins) or `slck push` '
+        '(local wins)',
+    ]
+    assert _git(session, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/') == (
+        'slack/prod\nslack/staging'
+    )

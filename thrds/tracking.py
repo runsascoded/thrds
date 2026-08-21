@@ -178,6 +178,63 @@ def tree_names(session_dir: Path, tree: str) -> tuple[str, ...]:
     return tuple(out.splitlines()) if out else ()
 
 
+def config_get(session_dir: Path, key: str) -> str | None:
+    """``git config <key>``, or None when unset."""
+    r = subprocess.run(
+        ['git', 'config', key], cwd=session_dir, capture_output=True, text=True,
+    )
+    return r.stdout.strip() or None
+
+
+@dataclass(frozen=True)
+class MergeResult:
+    """`git merge-tree --write-tree` output: the merged tree, and what conflicted.
+
+    ``tree`` is valid even when there are conflicts (it contains conflict
+    markers) — callers must check ``conflicts`` before using it, because
+    writing marker-bearing content to a thread file would get *pushed to
+    Slack* by a later sync.
+    """
+    tree: str
+    conflicts: tuple[str, ...]
+
+    @property
+    def clean(self) -> bool:
+        return not self.conflicts
+
+
+def merge_trees(session_dir: Path, base: str, ours: str, theirs: str) -> MergeResult:
+    """Three-way merge entirely in the object database; nothing else touched.
+
+    The reconcile primitive for `pull`: ``base`` is the last-fetched remote
+    state, ``ours`` is HEAD, ``theirs`` the fresh fetch. A real `git rebase`
+    would replay ``base..HEAD`` — but the composite tree overlays HEAD, so
+    those commits' non-thread changes are already present and patch-id
+    skipping makes replay fragile rather than wrong. `merge-tree` computes
+    the same result directly.
+    """
+    r = subprocess.run(
+        ['git', 'merge-tree', '--write-tree', '--name-only',
+         f'--merge-base={base}', ours, theirs],
+        cwd=session_dir, capture_output=True, text=True,
+    )
+    lines = r.stdout.splitlines()
+    if r.returncode == 0:
+        return MergeResult(tree=lines[0].strip(), conflicts=())
+    if r.returncode == 1:
+        # Line 1 is the (marker-bearing) tree; then conflicted filenames up to
+        # the first blank line; then informational messages.
+        names = []
+        for line in lines[1:]:
+            if not line.strip():
+                break
+            names.append(line.strip())
+        return MergeResult(tree=lines[0].strip(), conflicts=tuple(dict.fromkeys(names)))
+    raise MirrorError(
+        f"git merge-tree failed (exit {r.returncode}):\n{r.stderr.rstrip()}"
+    )
+
+
 def read_tree_file(session_dir: Path, rev: str, name: str) -> str:
     """``name``'s exact content at ``rev`` — no stripping, unlike :func:`_git`,
     because a trailing newline is part of the bytes being compared."""

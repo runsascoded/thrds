@@ -140,11 +140,25 @@ Without a fetched base, `diff` keeps the two-way behavior and prints a one-line 
 
 Verified live in a throwaway copy of `cw-quickwins`: silent before and after `fetch` (clean), a local edit classifies as `changed locally — \`push\` sends it` with the flipped direction (both bare `diff` and `diff <slug>`), and reverting returns to silence.
 
+## Implementation notes (step 3, 2026-08-21)
+
+`pull -m rebase|merge|overwrite`, default from `git config thrds.pullMode`, else `rebase`; non-git sessions are always `overwrite` (and asking for another mode there is an error, not a silent downgrade). The reconcile is `git merge-tree --write-tree` — base = last-fetched composite, ours = HEAD, theirs = the fresh fetch — with only thread files materialized from the merged tree (`thrds.json` in there is HEAD's copy; in-memory state supersedes it). One round of API reads feeds both the refs and the reconcile.
+
+Deviations from the section above, each learned the hard way:
+
+- **A conflict must not advance the composite.** If the base moves to the fetched state before the reconcile succeeds, the next pull finds base == remote, concludes "nothing to do", and the conflict silently evaporates — remote's side never lands. So the pull path previews the composite (`write_composite=False`), and the base advances only after the merge does; a test pins that retrying a conflicted pull reproduces the conflict.
+- **Conflicts abort with the file list; nothing is written.** Conflict markers in a thread file would be posted to Slack by a later `push`. The message names the outs: `-m overwrite` (Slack wins) or resolve locally and `push` (local wins).
+- **Bootstrap follows ghpr's confirmed-or-refuse** (see the bootstrap-divergence section): an ambiguous first fetch withholds the composite and `rebase`/`merge` refuse with the same two outs. `-m overwrite` resolves and establishes the base.
+- **The composite re-points at the new HEAD after every write-mode pull** (`_refresh_composite`, no API reads): threads as fetched, passthrough files from the commit the pull just made — otherwise every pull leaves `git diff slack/remote HEAD` dangling on its own `thrds.json` commit.
+- **`merge` mode commits via plumbing** (`commit-tree` with the fetched snapshot as second parent) because `git merge` insists on driving the reconcile itself. `rebase` keeps today's linear autocommit shape, so gist-mirror history is unchanged for the default path.
+
+Verified live in a throwaway copy of `cw-quickwins`: bootstrap confirmed silently, a committed local edit survives a pull (the old `pull` reverted exactly this) and reads as local-only in `git diff slack/remote HEAD`, a dirty WT aborts, and re-pulls are clean nops. 13 new tests (`test_pull_modes.py` + the bootstrap-withhold case); suite at 993.
+
 ## Phasing
 
 1. ~~`tracking.py` + `fetch` with `-n`, nop semantics, honest bootstrap.~~ **Done** — `git diff slack/remote HEAD` works today.
 2. ~~`diff` three-way classification.~~ **Done.**
-3. `pull` reconcile modes + dirty-worktree abort.
+3. ~~`pull` reconcile modes + dirty-worktree abort.~~ **Done.**
 4. `push` gate + post-write verification.
 5. `promote` gate; `DELETE` pre-flight content check.
 

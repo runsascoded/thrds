@@ -137,6 +137,37 @@ def push(session_dir: Path, remote: str = 'g', branch: str = 'main') -> None:
     _run(['git', 'push', '-q', remote, f'HEAD:{branch}'], cwd=session_dir)
 
 
+def commit_merge(
+    session_dir: Path,
+    paths: list[str],
+    message: str,
+    extra_parent: str,
+) -> str:
+    """Like :func:`commit`, but the commit records ``extra_parent`` too.
+
+    `pull -m merge` uses this to connect the fetched remote-state commit into
+    the branch's history: the merged content becomes an ordinary commit whose
+    second parent is the `slack/remote` snapshot it reconciled against. Built
+    with plumbing (`write-tree` / `commit-tree`) because `git merge` insists
+    on driving the reconcile itself, and the reconcile already happened in
+    `merge_trees`.
+
+    Always commits, even when ``paths`` staged nothing new: a two-parent
+    commit with an unchanged tree is exactly how git records "these histories
+    are now synchronized", and that's the fact being recorded.
+    """
+    _run(['git', 'add', *paths], cwd=session_dir)
+    tree = _run(['git', 'write-tree'], cwd=session_dir).stdout.strip()
+    head = _run(['git', 'rev-parse', 'HEAD'], cwd=session_dir).stdout.strip()
+    sha = _run(
+        ['git', 'commit-tree', tree, '-p', head, '-p', extra_parent, '-m', message],
+        cwd=session_dir,
+    ).stdout.strip()
+    branch = _run(['git', 'symbolic-ref', 'HEAD'], cwd=session_dir).stdout.strip()
+    _run(['git', 'update-ref', branch, sha], cwd=session_dir)
+    return sha
+
+
 def align_to_remote(session_dir: Path, remote: str = 'g', branch: str = 'main') -> None:
     """`git fetch <remote>` + `git reset --hard <remote>/<branch>`.
 

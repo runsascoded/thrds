@@ -68,6 +68,7 @@ metadata to your app); no extra scope required for ``slack recover``.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 import webbrowser
@@ -738,23 +739,177 @@ def slack_push(channel: str | None, keep_staging: bool, dry_run: bool, prod: boo
         )
 
 
+def _refresh_composite(
+    session_dir: Path,
+    state: SessionState,
+    staging: dict[str, str],
+    prod: dict[str, str],
+) -> tracking.Snapshot:
+    """Advance `slack/remote` after a pull's commit: threads as fetched,
+    passthrough files from the *new* HEAD. No API reads — the thread content
+    is the fetch this pull already did. Without this, every pull leaves
+    `git diff slack/remote HEAD` dangling on the `thrds.json` the pull itself
+    committed."""
+    return tracking.snapshot(
+        session_dir,
+        tracking.ref_name(state.platform, tracking.COMPOSITE),
+        tracking.short_ref(state.platform, tracking.COMPOSITE),
+        _composite_tree(session_dir, {**staging, **prod}),
+        f'thrds: fetch {tracking.COMPOSITE}',
+    )
+
+
+def _reconcile_pull(
+    session_dir: Path,
+    state: SessionState,
+    mode: str,
+    comp_snap: "tracking.Snapshot",
+    renames: list[tuple[Path, Path]],
+    adopted: list,
+) -> None:
+    """Bring thread files onto the fetched state, preserving local commits.
+
+    Three-way merge (`merge_trees`) of base = last-fetched composite, ours =
+    HEAD, theirs = the fresh fetch. A conflict aborts before writing anything:
+    conflict markers in a thread file would be *posted to Slack* by a later
+    sync, so refusal is the only safe rendering — and the composite ref is
+    deliberately still at the old base (see `_fetch_refs`), so retrying
+    reproduces the conflict instead of forgetting it.
+
+    Only thread files are materialized from the merged tree. `thrds.json` is
+    in there too, but it's HEAD's copy — the in-memory state (chrome edits,
+    adoptions) supersedes it and is saved separately.
+    """
+    base, fetched = comp_snap.base, comp_snap.sha
+    written: list[str] = []
+    deleted: list[str] = []
+    if base is not None and fetched != base:
+        merge = tracking.merge_trees(session_dir, base, 'HEAD', fetched)
+        if merge.conflicts:
+            raise click.ClickException(
+                f"CONFLICT in {', '.join(merge.conflicts)} — Slack and local "
+                f'commits both changed since the last fetch. `slck pull -m '
+                f'overwrite` (Slack wins), or resolve locally and `slck push` '
+                f'(local wins); `git diff slack/staging HEAD` shows both sides.'
+            )
+        in_tree = {
+            n for n in tracking.tree_names(session_dir, merge.tree)
+            if parse_thread_filename(n) is not None
+        }
+        on_disk = {tf.name for tf in thread_files(session_dir)}
+        for name in sorted(in_tree | on_disk):
+            path = session_dir / name
+            new = (
+                tracking.read_tree_file(session_dir, merge.tree, name)
+                if name in in_tree else None
+            )
+            cur = path.read_text() if path.exists() else None
+            if new == cur:
+                continue
+            if new is None:
+                path.unlink()
+                deleted.append(name)
+            else:
+                path.write_text(new)
+                written.append(name)
+
+    for src, dst in renames:
+        src.rename(dst)
+    for a in adopted:
+        (session_dir / a.filename).touch()
+    state.save()
+
+    if written or deleted:
+        parts = []
+        if written:
+            parts.append(f"updated {len(written)}: {', '.join(written)}")
+        if deleted:
+            parts.append(f"deleted {len(deleted)}: {', '.join(deleted)}")
+        err(f"{'; '.join(parts)} (local commits preserved)")
+    else:
+        err('no content changes from Slack')
+
+    emoji_paths = [p.name for p in session_dir.glob('emoji-*') if p.is_file()]
+    removed = [src.name for src, _ in renames]
+    added = [dst.name for _, dst in renames]
+    paths = [*written, *deleted, *removed, *added, str(STATE_PATH), *emoji_paths]
+    if mode == 'merge' and base is not None and fetched != base:
+        # The commit records the fetched snapshot as its second parent — the
+        # branch's history connects to the remote state it reconciled against.
+        try:
+            mirror.commit_merge(session_dir, paths, 'thrds: pull staging', fetched)
+            mirror.push(session_dir)
+        except mirror.MirrorError as e:
+            err(f"warning: mirror commit/push failed: {e}")
+    else:
+        _autocommit(session_dir, paths, 'thrds: pull staging')
+
+
+PULL_MODES = ('rebase', 'merge', 'overwrite')
+
+
+def _resolve_pull_mode(mode: str | None, session_dir: Path, is_git: bool) -> str:
+    """The reconcile mode: flag, else `git config thrds.pullMode`, else rebase.
+
+    Non-git sessions have no refs to reconcile against, so they're always
+    `overwrite` — today's write-what-Slack-says behavior — and asking for
+    anything else there is an error rather than a silent downgrade.
+    """
+    if mode is None:
+        if not is_git:
+            return 'overwrite'
+        mode = tracking.config_get(session_dir, 'thrds.pullMode') or 'rebase'
+        if mode not in PULL_MODES:
+            raise click.UsageError(
+                f'git config thrds.pullMode is {mode!r}; '
+                f"expected one of: {', '.join(PULL_MODES)}"
+            )
+        return mode
+    if not is_git and mode != 'overwrite':
+        raise click.UsageError(
+            f'-m {mode} needs a git session (no refs to reconcile against).'
+        )
+    return mode
+
+
+def _dirty_tracked(session_dir: Path) -> list[str]:
+    """Tracked files with uncommitted changes (untracked drafts don't count)."""
+    r = subprocess.run(
+        ['git', 'status', '--porcelain', '--untracked-files=no'],
+        cwd=session_dir, capture_output=True, text=True,
+    )
+    return [line[3:] for line in r.stdout.splitlines() if line.strip()]
+
+
 @slack_cli.command("pull")
 @click.option('-c', '--channel', help='Prod channel override (only with --prod).')
+@click.option('-m', '--mode', type=click.Choice(PULL_MODES), default=None, help='Reconcile fetched state with local content (default: `git config thrds.pullMode`, else rebase; non-git sessions are always overwrite).')
 @click.option('-n', '--dry-run', is_flag=True, help='Print the pulled state to stdout instead of writing files.')
 @click.option('-p', '--prod', is_flag=True, help='Pull from prod channel.')
 @click.argument('doc_path', required=False)
-def slack_pull(channel: str | None, dry_run: bool, prod: bool, doc_path: str | None):
+def slack_pull(channel: str | None, mode: str | None, dry_run: bool, prod: bool, doc_path: str | None):
     """Pull the doc's current state from Slack. Default: staging PC.
 
-    Writes each pulled thread back to its file and (if the session is a git
-    repo) auto-commits + pushes to the gist mirror — the mirror image of
-    ``push``, which syncs by default too. With ``--dry-run`` the pulled state
-    is printed to stdout (frontmatter omitted) and nothing is written.
+    On a per-thread git session this is fetch + reconcile: the `slack/*` refs
+    advance to what Slack says, then local content is brought onto that state
+    per `--mode`. `rebase` (default) three-way merges against the last-fetched
+    base, so a local edit Slack hasn't seen survives instead of being silently
+    overwritten — a genuine conflict (both sides changed) aborts with the file
+    list rather than writing conflict markers a later `push` would post.
+    `merge` is the same reconcile but the commit records the fetched snapshot
+    as a second parent. `overwrite` is the old behavior: Slack wins, stated
+    explicitly.
+
+    Auto-commits + pushes to the gist mirror — the mirror image of ``push``.
+    With ``--dry-run`` the pulled state is printed to stdout (frontmatter
+    omitted), refs are previewed but not moved, and nothing is written.
     """
     write = not dry_run
     state = _load_state(expected_platform='slack')
     if not prod and channel is not None:
         raise click.UsageError('--channel requires --prod.')
+    if mode is not None and state.is_legacy:
+        raise click.UsageError('-m/--mode applies to per-thread sessions only.')
     client = _make_slack_client()
     if channel is not None:
         channel = _resolve_channel(client, channel)
@@ -766,6 +921,16 @@ def slack_pull(channel: str | None, dry_run: bool, prod: bool, doc_path: str | N
                 'Per-thread sessions pull from staging only; a promoted thread '
                 'is tracked by its `posted_ts`.'
             )
+        is_git = mirror.is_git_repo(session_dir)
+        mode = _resolve_pull_mode(mode, session_dir, is_git)
+        if write and mode != 'overwrite':
+            if dirty := _dirty_tracked(session_dir):
+                raise click.ClickException(
+                    f"{len(dirty)} file(s) with uncommitted changes; `-m {mode}` "
+                    f"reconciles committed state and would mix them in: "
+                    f"{', '.join(dirty)}. Commit them (or `-m overwrite`)."
+                )
+
         threads = client.pull_threads_staging(state, session_dir=session_dir)
         files = {f.slug: f.name for f in thread_files(session_dir)}
         renames: list[tuple[Path, Path]] = []
@@ -788,28 +953,53 @@ def slack_pull(channel: str | None, dry_run: bool, prod: bool, doc_path: str | N
         # Promoted threads: prod is canonical (hand-edits happen there), so it
         # overrides whatever the frozen staging copy says. Staging is NOT
         # re-synced to match — the staged copy is a drafting artifact.
-        for t in client.pull_promoted_threads(state, session_dir=session_dir):
+        prod_threads = client.pull_promoted_threads(state, session_dir=session_dir)
+        for t in prod_threads:
             by_slug[t.slug] = t
             err(f"pulled prod state for {t.slug} (posted)")
-        if write:
+
+        # The same fetched content feeds the refs and the reconcile — one
+        # round of API reads, never two views of a moving target.
+        comp_snap: tracking.Snapshot | None = None
+        if is_git:
+            def render(ts) -> dict[str, str]:
+                return {
+                    files.get(t.slug, f'{t.slug}.md'): serialize_thread(t)
+                    for t in ts if t.messages
+                }
+            staging_files = render(threads)
+            staging_files.update({
+                a.filename: serialize_thread(a.thread) for a in adopted
+            })
+            comp_snap = _fetch_refs(
+                session_dir, state, staging_files, render(prod_threads),
+                write=write,
+                # The base advances only after a successful reconcile; see
+                # `_fetch_refs` for why moving it first would eat conflicts.
+                write_composite=(mode == 'overwrite'),
+            )
+
+        if not write:
+            for tf in thread_files(session_dir):
+                thread = by_slug.get(tf.slug)
+                if thread is None:
+                    continue
+                click.echo(f'--- {tf.name} ---', err=True)
+                click.echo(serialize_thread(thread), nl=False)
+            return
+
+        if mode == 'overwrite' or not is_git:
             for src, dst in renames:
                 src.rename(dst)
             for a in adopted:
                 (session_dir / a.filename).touch()
-
-        written: list[str] = []
-        for tf in thread_files(session_dir):
-            thread = by_slug.get(tf.slug)
-            if thread is None:
-                continue
-            text = serialize_thread(thread)
-            if write:
-                tf.path.write_text(text)
+            written: list[str] = []
+            for tf in thread_files(session_dir):
+                thread = by_slug.get(tf.slug)
+                if thread is None:
+                    continue
+                tf.path.write_text(serialize_thread(thread))
                 written.append(tf.name)
-            else:
-                click.echo(f'--- {tf.name} ---', err=True)
-                click.echo(text, nl=False)
-        if write:
             state.save()
             err(f"wrote {len(written)} thread file(s): {', '.join(written)}")
             emoji_paths = [p.name for p in session_dir.glob('emoji-*') if p.is_file()]
@@ -819,6 +1009,21 @@ def slack_pull(channel: str | None, dry_run: bool, prod: bool, doc_path: str | N
                 [*written, *removed, str(STATE_PATH), *emoji_paths],
                 'thrds: pull staging',
             )
+            if is_git:
+                _refresh_composite(session_dir, state, staging_files, render(prod_threads))
+            return
+
+        # rebase / merge: reconcile committed state onto the fetched base.
+        if comp_snap is None:
+            raise click.ClickException(
+                f'no sync base — this session\'s first fetch found Slack and '
+                f'HEAD disagreeing; {_bootstrap_outs()}.'
+            )
+        _reconcile_pull(
+            session_dir, state, mode, comp_snap,
+            renames=renames, adopted=adopted,
+        )
+        _refresh_composite(session_dir, state, staging_files, render(prod_threads))
         return
 
     doc = (
@@ -997,6 +1202,71 @@ def _composite_tree(session_dir: Path, files: dict[str, str]) -> str:
     return tracking.overlay_tree(session_dir, f'{head}^{{tree}}', files, tracked)
 
 
+def _bootstrap_outs(mode_hint: str = '') -> str:
+    return (
+        f'resolve with `slck pull -m overwrite` (Slack wins) or `slck push` '
+        f'(local wins){mode_hint}'
+    )
+
+
+def _fetch_refs(
+    session_dir: Path,
+    state: SessionState,
+    staging: dict[str, str],
+    prod: dict[str, str],
+    write: bool,
+    write_composite: bool | None = None,
+) -> tracking.Snapshot | None:
+    """Snapshot the three ``slack/*`` refs from already-fetched content.
+
+    Returns the composite's `Snapshot`, or **None when an ambiguous bootstrap
+    withheld it**: on a first fetch whose threads differ from HEAD's copies,
+    there is no evidence of which side is ahead — "remote is ahead" reverts
+    unpushed local work, "local is ahead" pushes stale content over a newer
+    remote — so no base is invented (ghpr's `bootstrap_is_ambiguous`, arrived
+    at after refuting the alternatives; see specs/fetch-refs.md). The source
+    refs are always set: they're pure observations, safe regardless.
+
+    ``write_composite=False`` previews the composite while still writing the
+    sources — `pull -m rebase/merge` needs this, because advancing the merge
+    base *before* the reconcile succeeds would make a conflict evaporate: the
+    next pull would find base == remote, conclude "nothing to do", and never
+    apply the remote's side. The base moves only after the merge lands.
+    """
+    if write_composite is None:
+        write_composite = write
+    dry = '[dry-run] ' if not write else ''
+    for source, files in ((tracking.STAGING, staging), (tracking.PROD, prod)):
+        snap = tracking.snapshot(
+            session_dir,
+            tracking.ref_name(state.platform, source),
+            tracking.short_ref(state.platform, source),
+            tracking.build_tree(session_dir, files),
+            f'thrds: fetch {source}',
+            write=write,
+        )
+        err(f'{dry if snap.changed else ""}{snap.label}: {snap.summary()}')
+
+    comp_ref = tracking.ref_name(state.platform, tracking.COMPOSITE)
+    comp_label = tracking.short_ref(state.platform, tracking.COMPOSITE)
+    comp_tree = _composite_tree(session_dir, {**staging, **prod})
+    head = tracking.read_ref(session_dir, 'HEAD')
+    if tracking.read_ref(session_dir, comp_ref) is None and head is not None:
+        diverged = tracking.changed_paths(session_dir, f'{head}^{{tree}}', comp_tree)
+        if diverged:
+            err(
+                f'{comp_label}: not set — first fetch and HEAD disagree '
+                f"({', '.join(diverged)}); {_bootstrap_outs()}"
+            )
+            return None
+    snap = tracking.snapshot(
+        session_dir, comp_ref, comp_label, comp_tree,
+        f'thrds: fetch {tracking.COMPOSITE}', write=write and write_composite,
+    )
+    err(f'{dry if snap.changed else ""}{snap.label}: {snap.summary()}')
+    return snap
+
+
 @slack_cli.command("fetch")
 @click.option('-n', '--dry-run', is_flag=True, help="Report what would be fetched, without moving any ref.")
 def slack_fetch(dry_run: bool):
@@ -1022,29 +1292,7 @@ def slack_fetch(dry_run: bool):
         )
     client = _make_slack_client()
     staging, prod = _remote_files(client, state, session_dir)
-    # Same precedence `pull` applies: for a posted thread prod is canonical and
-    # overrides the frozen staging copy.
-    composite = {**staging, **prod}
-    # Sources are sparse — they hold what that channel actually has. The
-    # composite is HEAD's tree with the threads overlaid, because it's a merge
-    # base: a tree missing `README.md` / `thrds.json` / `emoji-*.png` would have
-    # `pull`'s rebase delete them.
-    trees = [
-        (tracking.STAGING, tracking.build_tree(session_dir, staging)),
-        (tracking.PROD, tracking.build_tree(session_dir, prod)),
-        (tracking.COMPOSITE, _composite_tree(session_dir, composite)),
-    ]
-    for source, tree in trees:
-        snap = tracking.snapshot(
-            session_dir,
-            tracking.ref_name(state.platform, source),
-            tracking.short_ref(state.platform, source),
-            tree,
-            f'thrds: fetch {source}',
-            write=not dry_run,
-        )
-        prefix = '[dry-run] ' if dry_run and snap.changed else ''
-        err(f'{prefix}{snap.label}: {snap.summary()}')
+    _fetch_refs(session_dir, state, staging, prod, write=not dry_run)
 
 
 @slack_cli.command("diff")
