@@ -107,6 +107,23 @@ def commit(session_dir: Path, paths: list[str], message: str) -> str | None:
     return _run(['git', 'rev-parse', 'HEAD'], cwd=session_dir).stdout.strip()
 
 
+def amend(session_dir: Path, paths: list[str], message: str | None = None) -> str:
+    """Fold ``paths``' current content into the tip commit; return the new SHA.
+
+    The second half of push's commit-first shape: content is committed and
+    pushed to Slack from HEAD, then the state the push itself produced
+    (`staging_ts` assignments, chrome targets) folds into that same commit —
+    one commit per push, whose thread content is byte-for-byte what went out.
+    Safe because nothing external has seen the SHA yet: the gist push runs
+    after the amend.
+    """
+    _run(['git', 'add', *paths], cwd=session_dir)
+    args = ['git', 'commit', '-q', '--amend']
+    args += ['-m', message] if message is not None else ['--no-edit']
+    _run(args, cwd=session_dir)
+    return _run(['git', 'rev-parse', 'HEAD'], cwd=session_dir).stdout.strip()
+
+
 def has_remote(session_dir: Path, name: str) -> bool:
     """True iff ``session_dir`` has a git remote named ``name``."""
     r = _run(['git', 'remote'], cwd=session_dir)

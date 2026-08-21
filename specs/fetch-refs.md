@@ -154,13 +154,29 @@ Deviations from the section above, each learned the hard way:
 
 Verified live in a throwaway copy of `cw-quickwins`: bootstrap confirmed silently, a committed local edit survives a pull (the old `pull` reverted exactly this) and reads as local-only in `git diff slack/remote HEAD`, a dirty WT aborts, and re-pulls are clean nops. 13 new tests (`test_pull_modes.py` + the bootstrap-withhold case); suite at 993.
 
+## Implementation notes (steps 4–5, 2026-08-21)
+
+**`push` gate.** One `pull_threads_staging` read at push start, compared against `slack/staging`: threads Slack changed since our last fetch ∩ threads this push would rewrite → refuse the whole push naming the files (`-f`/`--force` overrides; a thread whose local copy already matches the move doesn't count). Two refinements over the section above:
+
+- **The refusing fetch still advances `slack/staging`** — it's an observation, and recording it is what lets the next `diff`/`pull` classify the very change that caused the refusal.
+- **The ancestor check is dropped.** It was ghpr-flavored: their rebase makes the ref an ancestor of HEAD; our composite is deliberately a side chain (snapshots parented on each other, not on branch commits), so ancestry is meaningless here and the content-level gate subsumes what it was for.
+- **Bootstrap: an ungated push is the design, not a gap.** With no prior fetch there's nothing to compare against, and `push` *is* the explicit "local wins" resolution the ambiguous-bootstrap error tells you to run.
+
+**Push is now commit-first (remotes-model: push reads HEAD).** The auto-commit moved from after the Slack write to before it, so what goes out is exactly a commit's content; the state the push itself produces (`staging_ts`, chrome targets) is folded into that same commit via `--amend` — safe because the gist push runs after, so nothing external has seen the SHA. One commit per push, clean tree after, `git show HEAD:<file>` = what Slack received.
+
+**Post-write verification** re-reads staging and advances the refs to the **observed** state, warning when it differs from what was sent (normalization or interference — the signal either way). This is what makes "a fetch right after a push is a nop" hold, which is the property the gate rests on; there's a test asserting exactly that sequence.
+
+**`promote` gate (step 5).** Only re-promotes are gated — a first promote is append-only (empty `only_ids`), nothing of ours at the target to clobber. The target's current copy of *our* messages is compared against `slack/prod`'s record; a difference means a hand-edit landed at the target since our last pull, and converging would overwrite it. Foreign replies can never trip the gate: `pull_promoted_threads` reads only our own message ids. `slack/prod` updates file-at-a-time (each posted slug has its own target), the refusing fetch records its observation like `push`'s, and the post-promote verify records observed prod state + refreshes the composite from the refs alone.
+
+**Deferred, deliberately: the per-action `DELETE` pre-flight re-read.** The TOCTOU window is now a single command's span — gate fetch → `sync`'s own message read → the action, with the plan preview shown in between — and the incident this section was written under turned out to be a scoping bug (`only_ids`, fixed), not a race. Threading a re-read callback into `core.sync` buys milliseconds of window at real complexity cost; revisit if an actual race is ever observed.
+
 ## Phasing
 
 1. ~~`tracking.py` + `fetch` with `-n`, nop semantics, honest bootstrap.~~ **Done** — `git diff slack/remote HEAD` works today.
 2. ~~`diff` three-way classification.~~ **Done.**
 3. ~~`pull` reconcile modes + dirty-worktree abort.~~ **Done.**
-4. `push` gate + post-write verification.
-5. `promote` gate; `DELETE` pre-flight content check.
+4. ~~`push` gate + post-write verification.~~ **Done.**
+5. ~~`promote` gate.~~ **Done** (`DELETE` pre-flight deferred, above).
 
 [`ghpr`]: https://github.com/runsascoded/ghpr
 [`d119a07`]: https://github.com/runsascoded/ghpr/commit/d119a07

@@ -667,18 +667,125 @@ def slack_init(no_gist: bool, prefix: str | None, doc_path: str):
     )
 
 
+def _gate_push(
+    client: SlackClient,
+    state: SessionState,
+    session_dir: Path,
+    names: dict[str, str],
+    force: bool,
+) -> None:
+    """Refuse to overwrite staging state we've never seen — the non-fast-forward
+    rejection a real git server gives for free.
+
+    One `pull_threads_staging` read, compared against `slack/staging`: threads
+    Slack changed since our last fetch, intersected with what this push would
+    rewrite. Detection is per-thread (that's what makes the message
+    actionable) but refusal is whole-push — cross-thread `#slug` refs mean a
+    partial push can publish a link whose target doesn't yet say what the link
+    promises. `slck push <slug>` scoping and `--force` are the explicit outs.
+
+    With no prior fetch there is nothing to gate against, and pushing *is* the
+    explicit "local wins" bootstrap resolution, so it proceeds. The observed
+    state advances `slack/staging` either way: it's an observation, and it's
+    what lets `diff`/`pull` classify correctly after a refusal.
+    """
+    staging_ref = tracking.ref_name(state.platform, tracking.STAGING)
+    old = tracking.read_ref(session_dir, staging_ref)
+    observed = {
+        names.get(t.slug, f'{t.slug}.md'): serialize_thread(t)
+        for t in client.pull_threads_staging(state, session_dir=session_dir)
+        if t.messages
+    }
+    snap = tracking.snapshot(
+        session_dir, staging_ref,
+        tracking.short_ref(state.platform, tracking.STAGING),
+        tracking.build_tree(session_dir, observed),
+        f'thrds: fetch {tracking.STAGING}',
+    )
+    if old is None or not snap.paths:
+        return
+    would_write = set()
+    for name, remote_text in observed.items():
+        path = session_dir / name
+        if (path.read_text() if path.exists() else '') != remote_text:
+            would_write.add(name)
+    hit = sorted(set(snap.paths) & would_write)
+    if not hit:
+        return
+    if not force:
+        raise click.ClickException(
+            f"changed in staging since your last pull: {', '.join(hit)}. "
+            f'`slck pull` to reconcile, or `-f`/`--force` to overwrite.'
+        )
+    err(f"--force: overwriting staging changes in {', '.join(hit)}")
+
+
+def _verify_push(client: SlackClient, state: SessionState, session_dir: Path) -> None:
+    """Advance the refs to Slack's *observed* post-push state, not to HEAD.
+
+    Our writes are a projection — Slack normalizes mrkdwn, resolves emoji —
+    so recording HEAD as remote state would make the next fetch report a
+    spurious delta every cycle, and the gate built on the nop property would
+    cry wolf. Reading back costs one staging fetch; observed-vs-intended
+    drift is reported (it's the interference-or-normalization signal) but
+    observed is what gets recorded. Truth over intent.
+    """
+    names = {f.slug: f.name for f in thread_files(session_dir)}
+    observed = {
+        names.get(t.slug, f'{t.slug}.md'): serialize_thread(t)
+        for t in client.pull_threads_staging(state, session_dir=session_dir)
+        if t.messages
+    }
+    staged = {
+        names[slug] for slug, e in state.threads.items()
+        if e.staging_ts is not None and slug in names
+    }
+    drift = []
+    for name in sorted(staged | set(observed)):
+        path = session_dir / name
+        local = path.read_text() if path.exists() else None
+        if local != observed.get(name):
+            drift.append(name)
+    if drift:
+        err(
+            f"note: Slack's stored copy differs from what was sent "
+            f"({', '.join(drift)}); refs record the observed state"
+        )
+    tracking.snapshot(
+        session_dir,
+        tracking.ref_name(state.platform, tracking.STAGING),
+        tracking.short_ref(state.platform, tracking.STAGING),
+        tracking.build_tree(session_dir, observed),
+        f'thrds: fetch {tracking.STAGING}',
+    )
+    prod_ref = tracking.ref_name(state.platform, tracking.PROD)
+    prod_files = {}
+    if tracking.read_ref(session_dir, prod_ref) is not None:
+        prod_files = {
+            name: tracking.read_tree_file(session_dir, prod_ref, name)
+            for name in tracking.tree_names(session_dir, prod_ref)
+        }
+    _refresh_composite(session_dir, state, observed, prod_files)
+
+
 @slack_cli.command("push")
 @click.option('-c', '--channel', help='Prod channel override (legacy sessions only).')
+@click.option('-f', '--force', is_flag=True, help='Push even if staging changed since the last pull (overwrites those changes).')
 @click.option('-k', '--keep-staging', is_flag=True, help='Do not auto-archive the staging PC after --prod (legacy).')
 @click.option('-n', '--dry-run', is_flag=True, help='Show plan without side effects.')
 @click.option('-p', '--prod', is_flag=True, help='Push to prod (legacy sessions only; use `promote` instead).')
 @click.argument('doc_path', required=False)
-def slack_push(channel: str | None, keep_staging: bool, dry_run: bool, prod: bool, doc_path: str | None):
+def slack_push(channel: str | None, force: bool, keep_staging: bool, dry_run: bool, prod: bool, doc_path: str | None):
     """Push this session's threads to the staging PC (terraform).
 
     On a per-thread session, pushes every `NN-slug.md` and takes no `--prod`:
     promoting to a real channel is per-thread and deliberate, via
     `thrds slack promote <slug>`.
+
+    On a git session the push is gated and transactional: it refuses if
+    staging changed since your last pull (`--force` overrides), auto-commits
+    *before* writing so what goes to Slack is exactly a commit's content, and
+    afterwards records Slack's observed state in the `slack/*` refs.
 
     `--prod` remains only for legacy single-doc sessions that haven't been
     through `thrds slack migrate` yet.
@@ -692,21 +799,46 @@ def slack_push(channel: str | None, keep_staging: bool, dry_run: bool, prod: boo
                 'Per-thread sessions push only to staging; use '
                 '`thrds slack promote <slug>` to post a thread to its target.'
             )
-        files = thread_files(Path.cwd())
-        threads = read_threads(Path.cwd())
+        session_dir = Path.cwd()
+        files = thread_files(session_dir)
+        threads = read_threads(session_dir)
         if not threads:
             raise click.UsageError('No thread files (`NN-slug.md`) in this session.')
-        for slug, target in _absorb_file_chrome(Path.cwd(), threads, state, client, dry_run).items():
+        for slug, target in _absorb_file_chrome(session_dir, threads, state, client, dry_run).items():
             where = target.channel + (f' @ {target.thread_ts}' if target.thread_ts else '')
             err(f"targeted {slug} → {where} (from a chrome line in its file)")
+
+        is_git = mirror.is_git_repo(session_dir)
+        names = {f.slug: f.name for f in files}
+        if is_git and not dry_run:
+            _gate_push(client, state, session_dir, names, force)
+            # Commit-first: what goes to Slack is exactly a commit's content
+            # (git pushes commits, not working trees — ghpr's Contract A, the
+            # correct side of that fork). The auto-commit UX survives; only
+            # the ordering changes.
+            content_sha = mirror.commit(
+                session_dir, [f.name for f in files], 'thrds: push staging',
+            )
         result = client.sync_threads_staging(
             threads, state, dry_run=dry_run,
-            filenames={f.slug: f.name for f in files},
+            filenames=names,
         )
         _print_sync_summary('pushed to staging' + (' (dry-run)' if dry_run else ''), result)
         if not dry_run:
-            paths = [f.name for f in thread_files(Path.cwd())] + [str(STATE_PATH)]
-            _autocommit(Path.cwd(), paths, 'thrds: push staging')
+            paths = [f.name for f in thread_files(session_dir)] + [str(STATE_PATH)]
+            if not is_git:
+                return
+            try:
+                if content_sha is not None:
+                    # Fold the state this push produced (staging_ts, targets)
+                    # into the same commit; nothing external saw the SHA yet.
+                    mirror.amend(session_dir, paths)
+                else:
+                    mirror.commit(session_dir, paths, 'thrds: push staging')
+                mirror.push(session_dir)
+            except mirror.MirrorError as e:
+                err(f"warning: mirror commit/push failed: {e}")
+            _verify_push(client, state, session_dir)
         return
 
     doc = _load_doc(state, doc_path)
@@ -1392,13 +1524,116 @@ def _require_per_thread(state: SessionState) -> None:
         )
 
 
+def _observed_prod_text(client: SlackClient, state: SessionState, session_dir: Path, slug: str) -> str:
+    """The slug's current prod copy, rendered as `pull` would write it."""
+    for t in client.pull_promoted_threads(state, session_dir=session_dir, slugs=[slug]):
+        if t.slug == slug and t.messages:
+            return serialize_thread(t)
+    return ''
+
+
+def _update_prod_ref(session_dir: Path, state: SessionState, name: str, text: str) -> None:
+    """Record one file's observed prod state in `slack/prod` (other files kept).
+
+    Prod is fetched per thread (each posted slug has its own target), so the
+    ref updates file-at-a-time rather than wholesale like staging.
+    """
+    ref = tracking.ref_name(state.platform, tracking.PROD)
+    files: dict[str, str] = {}
+    if tracking.read_ref(session_dir, ref) is not None:
+        files = {
+            n: tracking.read_tree_file(session_dir, ref, n)
+            for n in tracking.tree_names(session_dir, ref)
+        }
+    if text:
+        files[name] = text
+    else:
+        files.pop(name, None)
+    tracking.snapshot(
+        session_dir, ref,
+        tracking.short_ref(state.platform, tracking.PROD),
+        tracking.build_tree(session_dir, files),
+        f'thrds: fetch {tracking.PROD}',
+    )
+
+
+def _gate_promote(
+    client: SlackClient,
+    state: SessionState,
+    session_dir: Path,
+    slug: str,
+    name: str,
+    force: bool,
+) -> None:
+    """Refuse a re-promote over prod state we've never seen.
+
+    Only re-promotes are gated: a first promote is append-only (empty
+    `only_ids` scope), so there is nothing of ours at the target to clobber.
+    For a posted thread, compare the target's current copy of *our* messages
+    against `slack/prod`'s record — a difference means someone hand-edited the
+    posted message since our last pull, and converging would overwrite it.
+    Foreign replies never trip this: `pull_promoted_threads` reads only our
+    own message ids.
+
+    The observation is recorded either way, like `push`'s gate.
+    """
+    entry = state.threads.get(slug)
+    if entry is None or entry.state != 'posted':
+        return
+    ref = tracking.ref_name(state.platform, tracking.PROD)
+    if tracking.read_ref(session_dir, ref) is None:
+        return
+    if name not in tracking.tree_names(session_dir, ref):
+        return
+    last = tracking.read_tree_file(session_dir, ref, name)
+    observed = _observed_prod_text(client, state, session_dir, slug)
+    if observed == last:
+        return
+    _update_prod_ref(session_dir, state, name, observed)
+    if not force:
+        raise click.ClickException(
+            f'{name} changed at the target since your last pull (hand-edited '
+            f'in prod?). `slck pull` to reconcile, or `-f`/`--force` to '
+            f'overwrite.'
+        )
+    err(f'--force: overwriting prod changes in {name}')
+
+
+def _verify_promote(
+    client: SlackClient,
+    state: SessionState,
+    session_dir: Path,
+    slug: str,
+    name: str,
+) -> None:
+    """Record the target's observed post-promote state; refresh the composite.
+
+    Same truth-over-intent rule as `_verify_push`: the ref gets what Slack
+    reports holding, not what we sent. Composite passthrough files come from
+    the refs — no additional API reads beyond the one prod read.
+    """
+    _update_prod_ref(
+        session_dir, state, name,
+        _observed_prod_text(client, state, session_dir, slug),
+    )
+    files: dict[str, dict[str, str]] = {}
+    for source in (tracking.STAGING, tracking.PROD):
+        ref = tracking.ref_name(state.platform, source)
+        files[source] = {} if tracking.read_ref(session_dir, ref) is None else {
+            n: tracking.read_tree_file(session_dir, ref, n)
+            for n in tracking.tree_names(session_dir, ref)
+        }
+    _refresh_composite(session_dir, state, files[tracking.STAGING], files[tracking.PROD])
+
+
 @slack_cli.command("promote")
 @click.option('-c', '--channel', help='Override the thread\'s recorded target channel.')
+@click.option('-f', '--force', is_flag=True, help='Promote even if the prod copy changed since the last pull (overwrites the hand-edit).')
 @click.option('-n', '--dry-run', is_flag=True, help='Resolve and render; post nothing.')
 @click.option('-t', '--thread-ts', help='Post as a reply into this existing thread.')
 @click.option('-y', '--yes', is_flag=True, help='Skip the confirmation prompt.')
 @click.argument('slug')
-def slack_promote(channel: str | None, dry_run: bool, thread_ts: str | None, yes: bool, slug: str):
+def slack_promote(channel: str | None, force: bool, dry_run: bool, thread_ts: str | None, yes: bool, slug: str):
     """Post a single thread (SLUG) to its target channel.
 
     The per-thread replacement for the old `push --prod`, which fired the
@@ -1419,7 +1654,7 @@ def slack_promote(channel: str | None, dry_run: bool, thread_ts: str | None, yes
     _require_per_thread(state)
 
     try:
-        _, thread = find_thread(Path.cwd(), slug)
+        tf, thread = find_thread(Path.cwd(), slug)
     except ValueError as e:
         raise click.UsageError(str(e))
 
@@ -1466,6 +1701,12 @@ def slack_promote(channel: str | None, dry_run: bool, thread_ts: str | None, yes
     if dry_run:
         err('(dry run — nothing posted)')
         return
+    session_dir = Path.cwd()
+    is_git = mirror.is_git_repo(session_dir)
+    if is_git:
+        # Gate before the confirm prompt: don't ask for approval of a plan
+        # the gate is about to refuse.
+        _gate_promote(client, state, session_dir, slug, tf.name, force)
     if not yes:
         click.confirm('Apply this plan?', abort=True, err=True)
 
@@ -1473,7 +1714,9 @@ def slack_promote(channel: str | None, dry_run: bool, thread_ts: str | None, yes
     state.save()
     err(f"posted {slug}: {entry.posted_ts}")
     _notify_promoted(client, slug, target.channel, entry.posted_ts)
-    _autocommit(Path.cwd(), [str(STATE_PATH)], f'thrds: promote {slug} → {target.channel}')
+    _autocommit(session_dir, [str(STATE_PATH)], f'thrds: promote {slug} → {target.channel}')
+    if is_git:
+        _verify_promote(client, state, session_dir, slug, tf.name)
 
 
 @slack_cli.command("replay")
