@@ -45,8 +45,9 @@ def _fetch(repo: Path, files: dict[str, str], write: bool = True):
 
 def test_refs_live_under_remotes_so_they_get_reflogs():
     """`core.logAllRefUpdates` covers refs/remotes but not an invented
-    namespace — and a ref with no reflog can't answer "what did Slack look
-    like before this fetch"."""
+    namespace. Snapshot parentage makes `git log` the history of remote states
+    regardless; the reflog adds `@{1}`, movement timestamps, and gc
+    protection if that chain is ever broken."""
     assert tracking.ref_name('slack', 'staging') == 'refs/remotes/slack/staging'
 
 

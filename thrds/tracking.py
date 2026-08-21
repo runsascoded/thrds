@@ -21,12 +21,14 @@ and they answer the question the composite can't: *has the frozen staged copy
 drifted from what's live?*, one `git diff slack/staging slack/prod` away.
 
 **Why `refs/remotes/` and not `refs/thrds/`.** git auto-enables reflogs only
-for `refs/heads`, `refs/remotes`, `refs/notes` and `HEAD`, and "what did Slack
-look like before this fetch" is exactly the thing worth keeping recoverable.
-It also buys `git branch -r`, `git log slack/staging`, and `git diff
-slack/staging HEAD`, each reading as precisely what it is. `git remote` won't
-list `slack`: there is deliberately no config section for it, since a URL-less
-remote would break `git fetch --all`.
+for `refs/heads`, `refs/remotes`, `refs/notes` and `HEAD`. Each snapshot is
+parented on the previous one, so `git log slack/remote` is the history of
+remote states either way; what the reflog adds is `@{1}` addressing, movement
+timestamps, and gc protection should that chain ever be broken. The namespace
+also buys `git branch -r` and `git diff slack/staging HEAD`, each reading as
+precisely what it is. `git remote` won't list `slack`: there is deliberately
+no config section for it, since a URL-less remote would break
+`git fetch --all`.
 
 **Why plumbing and not a scratch worktree.** Snapshots are built with
 `hash-object` / `mktree` / `commit-tree`, so nothing outside the object
