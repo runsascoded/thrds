@@ -104,8 +104,8 @@ def session(tmp_path, monkeypatch) -> Path:
     return tmp_path
 
 
-STAGING = tracking.ref_name('slack', tracking.STAGING)
-REMOTE = tracking.ref_name('slack', tracking.COMPOSITE)
+STAGING = tracking.ref_name(tracking.STAGING)
+REMOTE = tracking.ref_name(tracking.COMPOSITE)
 
 
 def _push(*args, ok: bool = True):
@@ -116,7 +116,7 @@ def _push(*args, ok: bool = True):
 
 
 def _seed(spy) -> None:
-    """Fetch matching content so `slack/staging` exists as a base."""
+    """Fetch matching content so `staging` exists as a base."""
     spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
     result = CliRunner().invoke(cli, ['slack', 'fetch'], catch_exceptions=False)
     assert result.exit_code == 0, result.stderr
@@ -142,7 +142,7 @@ def test_push_refuses_when_staging_moved_since_last_pull(session, spy):
 
 
 def test_refusal_still_records_the_observation(session, spy):
-    """The gate's fetch advances `slack/staging` even when it refuses — it's
+    """The gate's fetch advances `staging` even when it refuses — it's
     an observation, and it's what lets `diff`/`pull` classify next."""
     _seed(spy)
     spy.returns['alpha'] = thread('alpha', 'Alpha OP, edited in Slack.')
@@ -236,9 +236,9 @@ def test_a_fetch_right_after_a_push_is_a_nop(session, spy):
     _push()
     result = CliRunner().invoke(cli, ['slack', 'fetch'], catch_exceptions=False)
     assert result.stderr.splitlines() == [
-        'slack/staging: up to date',
-        'slack/prod: up to date',
-        'slack/remote: up to date',
+        'staging: up to date',
+        'prod: up to date',
+        'upstream: up to date',
     ]
 
 

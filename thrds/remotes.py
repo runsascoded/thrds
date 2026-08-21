@@ -29,20 +29,19 @@ from . import tracking
 class Remote:
     """One fetch/push-able place, named like a git remote.
 
-    ``name`` is the ref segment (``refs/remotes/<platform>/<name>``); ``role``
-    selects the behavior bundle (how to observe it, whether writes converge or
-    append). They coincide for the two defaults, and diverge once a session
-    can declare, say, a second prod-role remote under its own name.
+    ``name`` is the ref component (``refs/remotes/<name>``) and the display
+    label; ``role`` selects the behavior bundle (how to observe it, whether
+    writes converge or append). They coincide for the two defaults, and
+    diverge once a session can declare, say, a second prod-role remote under
+    its own name.
     """
     name: str
     role: str
     channel: str | None = None
 
-    def ref(self, platform: str) -> str:
-        return tracking.ref_name(platform, self.name)
-
-    def label(self, platform: str) -> str:
-        return tracking.short_ref(platform, self.name)
+    @property
+    def ref(self) -> str:
+        return tracking.ref_name(self.name)
 
 
 def resolve(state: SessionState) -> dict[str, Remote]:

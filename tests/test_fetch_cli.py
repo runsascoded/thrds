@@ -82,9 +82,9 @@ def _run(*args):
     return CliRunner().invoke(cli, ['slack', 'fetch', *args], catch_exceptions=False)
 
 
-STAGING = tracking.ref_name('slack', tracking.STAGING)
-PROD = tracking.ref_name('slack', tracking.PROD)
-REMOTE = tracking.ref_name('slack', tracking.COMPOSITE)
+STAGING = tracking.ref_name(tracking.STAGING)
+PROD = tracking.ref_name(tracking.PROD)
+REMOTE = tracking.ref_name(tracking.COMPOSITE)
 
 
 def _promote(session_dir: Path, slug: str) -> None:
@@ -101,9 +101,9 @@ def test_first_fetch_reports_each_ref(session, spy):
     result = _run()
     assert result.exit_code == 0
     assert result.stderr.splitlines() == [
-        'slack/staging: initialized (2 files)',
-        'slack/prod: initialized empty',
-        'slack/remote: initialized (3 files)',
+        'staging: initialized (2 files)',
+        'prod: initialized empty',
+        'upstream: initialized (3 files)',
     ]
 
 
@@ -114,9 +114,9 @@ def test_refetching_unchanged_state_is_a_nop(session, spy):
     at_first = _git(session, 'rev-parse', REMOTE)
     result = _run()
     assert result.stderr.splitlines() == [
-        'slack/staging: up to date',
-        'slack/prod: up to date',
-        'slack/remote: up to date',
+        'staging: up to date',
+        'prod: up to date',
+        'upstream: up to date',
     ]
     assert _git(session, 'rev-parse', REMOTE) == at_first
 
@@ -125,7 +125,7 @@ def test_fetch_records_a_slack_side_edit(session, spy):
     spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
     _run()
     spy.returns['alpha'] = thread('alpha', 'Alpha OP, edited in Slack.')
-    assert _run().stderr.splitlines()[0] == 'slack/staging: 1 file (01-alpha.md)'
+    assert _run().stderr.splitlines()[0] == 'staging: 1 file (01-alpha.md)'
     assert _git(session, 'show', f'{STAGING}:01-alpha.md') == 'Alpha OP, edited in Slack.'
 
 
@@ -169,21 +169,22 @@ def test_dry_run_moves_nothing(session, spy):
     spy.returns = {'alpha': thread('alpha', 'Alpha OP.')}
     result = _run('-n')
     assert result.stderr.splitlines()[0] == (
-        '[dry-run] slack/staging: initialized (1 file)'
+        '[dry-run] staging: initialized (1 file)'
     )
     assert _git(session, 'for-each-ref', 'refs/remotes/') == ''
+    assert _git(session, 'for-each-ref', 'refs/heads/upstream') == ''
 
 
 def test_a_thread_deleted_in_slack_leaves_the_tree(session, spy):
     spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
     _run()
     spy.returns['alpha'] = thread('alpha')  # OP deleted: no messages
-    assert _run().stderr.splitlines()[0] == 'slack/staging: 1 file (01-alpha.md)'
+    assert _run().stderr.splitlines()[0] == 'staging: 1 file (01-alpha.md)'
     assert _git(session, 'ls-tree', '--name-only', STAGING) == '02-beta.md'
 
 
 def test_head_is_the_first_snapshots_parent(session, spy):
-    """So `slack/remote..HEAD` starts empty: nothing local to replay."""
+    """So `upstream..HEAD` starts empty: nothing local to replay."""
     spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
     _run()
     assert _git(session, 'rev-list', '--count', f'{REMOTE}..HEAD') == '0'
@@ -243,7 +244,7 @@ def test_composite_drops_a_thread_slack_no_longer_has(session, spy):
 
 
 def test_sources_stay_sparse(session, spy):
-    """A source ref is an observation: `slack/prod` holds the posted threads
+    """A source ref is an observation: `prod` holds the posted threads
     and nothing else, because that's all the target channel has."""
     _promote(session, 'alpha')
     spy.returns = {'alpha': thread('alpha', 'A.'), 'beta': thread('beta', 'B.')}
@@ -278,15 +279,16 @@ def test_ambiguous_bootstrap_withholds_the_composite(session, spy):
     result = _run()
     assert result.exit_code == 0
     assert result.stderr.splitlines() == [
-        'slack/staging: initialized (2 files)',
-        'slack/prod: initialized empty',
-        'slack/remote: not set — first fetch and HEAD disagree (01-alpha.md); '
+        'staging: initialized (2 files)',
+        'prod: initialized empty',
+        'upstream: not set — first fetch and HEAD disagree (01-alpha.md); '
         'resolve with `slck pull -m overwrite` (Slack wins) or `slck push` '
         '(local wins)',
     ]
     assert _git(session, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/') == (
-        'slack/prod\nslack/staging'
+        'prod\nstaging'
     )
+    assert _git(session, 'for-each-ref', 'refs/heads/upstream') == ''
 
 
 # --- per-remote fetch (`slck fetch <remote>...`) ---
@@ -311,9 +313,9 @@ def test_fetch_staging_leaves_prod_and_its_composite_share_alone(session, spy):
     result = _run('staging')
     assert result.exit_code == 0
     assert result.stderr.splitlines() == [
-        'slack/staging: 1 file (02-beta.md)',
-        'slack/prod: skipped (last observation kept)',
-        'slack/remote: 1 file (02-beta.md)',
+        'staging: 1 file (02-beta.md)',
+        'prod: skipped (last observation kept)',
+        'upstream: 1 file (02-beta.md)',
     ]
     assert _git(session, 'rev-parse', PROD) == prod_before
     assert _git(session, 'show', f'{REMOTE}:01-alpha.md') == 'Live prod copy.'
@@ -329,9 +331,9 @@ def test_fetch_prod_leaves_staging_and_its_composite_share_alone(session, spy):
     result = _run('prod')
     assert result.exit_code == 0
     assert result.stderr.splitlines() == [
-        'slack/staging: skipped (last observation kept)',
-        'slack/prod: 1 file (01-alpha.md)',
-        'slack/remote: 1 file (01-alpha.md)',
+        'staging: skipped (last observation kept)',
+        'prod: 1 file (01-alpha.md)',
+        'upstream: 1 file (01-alpha.md)',
     ]
     assert _git(session, 'rev-parse', STAGING) == staging_before
     assert _git(session, 'show', f'{REMOTE}:01-alpha.md') == 'Live, hand-edited.'
@@ -347,11 +349,11 @@ def test_unknown_remote_is_refused(session, spy):
 
 
 def test_the_composite_is_not_fetchable_by_name(session, spy):
-    result = _run('remote')
+    result = _run('upstream')
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        "Error: unknown remote(s): remote; this session has: staging, prod. "
-        "('remote' is the derived merge base — it refreshes on every fetch, "
+        "Error: unknown remote(s): upstream; this session has: staging, prod. "
+        "('upstream' is the derived merge base — it refreshes on every fetch, "
         "not by name)"
     )
 
@@ -364,7 +366,7 @@ def test_partial_fetch_refuses_when_the_skipped_remote_was_never_fetched(session
     result = _run('staging')
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        'Error: slack/prod has threads but has never been fetched; skipping '
+        'Error: prod has threads but has never been fetched; skipping '
         'it would misrecord them as deleted in the composite. Run a full '
         '`slck fetch` first.'
     )
@@ -378,10 +380,41 @@ def test_partial_fetch_proceeds_when_the_skipped_remote_holds_nothing(session, s
     result = _run('staging')
     assert result.exit_code == 0
     assert result.stderr.splitlines() == [
-        'slack/staging: initialized (2 files)',
-        'slack/prod: skipped (never fetched)',
-        'slack/remote: initialized (3 files)',
+        'staging: initialized (2 files)',
+        'prod: skipped (never fetched)',
+        'upstream: initialized (3 files)',
     ]
     assert _git(session, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/') == (
-        'slack/remote\nslack/staging'
+        'staging'
+    )
+    assert _git(session, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/') == (
+        'main\nupstream'
+    )
+
+
+def test_legacy_refs_migrate_on_first_touch(session, spy):
+    """A session written under `refs/remotes/slack/{staging,prod,remote}`
+    moves to the converged layout the first time any refs verb runs."""
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    _run()
+    for name in ('staging', 'prod', 'remote'):
+        old_style = (
+            _git(session, 'rev-parse', STAGING if name == 'staging'
+                 else PROD if name == 'prod' else REMOTE)
+        )
+        _git(session, 'update-ref', f'refs/remotes/slack/{name}', old_style)
+    _git(session, 'update-ref', '-d', STAGING)
+    _git(session, 'update-ref', '-d', PROD)
+    _git(session, 'update-ref', '-d', REMOTE)
+    result = _run()
+    assert result.stderr.splitlines() == [
+        'ref migrated: refs/remotes/slack/staging → refs/remotes/staging',
+        'ref migrated: refs/remotes/slack/prod → refs/remotes/prod',
+        'ref migrated: refs/remotes/slack/remote → refs/heads/upstream',
+        'staging: up to date',
+        'prod: up to date',
+        'upstream: up to date',
+    ]
+    assert _git(session, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/') == (
+        'prod\nstaging'
     )

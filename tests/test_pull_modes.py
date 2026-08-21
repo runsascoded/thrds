@@ -80,7 +80,7 @@ def session(tmp_path, monkeypatch) -> Path:
     return tmp_path
 
 
-REMOTE = tracking.ref_name('slack', tracking.COMPOSITE)
+REMOTE = tracking.ref_name(tracking.COMPOSITE)
 
 
 def _run(*args, ok: bool = True):
@@ -111,9 +111,9 @@ def test_slack_edit_lands(session, spy):
     result = _run()
     assert (session / '01-alpha.md').read_text() == 'Alpha OP, edited in Slack.\n'
     assert result.stderr.splitlines() == [
-        'slack/staging: 1 file (01-alpha.md)',
-        'slack/prod: up to date',
-        'slack/remote: 1 file (01-alpha.md)',
+        'staging: 1 file (01-alpha.md)',
+        'prod: up to date',
+        'upstream: 1 file (01-alpha.md)',
         'updated 1: 01-alpha.md (local commits preserved)',
     ]
     assert _git(session, 'log', '--format=%s').splitlines() == [
@@ -155,7 +155,7 @@ def test_same_thread_changed_on_both_sides_conflicts(session, spy):
     assert result.stderr.splitlines()[-1] == (
         'Error: CONFLICT in 01-alpha.md — Slack and local commits both changed '
         'since the last fetch. `slck pull -m overwrite` (Slack wins), or '
-        'resolve locally and `slck push` (local wins); `git diff slack/staging '
+        'resolve locally and `slck push` (local wins); `git diff staging '
         'HEAD` shows both sides.'
     )
     assert (session / '01-alpha.md').read_text() == 'Alpha OP, edited locally.\n'

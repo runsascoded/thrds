@@ -56,3 +56,19 @@ Bootstrap-outs message wording (`slck push` = local wins) is push/staging-scoped
 - **`fetch remote` is refused by name** with a pointer that the composite is derived, refreshed on every fetch.
 
 **Config section deferred, deliberately.** A `remotes:` section in `thrds.json` that names remotes the readers can't honor would be config that lies: a second staging-role remote needs its own slug → ts map (per-remote thread pointers) and channel-parameterized pulls in `slack.py`. That data-model work is the real prerequisite for both the config section and `push [<remote>]`/`pull [<remote>]` args, so those land together, after it.
+
+## Ref naming settled: `refs/remotes/{staging,prod}` + `refs/heads/upstream` (2026-08-21)
+
+The `slack/remote` → `slack/upstream` proposal went to ghpr's session, which agreed with the diagnosis but refuted the name as fixing only half: git's own shape is `refs/remotes/<remote>/…` — the **remote's name** is the first component — so `slack/staging` had the namespace inverted, and a thing we ourselves established is *not* a remote shouldn't live under `refs/remotes/` at all. Adopted in full:
+
+- `refs/remotes/staging`, `refs/remotes/prod` — `git branch -r` now reads as exactly the remote list, and `git diff staging prod` is the drift question verbatim. (Verified: single-level refs under `refs/remotes/` list in `branch -r`, resolve by bare name, and get auto-reflogs.)
+- `refs/heads/upstream` — the composite as a locally computed branch, never checked out: honest about being a projection, still auto-reflogged, and `git diff upstream HEAD` reads perfectly.
+- Legacy `refs/remotes/<platform>/{staging,prod,remote}` migrates on first touch of any refs verb (`tracking.migrate_refs`, reported one line per moved ref).
+
+The platform prefix is gone entirely: a session is single-platform (stamped at init), so it was namespace noise. ghpr's own `github/remote` stays put for now — theirs genuinely is one remote's state, so it's a cosmetic wart on their side, and they migrated that namespace once already this week.
+
+## Chrome is a per-remote property (2026-08-21, Ryan)
+
+> we should be able to configure msg "chrome" on a per-remote basis, e.g.: slck: staging-channel msgs get footer MD, prod msgs don't; gthb: "item" remotes get (in)visible footer Gist link; dscrd: maybe same as slck
+
+The feature table above already hinted at this ("staging-only chrome footer | a rendering option of the staging remote") — this makes it a design commitment: chrome config hangs off the *remote*, not the platform or the lifecycle state. Today's `StagingChrome` is then the staging remote's chrome block, and "prod messages carry no chrome" stops being a hardcoded rule and becomes the prod remote's (empty) chrome config. The ghpr case shows why remote-level is the right altitude: its *item* remotes carry a gist-link footer (ghpr's existing visible/HTML-comment footer modes ≈ the `(in)visible` knob), while its gist remote carries none — same tool, different chrome per remote. Lands with the `remotes:` config section: `{name: {role, channel, chrome: {...}}}`, with `render`/`parse` (`thrds.chrome`) taking the remote's chrome config instead of reading session-level `staging_chrome`. Migration: session-level `staging_chrome` becomes the default chrome block `init` writes onto staging-role remotes.

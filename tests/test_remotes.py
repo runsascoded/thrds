@@ -29,10 +29,14 @@ def test_default_remotes_carry_their_roles_and_the_staging_channel():
     }
 
 
-def test_remote_ref_and_label():
-    rmt = resolve(_state())['staging']
-    assert rmt.ref('slack') == 'refs/remotes/slack/staging'
-    assert rmt.label('slack') == 'slack/staging'
+def test_remote_ref_is_name_first_like_git():
+    """Converged with ghpr: git's own shape is `refs/remotes/<remote>/…`, so
+    the remote's name is the first component and `git branch -r` reads as the
+    remote list."""
+    rmts = resolve(_state())
+    assert [r.ref for r in rmts.values()] == [
+        'refs/remotes/staging', 'refs/remotes/prod',
+    ]
 
 
 def test_staging_has_threads_iff_any_draft_is_staged():

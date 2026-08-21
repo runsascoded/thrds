@@ -273,14 +273,14 @@ def test_session_with_no_staged_threads_says_so(tmp_path, monkeypatch, spy):
 
 
 def _set_base(session_dir, files: dict[str, str]) -> None:
-    """Init a git repo and plant `slack/remote` at ``files``, as `fetch` would."""
+    """Init a git repo and plant `upstream` at ``files``, as `fetch` would."""
     for args in (['init', '-q', '-b', 'main'],
                  ['config', 'user.email', 't@example.com'],
                  ['config', 'user.name', 'T']):
         subprocess.run(['git', *args], cwd=session_dir, check=True, capture_output=True)
-    ref = tracking.ref_name('slack', tracking.COMPOSITE)
+    ref = tracking.ref_name(tracking.COMPOSITE)
     tree = tracking.build_tree(session_dir, files)
-    tracking.snapshot(session_dir, ref, 'slack/remote', tree, 'thrds: fetch remote')
+    tracking.snapshot(session_dir, ref, 'upstream', tree, 'thrds: fetch upstream')
 
 
 BOTH_BASES = {'01-alpha.md': 'Alpha OP.\n', '02-beta.md': 'Beta OP.\n'}

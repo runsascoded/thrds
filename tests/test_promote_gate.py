@@ -3,7 +3,7 @@
 A first promote is append-only (empty `only_ids` scope) and ungated. A
 re-promote converges our own posted messages — so if someone hand-edited one
 at the target since our last pull, converging would silently overwrite it.
-The gate compares the target's current copy against `slack/prod`'s record and
+The gate compares the target's current copy against `prod`'s record and
 refuses. Foreign replies never trip it: only our own message ids are read.
 """
 from __future__ import annotations
@@ -98,8 +98,8 @@ def session(tmp_path, monkeypatch) -> Path:
     return tmp_path
 
 
-PROD = tracking.ref_name('slack', tracking.PROD)
-REMOTE = tracking.ref_name('slack', tracking.COMPOSITE)
+PROD = tracking.ref_name(tracking.PROD)
+REMOTE = tracking.ref_name(tracking.COMPOSITE)
 
 
 def _promote(*args, ok: bool = True):
@@ -120,9 +120,9 @@ def _mark_posted(session: Path, spy, text: str = 'Alpha OP.') -> None:
     entry.posted_msg_ts = ['9.9']
     state.save(session)
     spy.prod_returns['alpha'] = thread('alpha', text)
-    # `slack/prod` records it, as the promote's verify (or a pull) would.
+    # `prod` records it, as the promote's verify (or a pull) would.
     tracking.snapshot(
-        session, PROD, 'slack/prod',
+        session, PROD, 'prod',
         tracking.build_tree(session, {'01-alpha.md': f'{text}\n'}),
         'thrds: fetch prod',
     )

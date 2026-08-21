@@ -9,26 +9,31 @@ keep one itself.
 
 Three refs, because a session's content comes from two places::
 
-    refs/remotes/slack/staging     what the staging PC says (draft threads)
-    refs/remotes/slack/prod        what each target says (posted threads)
-    refs/remotes/slack/remote      their union — the merge base
+    refs/remotes/staging     what the staging PC says (draft threads)
+    refs/remotes/prod        what each target says (posted threads)
+    refs/heads/upstream      their union — the merge base
 
-`remote` is the only one to reconcile against. Drafts exist only in staging,
+`upstream` is the only one to reconcile against. Drafts exist only in staging,
 and a posted thread is canonical in prod (its staged copy is frozen), so each
 source tree is partial and rebasing onto one would delete the other's threads.
 The sources are near-free — `pull` already makes both API calls separately —
 and they answer the question the composite can't: *has the frozen staged copy
-drifted from what's live?*, one `git diff slack/staging slack/prod` away.
+drifted from what's live?*, one `git diff staging prod` away.
 
-**Why `refs/remotes/` and not `refs/thrds/`.** git auto-enables reflogs only
-for `refs/heads`, `refs/remotes`, `refs/notes` and `HEAD`. Each snapshot is
-parented on the previous one, so `git log slack/remote` is the history of
-remote states either way; what the reflog adds is `@{1}` addressing, movement
-timestamps, and gc protection should that chain ever be broken. The namespace
-also buys `git branch -r` and `git diff slack/staging HEAD`, each reading as
-precisely what it is. `git remote` won't list `slack`: there is deliberately
-no config section for it, since a URL-less remote would break
-`git fetch --all`.
+**Why these namespaces** (converged with ghpr; each session's earlier
+`refs/remotes/<platform>/{staging,prod,remote}` layout migrates on first
+touch, see :func:`migrate_refs`). git's own shape puts the *remote's name*
+first — `refs/remotes/<remote>/…` — so per-remote refs live at
+`refs/remotes/<name>` and `git branch -r` reads as exactly the remote list
+(`staging`, `prod`). The composite is *not* a remote — it's the locally
+computed upstream projection — so its honest home is a branch:
+`refs/heads/upstream`, never checked out. Both namespaces get automatic
+reflogs (git auto-enables them for `refs/heads`, `refs/remotes`, `refs/notes`
+and `HEAD`); each snapshot is parented on the previous one, so
+`git log upstream` is the history of remote states either way — the reflog
+adds `@{1}` addressing, movement timestamps, and gc protection should that
+chain ever be broken. `git remote` won't list these: there is deliberately no
+config section, since a URL-less remote would break `git fetch --all`.
 
 **Why plumbing and not a scratch worktree.** Snapshots are built with
 `hash-object` / `mktree` / `commit-tree`, so nothing outside the object
@@ -49,17 +54,47 @@ from .mirror import MirrorError
 # Sources, and the composite that unions them.
 STAGING = 'staging'
 PROD = 'prod'
-COMPOSITE = 'remote'
+COMPOSITE = 'upstream'
+
+# The pre-named-remotes layout: platform-prefixed sources, composite named
+# `remote` (and living under refs/remotes/, which it isn't one of).
+LEGACY_COMPOSITE = 'remote'
 
 
-def ref_name(platform: str, source: str) -> str:
-    """The ref for one pseudo-remote, e.g. ``refs/remotes/slack/staging``."""
-    return f'refs/remotes/{platform}/{source}'
+def ref_name(name: str) -> str:
+    """The full ref for a tracking name: ``refs/remotes/<name>`` for a remote,
+    ``refs/heads/upstream`` for the composite (a computed branch, not a
+    remote). The short name resolves either way (`git diff staging upstream`),
+    so ``name`` doubles as the display label."""
+    if name == COMPOSITE:
+        return f'refs/heads/{COMPOSITE}'
+    return f'refs/remotes/{name}'
 
 
-def short_ref(platform: str, source: str) -> str:
-    """How git would print it, e.g. ``slack/staging``."""
-    return f'{platform}/{source}'
+def migrate_refs(session_dir: Path, platform: str) -> list[tuple[str, str]]:
+    """Move a session's refs from the legacy layout to the current one.
+
+    ``refs/remotes/<platform>/{staging,prod}`` → ``refs/remotes/{staging,prod}``
+    and ``refs/remotes/<platform>/remote`` → ``refs/heads/upstream``. Returns
+    the ``(old, new)`` pairs actually moved, for the caller to report. If a
+    ref somehow exists in both layouts the new one is kept (it's the one
+    current code has been advancing) and the stale legacy ref is dropped.
+    """
+    pairs = [
+        (f'refs/remotes/{platform}/{STAGING}', ref_name(STAGING)),
+        (f'refs/remotes/{platform}/{PROD}', ref_name(PROD)),
+        (f'refs/remotes/{platform}/{LEGACY_COMPOSITE}', ref_name(COMPOSITE)),
+    ]
+    moved = []
+    for old, new in pairs:
+        sha = read_ref(session_dir, old)
+        if sha is None:
+            continue
+        if read_ref(session_dir, new) is None:
+            _git(session_dir, 'update-ref', new, sha)
+            moved.append((old, new))
+        _git(session_dir, 'update-ref', '-d', old)
+    return moved
 
 
 def _git(
@@ -113,10 +148,10 @@ def build_tree(session_dir: Path, files: dict[str, str]) -> str:
     Flat because gists are flat, so a session dir has no subdirectories to
     mirror. `mktree` sorts its input itself.
 
-    Used for the *source* refs, which are observations: `slack/prod` holds the
+    Used for the *source* refs, which are observations: `prod` holds the
     posted threads and nothing else, because that is all the target channel
-    has. Being sparse in different ways makes a plain `git diff slack/staging
-    slack/prod` report every draft as "deleted from prod", so the drift
+    has. Being sparse in different ways makes a plain `git diff staging
+    prod` report every draft as "deleted from prod", so the drift
     question — *has the frozen staged copy diverged from what's live?* — is
     asked with ``--diff-filter=M``, which keeps only files present in both.
     """
@@ -142,7 +177,7 @@ def overlay_tree(
     `thrds.json`, downloaded `emoji-*.png` — none of which Slack has any
     opinion about. A merge base whose tree omitted them would read as "HEAD
     has four files the remote doesn't", and, far worse, a later
-    `git rebase --onto slack/remote` would *delete* them: a rebase replays
+    `git rebase --onto upstream` would *delete* them: a rebase replays
     commits onto the new tree, so whatever isn't there is gone.
 
     So the composite is "what the tree would look like after `pull`": HEAD's

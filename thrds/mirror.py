@@ -164,7 +164,7 @@ def commit_merge(
 
     `pull -m merge` uses this to connect the fetched remote-state commit into
     the branch's history: the merged content becomes an ordinary commit whose
-    second parent is the `slack/remote` snapshot it reconciled against. Built
+    second parent is the `upstream` snapshot it reconciled against. Built
     with plumbing (`write-tree` / `commit-tree`) because `git merge` insists
     on driving the reconcile itself, and the reconcile already happened in
     `merge_trees`.

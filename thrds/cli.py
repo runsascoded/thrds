@@ -668,9 +668,21 @@ def slack_init(no_gist: bool, prefix: str | None, doc_path: str):
     )
 
 
+def _ensure_refs(session_dir: Path, state: SessionState) -> None:
+    """Adopt the pre-named-remotes ref layout on first touch.
+
+    `refs/remotes/<platform>/{staging,prod,remote}` →
+    `refs/remotes/{staging,prod}` + `refs/heads/upstream` (converged with
+    ghpr: remote-name-first, and the composite out of `refs/remotes/`
+    entirely, since it isn't one). Quiet when there's nothing to move.
+    """
+    for old, new in tracking.migrate_refs(session_dir, state.platform):
+        err(f'ref migrated: {old} → {new}')
+
+
 def _stored_files(session_dir: Path, state: SessionState, name: str) -> dict[str, str]:
     """A remote's last-observed files, from its stored ref ({} if never set)."""
-    ref = tracking.ref_name(state.platform, name)
+    ref = tracking.ref_name(name)
     if tracking.read_ref(session_dir, ref) is None:
         return {}
     return tracking.tree_files(session_dir, ref)
@@ -714,11 +726,11 @@ def _gate_push(
     state advances the ref either way: it's an observation, and it's what
     lets `diff`/`pull` classify correctly after a refusal.
     """
-    ref = remote.ref(state.platform)
+    ref = remote.ref
     old = tracking.read_ref(session_dir, ref)
     observed = remotes.observe(remote, client, state, session_dir)
     snap = tracking.snapshot(
-        session_dir, ref, remote.label(state.platform),
+        session_dir, ref, remote.name,
         tracking.build_tree(session_dir, observed),
         f'thrds: fetch {remote.name}',
     )
@@ -774,7 +786,7 @@ def _verify_push(
         )
     tracking.snapshot(
         session_dir,
-        remote.ref(state.platform), remote.label(state.platform),
+        remote.ref, remote.name,
         tracking.build_tree(session_dir, observed),
         f'thrds: fetch {remote.name}',
     )
@@ -801,7 +813,7 @@ def slack_push(channel: str | None, force: bool, keep_staging: bool, dry_run: bo
     On a git session the push is gated and transactional: it refuses if
     staging changed since your last pull (`--force` overrides), auto-commits
     *before* writing so what goes to Slack is exactly a commit's content, and
-    afterwards records Slack's observed state in the `slack/*` refs.
+    afterwards records Slack's observed state in the tracking refs.
 
     `--prod` remains only for legacy single-doc sessions that haven't been
     through `thrds slack migrate` yet.
@@ -825,6 +837,8 @@ def slack_push(channel: str | None, force: bool, keep_staging: bool, dry_run: bo
             err(f"targeted {slug} → {where} (from a chrome line in its file)")
 
         is_git = mirror.is_git_repo(session_dir)
+        if is_git:
+            _ensure_refs(session_dir, state)
         names = {f.slug: f.name for f in files}
         # The verb's default remote (specs/remotes-model.md: `push [<remote>]`,
         # staging today); the gate and verify are already remote-agnostic.
@@ -895,16 +909,16 @@ def _refresh_composite(
     state: SessionState,
     files: dict[str, str],
 ) -> tracking.Snapshot:
-    """Advance `slack/remote` after a write verb's commit: threads as observed
+    """Advance `upstream` after a write verb's commit: threads as observed
     (``files``, every remote's contribution already merged in resolve order —
     see `_merged_observations`), passthrough files from the *new* HEAD. No API
     reads — the thread content is a fetch the verb already did. Without this,
-    every pull leaves `git diff slack/remote HEAD` dangling on the
+    every pull leaves `git diff upstream HEAD` dangling on the
     `thrds.json` the pull itself committed."""
     return tracking.snapshot(
         session_dir,
-        tracking.ref_name(state.platform, tracking.COMPOSITE),
-        tracking.short_ref(state.platform, tracking.COMPOSITE),
+        tracking.ref_name(tracking.COMPOSITE),
+        tracking.COMPOSITE,
         _composite_tree(session_dir, files),
         f'thrds: fetch {tracking.COMPOSITE}',
     )
@@ -941,7 +955,7 @@ def _reconcile_pull(
                 f"CONFLICT in {', '.join(merge.conflicts)} — Slack and local "
                 f'commits both changed since the last fetch. `slck pull -m '
                 f'overwrite` (Slack wins), or resolve locally and `slck push` '
-                f'(local wins); `git diff slack/staging HEAD` shows both sides.'
+                f'(local wins); `git diff staging HEAD` shows both sides.'
             )
         in_tree = {
             n for n in tracking.tree_names(session_dir, merge.tree)
@@ -1041,7 +1055,7 @@ def _dirty_tracked(session_dir: Path) -> list[str]:
 def slack_pull(channel: str | None, mode: str | None, dry_run: bool, prod: bool, doc_path: str | None):
     """Pull the doc's current state from Slack. Default: staging PC.
 
-    On a per-thread git session this is fetch + reconcile: the `slack/*` refs
+    On a per-thread git session this is fetch + reconcile: the tracking refs
     advance to what Slack says, then local content is brought onto that state
     per `--mode`. `rebase` (default) three-way merges against the last-fetched
     base, so a local edit Slack hasn't seen survives instead of being silently
@@ -1073,6 +1087,8 @@ def slack_pull(channel: str | None, mode: str | None, dry_run: bool, prod: bool,
                 'is tracked by its `posted_ts`.'
             )
         is_git = mirror.is_git_repo(session_dir)
+        if is_git:
+            _ensure_refs(session_dir, state)
         mode = _resolve_pull_mode(mode, session_dir, is_git)
         if write and mode != 'overwrite':
             if dirty := _dirty_tracked(session_dir):
@@ -1214,7 +1230,7 @@ def _thread_slug_arg(arg: str) -> str:
     return parsed[1] if parsed is not None else name
 
 
-def _base_texts(session_dir: Path, platform: str) -> dict[str, str] | None:
+def _base_texts(session_dir: Path) -> dict[str, str] | None:
     """slug → text at the last-fetched composite; None if `fetch` never ran.
 
     The merge base is what turns a two-way diff into a classification: a hunk
@@ -1222,7 +1238,7 @@ def _base_texts(session_dir: Path, platform: str) -> dict[str, str] | None:
     those want opposite verbs. Comparing each side against the base instead
     says which one moved.
     """
-    ref = tracking.ref_name(platform, tracking.COMPOSITE)
+    ref = tracking.ref_name(tracking.COMPOSITE)
     base = tracking.read_ref(session_dir, ref)
     if base is None:
         return None
@@ -1241,6 +1257,8 @@ def _diff_threads(
     slug_arg: str | None,
 ) -> None:
     """Print each staged thread's local↔Slack diff; nothing for unchanged ones."""
+    if mirror.is_git_repo(session_dir):
+        _ensure_refs(session_dir, state)
     files = {tf.slug: tf for tf in thread_files(session_dir)}
     tracked = {
         slug for slug, e in state.threads.items()
@@ -1279,7 +1297,7 @@ def _diff_threads(
         t.slug: t
         for t in client.pull_promoted_threads(state, session_dir=session_dir, slugs=wanted)
     })
-    bases = _base_texts(session_dir, state.platform)
+    bases = _base_texts(session_dir)
     hinted = False
     for slug in wanted:
         tf = files.get(slug)
@@ -1347,7 +1365,7 @@ def _fetch_refs(
     write: bool,
     write_composite: bool | None = None,
 ) -> tracking.Snapshot | None:
-    """Snapshot the ``slack/*`` refs from already-fetched content.
+    """Snapshot the tracking refs from already-fetched content.
 
     ``fetched`` maps remote name → observed files. A resolved remote absent
     from it was not read this round: its stored ref feeds the composite
@@ -1373,16 +1391,16 @@ def _fetch_refs(
     dry = '[dry-run] ' if not write else ''
     merged: dict[str, str] = {}
     for name, rmt in remotes.resolve(state).items():
-        label = rmt.label(state.platform)
+        label = rmt.name
         if name not in fetched:
-            ref_set = tracking.read_ref(session_dir, rmt.ref(state.platform)) is not None
+            ref_set = tracking.read_ref(session_dir, rmt.ref) is not None
             files = _stored_files(session_dir, state, name)
             err(f"{label}: skipped ({'last observation kept' if ref_set else 'never fetched'})")
         else:
             files = fetched[name]
             snap = tracking.snapshot(
                 session_dir,
-                rmt.ref(state.platform), label,
+                rmt.ref, label,
                 tracking.build_tree(session_dir, files),
                 f'thrds: fetch {name}',
                 write=write,
@@ -1390,8 +1408,8 @@ def _fetch_refs(
             err(f'{dry if snap.changed else ""}{snap.label}: {snap.summary()}')
         merged.update(files)
 
-    comp_ref = tracking.ref_name(state.platform, tracking.COMPOSITE)
-    comp_label = tracking.short_ref(state.platform, tracking.COMPOSITE)
+    comp_ref = tracking.ref_name(tracking.COMPOSITE)
+    comp_label = tracking.COMPOSITE
     comp_tree = _composite_tree(session_dir, merged)
     head = tracking.read_ref(session_dir, 'HEAD')
     if tracking.read_ref(session_dir, comp_ref) is None and head is not None:
@@ -1416,10 +1434,10 @@ def _fetch_refs(
 def slack_fetch(dry_run: bool, remote_names: tuple[str, ...]):
     """Record Slack's current state in remote-tracking refs.
 
-    The read-only half of `pull`: it advances `refs/remotes/slack/{staging,
-    prod,remote}` and touches nothing else — not the working tree, not the
-    index, not the branch. `git diff slack/remote HEAD` afterwards is "what
-    have I changed that Slack hasn't seen"; `git show slack/remote` is "what
+    The read-only half of `pull`: it advances `refs/remotes/{staging,prod}`
+    and `refs/heads/upstream`, touching nothing else — not the working tree,
+    not the index, not the branch. `git diff upstream HEAD` afterwards is "what
+    have I changed that Slack hasn't seen"; `git show upstream` is "what
     changed on Slack since I last looked".
 
     With REMOTE names (`staging`, `prod`) only those are read; a skipped
@@ -1438,6 +1456,7 @@ def slack_fetch(dry_run: bool, remote_names: tuple[str, ...]):
         raise click.UsageError(
             f'{session_dir} is not a git repo; nothing to track refs in.'
         )
+    _ensure_refs(session_dir, state)
     rmts = remotes.resolve(state)
     wanted = list(dict.fromkeys(remote_names)) or list(rmts)
     unknown = sorted(set(wanted) - set(rmts))
@@ -1456,11 +1475,11 @@ def slack_fetch(dry_run: bool, remote_names: tuple[str, ...]):
             continue
         rmt = rmts[name]
         if (
-            tracking.read_ref(session_dir, rmt.ref(state.platform)) is None
+            tracking.read_ref(session_dir, rmt.ref) is None
             and remotes.has_threads(rmt, state)
         ):
             raise click.UsageError(
-                f'{rmt.label(state.platform)} has threads but has never been '
+                f'{rmt.name} has threads but has never been '
                 f'fetched; skipping it would misrecord them as deleted in the '
                 f'composite. Run a full `slck fetch` first.'
             )
@@ -1602,7 +1621,7 @@ def _update_remote_file(
         files.pop(name, None)
     tracking.snapshot(
         session_dir,
-        remote.ref(state.platform), remote.label(state.platform),
+        remote.ref, remote.name,
         tracking.build_tree(session_dir, files),
         f'thrds: fetch {remote.name}',
     )
@@ -1632,7 +1651,7 @@ def _gate_promote(
     entry = state.threads.get(slug)
     if entry is None or entry.state != 'posted':
         return
-    ref = remote.ref(state.platform)
+    ref = remote.ref
     if tracking.read_ref(session_dir, ref) is None:
         return
     if name not in tracking.tree_names(session_dir, ref):
@@ -1751,6 +1770,8 @@ def slack_promote(channel: str | None, force: bool, dry_run: bool, thread_ts: st
         return
     session_dir = Path.cwd()
     is_git = mirror.is_git_repo(session_dir)
+    if is_git:
+        _ensure_refs(session_dir, state)
     # The verb's default remote (specs/remotes-model.md: promote is morally
     # `push -u prod <thread>`); the gate and verify are remote-agnostic.
     rmt = remotes.resolve(state)[tracking.PROD]

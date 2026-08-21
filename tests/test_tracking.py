@@ -32,27 +32,30 @@ def repo(tmp_path) -> Path:
     return tmp_path
 
 
-REF = tracking.ref_name('slack', tracking.STAGING)
+REF = tracking.ref_name(tracking.STAGING)
 
 
 def _fetch(repo: Path, files: dict[str, str], write: bool = True):
     tree = tracking.build_tree(repo, files)
-    return tracking.snapshot(repo, REF, 'slack/staging', tree, 'thrds: fetch staging', write=write)
+    return tracking.snapshot(repo, REF, 'staging', tree, 'thrds: fetch staging', write=write)
 
 
 # --- ref naming ---
 
 
-def test_refs_live_under_remotes_so_they_get_reflogs():
-    """`core.logAllRefUpdates` covers refs/remotes but not an invented
-    namespace. Snapshot parentage makes `git log` the history of remote states
-    regardless; the reflog adds `@{1}`, movement timestamps, and gc
-    protection if that chain is ever broken."""
-    assert tracking.ref_name('slack', 'staging') == 'refs/remotes/slack/staging'
+def test_refs_live_where_git_auto_reflogs():
+    """`core.logAllRefUpdates` covers refs/remotes and refs/heads but not an
+    invented namespace. Snapshot parentage makes `git log` the history of
+    remote states regardless; the reflog adds `@{1}`, movement timestamps,
+    and gc protection if that chain is ever broken."""
+    assert tracking.ref_name('staging') == 'refs/remotes/staging'
+    assert tracking.ref_name('prod') == 'refs/remotes/prod'
 
 
-def test_short_ref_is_what_git_prints():
-    assert tracking.short_ref('discord', 'prod') == 'discord/prod'
+def test_the_composite_is_a_branch_not_a_remote():
+    """Converged with ghpr: the composite is the locally computed upstream
+    projection, so its honest home is `refs/heads/`, never checked out."""
+    assert tracking.ref_name(tracking.COMPOSITE) == 'refs/heads/upstream'
 
 
 # --- first fetch ---
@@ -173,8 +176,8 @@ def test_no_scratch_worktree_is_left_behind(repo):
 def test_sources_track_separately(repo):
     """Drafts live only in staging, posted threads are canonical in prod — so
     each source tree is partial, and only the composite is a merge base."""
-    staging = tracking.ref_name('slack', tracking.STAGING)
-    prod = tracking.ref_name('slack', tracking.PROD)
+    staging = tracking.ref_name(tracking.STAGING)
+    prod = tracking.ref_name(tracking.PROD)
     tracking.snapshot(repo, staging, 's', tracking.build_tree(repo, {'01-a.md': 'frozen draft\n'}), 'm')
     tracking.snapshot(repo, prod, 'p', tracking.build_tree(repo, {'01-a.md': 'live copy\n'}), 'm')
     assert tracking.changed_paths(repo, staging, prod) == ('01-a.md',)
