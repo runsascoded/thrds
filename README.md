@@ -54,10 +54,10 @@ ghpr push
 
 ### Syncing: `fetch`, `pull`, `push`
 
-Each clone is its own git repo, and `refs/ghpr/remote` tracks GitHub's state within it — the analog of `origin/main`. That makes the sync commands mirror their git namesakes:
+Each clone is its own git repo, and `refs/remotes/github/remote` tracks GitHub's state within it — the analog of `origin/main`, reflog and all (`git branch -r` lists it as `github/remote`). That makes the sync commands mirror their git namesakes:
 
 ```bash
-ghpr fetch          # snapshot GitHub into refs/ghpr/remote; touches nothing else
+ghpr fetch          # snapshot GitHub into github/remote; touches nothing else
 ghpr fetch -n       # show what would come in, without moving the ref
 ghpr pull           # fetch, replay your local commits onto it, then push
 ghpr push           # send committed local state to GitHub + gist
@@ -67,8 +67,9 @@ ghpr push           # send committed local state to GitHub + gist
 
 ```bash
 ghpr fetch
-git diff HEAD refs/ghpr/remote      # what changed on GitHub
-git rebase --onto refs/ghpr/remote <previous-ref-sha>
+git diff HEAD github/remote         # what changed on GitHub
+git log github/remote               # every state GitHub has been in
+git rebase --onto github/remote <previous-ref-sha>
 ```
 
 `ghpr pull` does that reconcile for you, defaulting to rebase:
@@ -83,14 +84,18 @@ git config ghpr.pullMode merge    # change the default
 Both directions operate on **committed** state:
 
 - `push` sends HEAD, never the working tree, so commit before pushing (dirty files are listed and skipped).
-- `pull` refuses to rebase over uncommitted changes rather than overwriting them. `refs/ghpr/remote` is still advanced, so you can commit and re-run, or reconcile by hand.
-- `push` only advances `refs/ghpr/remote` when the sync was complete; if anything was held back (uncommitted files, others' comments, `--no-comments`), the base stays put so the next `pull` still replays your work.
+- `pull` refuses to rebase over uncommitted changes rather than overwriting them. `github/remote` is still advanced, so you can commit and re-run, or reconcile by hand.
+- `push` only advances `github/remote` when the sync was complete; if anything was held back (uncommitted files, others' comments, `--no-comments`), the base stays put so the next `pull` still replays your work.
 
-Repos cloned before `refs/ghpr/remote` existed get it initialized at HEAD on first use. If HEAD has commits GitHub hasn't seen, point it at the last synced commit first:
+Repos cloned before the ref existed have no recorded base. On first use ghpr fetches and compares: if HEAD already matches GitHub the base is adopted silently, but if they differ there is no way to tell which side moved, and guessing loses data either way — so it refuses and asks you to decide:
 
 ```bash
-git update-ref refs/ghpr/remote <sha>
+ghpr pull -m overwrite              # remote wins, discard the local delta
+ghpr push                           # local wins, send HEAD to GitHub
+git update-ref refs/remotes/github/remote <sha>   # or set the base by hand
 ```
+
+Repos carrying the older `refs/ghpr/remote` are migrated to `refs/remotes/github/remote` automatically.
 
 ### Adding Comments
 

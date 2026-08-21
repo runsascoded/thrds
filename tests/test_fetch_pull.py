@@ -1,4 +1,4 @@
-"""Tests for `refs/ghpr/remote`, `ghpr fetch`, and `ghpr pull`'s reconcile modes."""
+"""Tests for the GitHub-state merge base, `ghpr fetch`, and `ghpr pull`'s reconcile modes."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,12 +26,16 @@ def _git_init(tmp_path):
     proc.run('git', 'config', 'pr.type', 'issue', log=None)
 
 
-def _seed(body: str) -> None:
-    """Create the initial clone state: description at `body`, ref == HEAD."""
+def _seed(body: str, set_ref: bool = True) -> None:
+    """Create the initial clone state: description at `body`, ref == HEAD.
+
+    `set_ref=False` reproduces a repo cloned before `refs/…/remote` existed.
+    """
     Path(DESC).write_text(f'# [o/r#5] T\n\n{body}\n\n[o/r#5]: https://github.com/o/r/issues/5\n')
     proc.run('git', 'add', DESC, log=None)
     proc.run('git', 'commit', '-q', '-m', 'clone', log=None)
-    refs.set_remote_ref('HEAD')
+    if set_ref:
+        refs.set_remote_ref('HEAD')
 
 
 def _mock_remote(monkeypatch, body: str, comments=()):
@@ -76,13 +80,15 @@ class TestRemoteRef:
         _seed('v0')
         assert refs.read_remote_ref() == proc.line('git', 'rev-parse', 'HEAD', log=None)
 
-    def test_ensure_is_idempotent(self, tmp_path, monkeypatch):
+    def test_recorded_base_survives_local_commits(self, tmp_path, monkeypatch):
+        """The base tracks GitHub, not HEAD: local commits must not drag it
+        forward, or `base..HEAD` would stop naming the unpushed work."""
         monkeypatch.chdir(tmp_path)
         _git_init(tmp_path)
         _seed('v0')
         sha = refs.read_remote_ref()
         proc.run('git', 'commit', '-q', '--allow-empty', '-m', 'local', log=None)
-        assert refs.ensure_remote_ref() == sha
+        assert fetch_mod.resolve_base() == (sha, False)
 
 
 class TestFetch:
@@ -406,3 +412,102 @@ class TestFetchComments:
         _, _, _, body = __import__('ghpr.comments', fromlist=['x']).read_comment_file(
             Path('z900-someone.md'))
         assert body == 'hi there'
+
+
+class TestBootstrap:
+    """Repos cloned before the ref existed: the base is a guess, not an observation.
+
+    Guessing wrong in either direction loses data, so an ambiguous bootstrap has
+    to refuse rather than pick a side.
+    """
+
+    def test_local_delta_is_not_reverted(self, tmp_path, monkeypatch):
+        """base := HEAD claims GitHub has already seen HEAD. If it hasn't, the
+        rebase finds nothing to replay and the branch lands on remote content —
+        reverting unpushed local work and then pushing the reversion, which is
+        the exact failure the ref was introduced to prevent."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('local work GitHub never saw', set_ref=False)
+        pushes = _mock_remote(monkeypatch, 'stale remote body')
+
+        with pytest.raises(SystemExit) as exc:
+            pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+                          gist_private=None, no_comments=False)
+
+        assert exc.value.code == 1
+        assert _body() == 'local work GitHub never saw'
+        assert pushes == []
+        # No base was invented, so the next run still sees an honest bootstrap.
+        assert refs.read_remote_ref() is None
+
+    def test_clean_bootstrap_proceeds(self, tmp_path, monkeypatch):
+        """Local == remote: the guess is verified correct, so adopt it silently."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('v0', set_ref=False)
+        head = proc.line('git', 'rev-parse', 'HEAD', log=None)
+        pushes = _mock_remote(monkeypatch, 'v0')
+
+        pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+                      gist_private=None, no_comments=False)
+
+        assert (refs.read_remote_ref(), _body(), len(pushes)) == (head, 'v0', 1)
+
+    def test_overwrite_mode_resolves_ambiguity(self, tmp_path, monkeypatch):
+        """`-m overwrite` says remote wins, which is exactly the missing answer."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('local work GitHub never saw', set_ref=False)
+        _mock_remote(monkeypatch, 'remote body')
+
+        pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+                      gist_private=None, no_comments=False, mode='overwrite')
+
+        assert _body() == 'remote body'
+        assert refs.read_remote_ref() == proc.line('git', 'rev-parse', 'HEAD', log=None)
+
+    def test_push_resolves_ambiguity_the_other_way(self, tmp_path, monkeypatch):
+        """`push` says local wins, and establishes the base by observation."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('local work GitHub never saw', set_ref=False)
+        monkeypatch.setattr(push_mod, 'get_item_metadata', lambda *a, **kw: ({}, 'issue'))
+        monkeypatch.setattr(push_mod, 'get_item_comments', lambda *a, **kw: [])
+        monkeypatch.setattr(push_mod, 'get_current_github_user', lambda: 'ryan-williams')
+        monkeypatch.setattr(push_mod, 'proc', _NoGh(proc))
+
+        push_mod.push(gist=False, dry_run=False, footer=0, no_footer=True, open_browser=False,
+                      images=False, gist_private=None, no_comments=False, force_others=False)
+
+        assert refs.read_remote_ref() == proc.line('git', 'rev-parse', 'HEAD', log=None)
+
+    def test_fetch_alone_refuses_to_invent_a_base(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('local work GitHub never saw', set_ref=False)
+        _mock_remote(monkeypatch, 'stale remote body')
+
+        with pytest.raises(SystemExit):
+            fetch_mod.fetch(dry_run=False, no_comments=False)
+
+        assert refs.read_remote_ref() is None
+
+
+class TestLegacyRefMigration:
+    def test_migrates_and_gains_a_reflog(self, tmp_path, monkeypatch):
+        """`refs/ghpr/remote` sat outside the namespaces git auto-logs, so the
+        ref kept no history of its own movements."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('v0', set_ref=False)
+        head = proc.line('git', 'rev-parse', 'HEAD', log=None)
+        proc.run('git', 'update-ref', refs.LEGACY_REMOTE_REF, head, log=None)
+
+        assert refs.read_remote_ref() == head
+        assert refs.REMOTE_REF == 'refs/remotes/github/remote'
+        assert proc.line('git', 'rev-parse', '--verify', '-q', refs.LEGACY_REMOTE_REF,
+                         err_ok=True, log=None) in (None, '')
+        # The whole point of the move: movements are now recorded.
+        refs.set_remote_ref(head)
+        assert len(proc.lines('git', 'reflog', refs.REMOTE_REF, log=None)) >= 1

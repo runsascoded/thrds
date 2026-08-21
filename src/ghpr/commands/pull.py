@@ -4,8 +4,8 @@ from click import Choice
 from utz import proc, err
 from utz.cli import flag, opt
 
-from ..refs import ensure_remote_ref, set_remote_ref
-from .fetch import build_snapshot, resolve_item
+from ..refs import REMOTE_REF, set_remote_ref
+from .fetch import bootstrap_is_ambiguous, build_snapshot, resolve_base, resolve_item
 
 MODES = ('rebase', 'merge', 'overwrite')
 
@@ -31,7 +31,7 @@ def _resolve_mode(mode: str | None) -> str:
 def _reconcile(base: str, sha: str, mode: str) -> None:
     """Bring the checked-out branch onto the newly fetched remote state.
 
-    `base` is the previous `refs/ghpr/remote`, so `base..HEAD` is exactly the set
+    `base` is the previous `github/remote`, so `base..HEAD` is exactly the set
     of local commits GitHub hasn't seen — the commits that must survive.
     """
     n_local = int(proc.line('git', 'rev-list', '--count', f'{base}..HEAD', log=None))
@@ -50,7 +50,7 @@ def _reconcile(base: str, sha: str, mode: str) -> None:
             f"{mode} needs a clean working tree:")
         for line in dirty:
             err(f"    {line[3:]}")
-        err("Commit or stash them, then re-run. `refs/ghpr/remote` is already updated, so")
+        err(f"Commit or stash them, then re-run. {REMOTE_REF} is already updated, so")
         err(f"you can also reconcile by hand (e.g. `git rebase --onto {sha[:8]} {base[:8]}`).")
         exit(1)
 
@@ -79,13 +79,18 @@ def pull(
 
     mode = _resolve_mode(mode)
     owner, repo, number, item_type = resolve_item()
-    base = ensure_remote_ref()
+    base, bootstrap = resolve_base()
 
     err("Pulling latest from GitHub...")
     snap = build_snapshot(owner, repo, number, item_type, base, no_comments, keep=not dry_run)
     label = snap.item_label
 
+    if bootstrap and bootstrap_is_ambiguous(snap, mode):
+        exit(1)
+
     if not snap.changed:
+        if bootstrap and not dry_run:
+            set_remote_ref(base)
         err(f"No changes from {label}")
     elif dry_run:
         err(f"[DRY-RUN] Would fetch from {label}: {snap.summary()}")

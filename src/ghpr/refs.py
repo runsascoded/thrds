@@ -1,46 +1,54 @@
-"""`refs/ghpr/remote`: a remote-tracking ref for GitHub's state.
+"""`refs/remotes/github/remote`: a remote-tracking ref for GitHub's state.
 
 A ghpr item repo has no remote for GitHub itself — the only remote is the gist,
 which is a read replica. Without a record of "the state we last knew GitHub to
 be in", `pull` has no merge base, so it can only overwrite local files with
 remote content, silently discarding local commits GitHub hasn't seen.
 
-`refs/ghpr/remote` is that base: the analog of `origin/main`. It is never
-checked out; it points at a commit whose tree mirrors GitHub. `ghpr fetch`
-advances it, and `ghpr pull` reconciles the local branch onto it (rebase by
-default), exactly as `git fetch` / `git pull --rebase` do.
+This ref is that base: the analog of `origin/main`. It is never checked out; it
+points at a commit whose tree mirrors GitHub. `ghpr fetch` advances it, and
+`ghpr pull` reconciles the local branch onto it (rebase by default), exactly as
+`git fetch` / `git pull --rebase` do.
+
+It lives under `refs/remotes/` because that is one of the few namespaces git
+auto-enables reflogs for (`core.logAllRefUpdates` covers `refs/heads/`,
+`refs/remotes/`, `refs/notes/` and `HEAD`). Outside them the ref would keep no
+record of its own movements — no `github/remote@{1}`, no "when did it move" —
+which is half the value of keeping it. It also means `git branch -r` lists it
+and `git log github/remote` reads naturally. There is deliberately no
+`[remote "github"]` config section: a URL-less remote would break
+`git fetch --all`, and nothing here needs one.
 """
 
 from utz import proc, err
 
-REMOTE_REF = 'refs/ghpr/remote'
+REMOTE_REF = 'refs/remotes/github/remote'
+LEGACY_REMOTE_REF = 'refs/ghpr/remote'
+
+
+def _rev_parse(ref: str) -> str | None:
+    return proc.line('git', 'rev-parse', '--verify', '-q', ref, err_ok=True, log=None) or None
 
 
 def read_remote_ref() -> str | None:
-    """Resolve `refs/ghpr/remote`, or None if the repo predates it."""
-    sha = proc.line('git', 'rev-parse', '--verify', '-q', REMOTE_REF, err_ok=True, log=None)
-    return sha or None
+    """Resolve the remote-tracking ref, migrating from the legacy name if needed.
+
+    Returns None only when GitHub's state was never recorded — a repo cloned
+    before the ref existed. Callers must treat that as "unknown", not as
+    "identical to HEAD"; see `commands/fetch.py:resolve_base`.
+    """
+    if sha := _rev_parse(REMOTE_REF):
+        return sha
+    if sha := _rev_parse(LEGACY_REMOTE_REF):
+        proc.run('git', 'update-ref', REMOTE_REF, sha, log=None)
+        proc.run('git', 'update-ref', '-d', LEGACY_REMOTE_REF, log=None)
+        err(f"Migrated {LEGACY_REMOTE_REF} → {REMOTE_REF} (gains a reflog)")
+        return sha
+    return None
 
 
 def set_remote_ref(commit: str = 'HEAD') -> str:
-    """Point `refs/ghpr/remote` at `commit`; returns the resolved SHA."""
+    """Point the remote-tracking ref at `commit`; returns the resolved SHA."""
     sha = proc.line('git', 'rev-parse', commit, log=None)
     proc.run('git', 'update-ref', REMOTE_REF, sha, log=None)
-    return sha
-
-
-def ensure_remote_ref() -> str:
-    """Initialize `refs/ghpr/remote` to HEAD if unset (repos cloned pre-`fetch`).
-
-    HEAD is the best available guess at GitHub's state for a legacy repo: the
-    true base wasn't recorded, so we assume local == remote. A first `pull` then
-    has nothing to replay and degrades to the old remote-wins behavior; every
-    subsequent one has a real base.
-    """
-    if sha := read_remote_ref():
-        return sha
-    sha = set_remote_ref('HEAD')
-    err(f"Initialized {REMOTE_REF} at HEAD ({sha[:8]}), assuming it matches GitHub.")
-    err("If HEAD has commits GitHub hasn't seen, point it at the last synced commit first:")
-    err(f"    git update-ref {REMOTE_REF} <sha>")
     return sha

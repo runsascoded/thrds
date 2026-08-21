@@ -1,8 +1,8 @@
-"""Fetch command - snapshot GitHub state into `refs/ghpr/remote`.
+"""Fetch command - snapshot GitHub state into `refs/remotes/github/remote`.
 
 `fetch` is the read-only half of `pull`: it materializes GitHub's current
 description / comments / review threads as a commit and advances
-`refs/ghpr/remote` to it, without touching the working tree, the index, or the
+the remote-tracking ref to it, without touching the working tree, the index, or the
 checked-out branch. Reconciling (rebase/merge) is `pull`'s job, or the user's.
 """
 
@@ -19,7 +19,7 @@ from ..comments import write_comment_file, read_comment_file, get_comment_id_fro
 from ..config import get_pr_info_from_path
 from ..files import get_expected_description_filename, write_description_with_link_ref
 from ..gist import extract_gist_footer
-from ..refs import ensure_remote_ref, set_remote_ref
+from ..refs import REMOTE_REF, read_remote_ref, set_remote_ref
 
 
 @dataclass
@@ -199,14 +199,60 @@ def _keep_baselines(common: Path) -> None:
         copytree(src, common / 'ghpr' / 'reviews', dirs_exist_ok=True)
 
 
+def resolve_base() -> tuple[str, bool]:
+    """Return (base, is_bootstrap) for the fetch about to run.
+
+    A repo cloned before the ref existed has no recorded base. HEAD is the only
+    candidate, but it's a *guess*: adopting it asserts GitHub has already seen
+    everything in HEAD. `bootstrap_is_ambiguous` decides whether that guess
+    survives contact with what the fetch actually found.
+    """
+    if sha := read_remote_ref():
+        return sha, False
+    return proc.line('git', 'rev-parse', 'HEAD', log=None), True
+
+
+def bootstrap_is_ambiguous(snap: Snapshot, mode: str | None = None) -> bool:
+    """True when a bootstrap guess can't be verified, so nothing may be assumed.
+
+    If the fetched snapshot matches HEAD, the guess is confirmed and we adopt
+    it. If it differs, HEAD and GitHub disagree and there's no recorded base to
+    say which one moved — so either answer loses data:
+
+      - assume GitHub is ahead → the rebase finds nothing to replay, the branch
+        lands on remote content, and unpushed local work is reverted and then
+        pushed (precisely the failure this ref exists to prevent);
+      - assume local is ahead → `push` sends a stale HEAD over a newer remote.
+
+    So refuse, leaving the ref unset, and let the user's next command supply the
+    answer. `-m overwrite` and `push` are each an explicit answer, so they pass.
+    """
+    if not snap.changed or mode == 'overwrite':
+        return False
+    err(f"Error: no recorded GitHub state ({REMOTE_REF} is unset), and HEAD "
+        f"disagrees with {snap.item_label}: {snap.summary()}")
+    err("Refusing to guess which side is ahead — either answer would lose data.")
+    err(f"  Inspect:      git diff HEAD {snap.sha[:8]}")
+    err("  Remote wins:  ghpr pull -m overwrite")
+    err("  Local wins:   ghpr push")
+    err(f"  Or set the base by hand: git update-ref {REMOTE_REF} <sha>")
+    return True
+
+
 def fetch(dry_run: bool, no_comments: bool) -> Snapshot:
-    """Advance `refs/ghpr/remote` to GitHub's current state."""
+    """Advance the remote-tracking ref to GitHub's current state."""
     owner, repo, number, item_type = resolve_item()
-    base = ensure_remote_ref()
+    base, bootstrap = resolve_base()
     err(f"Fetching {owner}/{repo}#{number}...")
     snap = build_snapshot(owner, repo, number, item_type, base, no_comments, keep=not dry_run)
+    if bootstrap and bootstrap_is_ambiguous(snap):
+        if dry_run:
+            return snap
+        exit(1)
     if not snap.changed:
         err(f"Already up to date with {snap.item_label}")
+        if bootstrap:
+            set_remote_ref(base)
         return snap
     if dry_run:
         err(f"[DRY-RUN] Would fetch from {snap.item_label}: {snap.summary()}")
@@ -223,5 +269,5 @@ def register(cli):
     @flag('--no-comments', help='Skip fetching comments and review threads')
     @flag('-n', '--dry-run', help='Show what would be fetched, without moving the ref')
     def fetch_cmd(no_comments, dry_run):
-        """Snapshot GitHub state into `refs/ghpr/remote`, without touching the working tree."""
+        """Snapshot GitHub state into `refs/remotes/github/remote`, without touching the working tree."""
         fetch(dry_run, no_comments)
