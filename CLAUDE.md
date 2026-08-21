@@ -20,18 +20,20 @@ The gist is a **read replica** of the local clone. `push`/`pull` operations sync
 
 ### Sync contract (both directions read committed state)
 
-`refs/remotes/github/remote` (see `refs.py`) tracks GitHub's state inside each clone's nested repo — the analog of `origin/main`. Without it there's no merge base, and `pull` can only overwrite. It lives under `refs/remotes/` because that's one of the namespaces git auto-enables reflogs for; outside them the ref kept no record of its own movements. The legacy `refs/ghpr/remote` migrates automatically on read.
+`refs/remotes/github` (see `refs.py`) tracks GitHub's state inside each clone's nested repo — the analog of `origin/main`. Without it there's no merge base, and `pull` can only overwrite. It lives under `refs/remotes/` because that's one of the namespaces git auto-enables reflogs for; outside them the ref kept no record of its own movements. The name is the remote's name and nothing else, with git's branch component elided (there's one state per item); legacy `refs/remotes/github/remote` and `refs/ghpr/remote` migrate automatically on read.
 
 - **`fetch`** (`commands/fetch.py`) materializes GitHub's state as a commit and advances the ref. It builds that commit in a throwaway worktree under the git dir, so the user's working tree, index, and branch are never touched — which is also what makes `-n` genuinely side-effect-free. Review baselines land in the scratch worktree's per-worktree git dir and are only promoted when the fetch is kept.
-- **`pull`** = `fetch` + reconcile (`rebase` default, `merge`/`overwrite` via `-m` or `git config ghpr.pullMode`) + `push`. It refuses to rebase/merge over uncommitted changes instead of overwriting them.
-- **`push`** sends HEAD, never the working tree (Contract A). It advances the ref to HEAD only when the sync was complete; if anything was held back (dirty files, others' comments, `--no-comments`) the base stays put, so the next `pull` still replays local work rather than silently dropping it.
+- **`pull`** = `fetch` + reconcile (`rebase` default, `merge`/`overwrite` via `-m` or `git config ghpr.pullMode`) + gist mirror. It refuses to rebase/merge over uncommitted changes instead of overwriting them, and — like git's `pull` — never writes to GitHub. It reconciles off *the ref's position* (`merge-base --is-ancestor`), not off "did this fetch see anything new": a `push` gate refusal advances the ref without moving HEAD, so those are different questions.
+- **`sync`** (`commands/sync.py`) = `pull` then `push`, the round trip `pull` used to do implicitly. It passes `no_gate=True`, since its own `pull` just answered what the gate would ask.
+- **`push`** sends HEAD, never the working tree (Contract A). `_gate_upstream` fetches first and refuses unless the ref is an ancestor of HEAD — git's non-fast-forward rule, stated deliberately as "does HEAD contain the remote state" rather than "did GitHub move since the last fetch" (the latter self-clears the moment the refusal records the fetch, so the retry sails through and does the damage the first push refused) (`-G`/`--no-gate` overrides; bootstrap pushes are ungated, since with no recorded base there is nothing to compare and `push` *is* the "local wins" answer). A refusal still advances the ref — the fetch is an observation, and recording it is what makes the follow-up `git diff HEAD refs/remotes/github` show the change that caused it. It advances the ref to HEAD only when the sync was complete; if anything was held back (dirty files, others' comments, `--no-comments`) the base stays put, so the next `pull` still replays local work rather than silently dropping it.
 - `clone` sets the ref once everything is committed. Legacy clones have no recorded base: `resolve_base()` proposes HEAD, and `bootstrap_is_ambiguous()` adopts it only if the fetch confirms HEAD == GitHub. If they differ, neither side can be shown to be ahead and both guesses lose data, so it refuses with the ref left unset — `-m overwrite` and `push` are the explicit answers.
 
 ## Current State
 
 ### Completed
 - ✅ Basic clone/push/pull/diff commands
-- ✅ `refs/remotes/github/remote` merge base + `ghpr fetch`; `pull` rebases (or merges) instead of clobbering local commits
+- ✅ `refs/remotes/github` merge base + `ghpr fetch`; `pull` rebases (or merges) instead of clobbering local commits
+- ✅ `pull` no longer writes to GitHub (`ghpr sync` = pull + push); `push` gates on a stale upstream (`-G` overrides)
 - ✅ Comment support (fetch, diff, push comments)
 - ✅ Review-thread sync (inline PR comments): clone/pull threads to flat `gh/<num>/z-<head_id>-<NN>-<author>.md` files (head frontmatter holds thread metadata), edit/reply/resolve locally, push back (REST + GraphQL); `ghpr review reply|resolve|unresolve`
 - ✅ Gist mirroring
@@ -69,7 +71,7 @@ The gist is a **read replica** of the local clone. `push`/`pull` operations sync
     ├── reviews.py      # Review-thread (inline comment) pull/push/diff + .thread.yml I/O
     ├── files.py        # Description file operations
     ├── config.py       # Git config helpers
-    ├── refs.py         # `refs/remotes/github/remote` (GitHub-state merge base) + legacy migration
+    ├── refs.py         # `refs/remotes/github` (GitHub-state merge base) + legacy migration
     ├── patterns.py     # Regex patterns
     ├── render.py       # Diff rendering utilities
     ├── shell/          # Shell integration scripts (bash, fish)
@@ -77,21 +79,22 @@ The gist is a **read replica** of the local clone. `push`/`pull` operations sync
         ├── clone.py
         ├── create.py        # Also contains `init` command
         ├── diff.py
-        ├── fetch.py         # Snapshot GitHub into `github/remote` (scratch-worktree build)
+        ├── fetch.py         # Snapshot GitHub into `github` (scratch-worktree build)
         ├── ingest_attachments.py
         ├── open.py
-        ├── pull.py
+        ├── pull.py          # fetch + reconcile + gist mirror (no GitHub write-back)
         ├── push.py
         ├── review.py         # `ghpr review reply|resolve|unresolve` (local edits)
         ├── shell_integration.py
         ├── show.py
+        ├── sync.py          # `pull` then `push`: the full round trip
         └── upload.py
 ```
 
 ### Recent Changes
 
 **Ref namespace + honest bootstrap** (latest; from `specs/converge-fetch-refs-ux.md`, written by the thrds session after it built the same design):
-- `refs/ghpr/remote` → `refs/remotes/github/remote`, so git auto-enables a reflog for it (verified: 0 vs 2 reflog entries); also gets `git branch -r` listing and `github/remote` shorthand. Legacy ref migrates on read. No `[remote "github"]` config section — a URL-less remote would break `git fetch --all`.
+- `refs/ghpr/remote` → `refs/remotes/github`, so git auto-enables a reflog for it (verified: 0 vs 2 reflog entries); also gets `git branch -r` listing and bare `github` shorthand. Legacy names migrate on read. No `[remote "github"]` config section — a URL-less remote would break `git fetch --all`.
 - Bootstrap no longer guesses. `ensure_remote_ref` (which set the base to HEAD with a warning) is gone; `resolve_base()` + `bootstrap_is_ambiguous()` adopt HEAD only when the fetch confirms it matches GitHub, and otherwise refuse. Guessing "GitHub is ahead" reverted unpushed local work and pushed the reversion — the original bug, on the one path where the base was a guess; guessing "local is ahead" would push a stale HEAD over a newer remote.
 - Still open from that spec: three-way classification in `ghpr diff` (§2) and a `push` upstream gate (§3).
 

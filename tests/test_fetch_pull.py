@@ -10,6 +10,7 @@ from ghpr import refs
 from ghpr.commands import fetch as fetch_mod
 from ghpr.commands import pull as pull_mod
 from ghpr.commands import push as push_mod
+from ghpr.commands import sync as sync_mod
 
 DESC = 'r#5.md'
 
@@ -121,6 +122,19 @@ class TestFetch:
         assert snap.changed
         assert State.read() == before
 
+    def test_dry_run_does_not_adopt_a_bootstrap_base(self, tmp_path, monkeypatch):
+        """`-n` must not set the ref even when the bootstrap guess checks out —
+        adopting it is a decision the real fetch gets to make."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('v0', set_ref=False)
+        _mock_remote(monkeypatch, 'v0')
+        before = State.read()
+
+        fetch_mod.fetch(dry_run=True, no_comments=False)
+
+        assert (before.ref, State.read()) == (None, before)
+
     def test_no_remote_change_is_a_noop(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         _git_init(tmp_path)
@@ -164,7 +178,7 @@ class TestPullRebase:
         # Remote, concurrently: edit the *first* line.
         _mock_remote(monkeypatch, 'shared-edited-remotely\nlocal-only')
 
-        pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+        pull_mod.pull(gist=False, dry_run=False, open_browser=False,
                       gist_private=None, no_comments=False)
 
         assert Path(DESC).read_text().split('\n')[2:5] == [
@@ -180,7 +194,7 @@ class TestPullRebase:
         _seed('v0')
         _mock_remote(monkeypatch, 'v1')
 
-        pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+        pull_mod.pull(gist=False, dry_run=False, open_browser=False,
                       gist_private=None, no_comments=False)
 
         assert _body() == 'v1'
@@ -195,25 +209,24 @@ class TestPullRebase:
         _mock_remote(monkeypatch, 'v1')
 
         with pytest.raises(SystemExit) as exc:
-            pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+            pull_mod.pull(gist=False, dry_run=False, open_browser=False,
                           gist_private=None, no_comments=False)
 
         assert exc.value.code == 1
         assert _body() == 'uncommitted work'
 
     def test_dirty_worktree_ok_when_remote_unchanged(self, tmp_path, monkeypatch):
-        """Nothing to reconcile, so the usual edit → pull → push flow still works."""
+        """Nothing to reconcile, so a dirty tree is no obstacle."""
         monkeypatch.chdir(tmp_path)
         _git_init(tmp_path)
         _seed('v0')
         Path(DESC).write_text(Path(DESC).read_text().replace('v0', 'uncommitted work'))
         pushes = _mock_remote(monkeypatch, 'v0')
 
-        pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+        pull_mod.pull(gist=False, dry_run=False, open_browser=False,
                       gist_private=None, no_comments=False)
 
-        assert _body() == 'uncommitted work'
-        assert len(pushes) == 1
+        assert (_body(), pushes) == ('uncommitted work', [])
 
 
 class TestPullDryRun:
@@ -227,7 +240,7 @@ class TestPullDryRun:
         _mock_remote(monkeypatch, 'v1')
         before = State.read()
 
-        pull_mod.pull(gist=False, dry_run=True, footer=None, open_browser=False,
+        pull_mod.pull(gist=False, dry_run=True, open_browser=False,
                       gist_private=None, no_comments=False)
 
         assert State.read() == before
@@ -240,7 +253,7 @@ class TestPullDryRun:
         _mock_remote(monkeypatch, 'v1')
         before = State.read()
 
-        pull_mod.pull(gist=False, dry_run=True, footer=None, open_browser=False,
+        pull_mod.pull(gist=False, dry_run=True, open_browser=False,
                       gist_private=None, no_comments=False)
 
         assert State.read() == before
@@ -256,7 +269,7 @@ class TestPullModes:
         local_sha = proc.line('git', 'rev-parse', 'HEAD', log=None)
         _mock_remote(monkeypatch, 'shared-edited-remotely\nlocal-only')
 
-        pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+        pull_mod.pull(gist=False, dry_run=False, open_browser=False,
                       gist_private=None, no_comments=False, mode='merge')
 
         assert Path(DESC).read_text().split('\n')[2:5] == [
@@ -273,7 +286,7 @@ class TestPullModes:
         proc.run('git', 'commit', '-q', '-am', 'local edit', log=None)
         _mock_remote(monkeypatch, 'v1')
 
-        pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+        pull_mod.pull(gist=False, dry_run=False, open_browser=False,
                       gist_private=None, no_comments=False, mode='overwrite')
 
         assert _body() == 'v1'
@@ -314,6 +327,9 @@ class _NoGh:
 
 
 class TestPushAdvancesRef:
+    """`no_gate=True` throughout: these pin the ref *bookkeeping*, and the gate
+    (`TestPushGate`) would otherwise need its own remote stub in every case."""
+
     def _stub_push_deps(self, monkeypatch):
         """Let `push` run its ref bookkeeping without any GitHub traffic."""
         monkeypatch.setattr(push_mod, 'get_item_metadata', lambda *a, **kw: ({}, 'issue'))
@@ -331,7 +347,8 @@ class TestPushAdvancesRef:
         self._stub_push_deps(monkeypatch)
 
         push_mod.push(gist=False, dry_run=False, footer=0, no_footer=True, open_browser=False,
-                      images=False, gist_private=None, no_comments=False, force_others=False)
+                      images=False, gist_private=None, no_comments=False, force_others=False,
+                      no_gate=True)
 
         head = proc.line('git', 'rev-parse', 'HEAD', log=None)
         assert (refs.read_remote_ref(), head != base) == (head, True)
@@ -348,7 +365,8 @@ class TestPushAdvancesRef:
         self._stub_push_deps(monkeypatch)
 
         push_mod.push(gist=False, dry_run=False, footer=0, no_footer=True, open_browser=False,
-                      images=False, gist_private=None, no_comments=False, force_others=False)
+                      images=False, gist_private=None, no_comments=False, force_others=False,
+                      no_gate=True)
 
         assert refs.read_remote_ref() == base
 
@@ -360,7 +378,8 @@ class TestPushAdvancesRef:
         self._stub_push_deps(monkeypatch)
 
         push_mod.push(gist=False, dry_run=False, footer=0, no_footer=True, open_browser=False,
-                      images=False, gist_private=None, no_comments=True, force_others=False)
+                      images=False, gist_private=None, no_comments=True, force_others=False,
+                      no_gate=True)
 
         assert refs.read_remote_ref() == base
 
@@ -375,9 +394,151 @@ class TestPushAdvancesRef:
         monkeypatch.setattr(push_mod, 'render_comment_diff', lambda *a, **kw: None)
 
         push_mod.push(gist=False, dry_run=True, footer=0, no_footer=True, open_browser=False,
-                      images=False, gist_private=None, no_comments=False, force_others=False)
+                      images=False, gist_private=None, no_comments=False, force_others=False,
+                      no_gate=True)
 
         assert refs.read_remote_ref() == base
+
+
+class TestPushGate:
+    """`push` refuses to overwrite a GitHub state it has never observed."""
+
+    def _stub(self, monkeypatch, remote_body: str):
+        monkeypatch.setattr(push_mod, 'get_item_metadata', lambda *a, **kw: ({}, 'issue'))
+        monkeypatch.setattr(push_mod, 'get_item_comments', lambda *a, **kw: [])
+        monkeypatch.setattr(push_mod, 'get_current_github_user', lambda: 'ryan-williams')
+        monkeypatch.setattr(push_mod, 'proc', _NoGh(proc))
+        # `_mock_remote` stubs out `push_mod.push`, which is the function under
+        # test here — hold onto the real one first.
+        self._real_push = push_mod.push
+        return _mock_remote(monkeypatch, remote_body)
+
+    def _push(self, **kw):
+        kw.setdefault('dry_run', False)
+        self._real_push(gist=False, footer=0, no_footer=True, open_browser=False,
+                        images=False, gist_private=None, no_comments=False, force_others=False,
+                        **kw)
+
+    def test_refuses_when_remote_moved(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('v0')
+        base = refs.read_remote_ref()
+        Path(DESC).write_text(Path(DESC).read_text().replace('v0', 'mine'))
+        proc.run('git', 'commit', '-q', '-am', 'local edit', log=None)
+        self._stub(monkeypatch, 'theirs')
+
+        with pytest.raises(SystemExit) as exc:
+            self._push()
+
+        assert exc.value.code == 1
+        # The observation is recorded, so `git diff HEAD <ref>` shows the change
+        # that caused the refusal.
+        ref = refs.read_remote_ref()
+        assert ref != base
+        assert proc.text('git', 'show', f'{ref}:{DESC}', log=None).split('\n')[2] == 'theirs'
+
+    def test_re_running_push_still_refuses(self, tmp_path, monkeypatch):
+        """The gate asks "does HEAD contain the remote state", not "did this
+        fetch see anything new" — the latter self-clears once the refusal
+        records the fetch, so the second push sailed through and overwrote the
+        remote edit the first one refused to touch."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('v0')
+        Path(DESC).write_text(Path(DESC).read_text().replace('v0', 'mine'))
+        proc.run('git', 'commit', '-q', '-am', 'local edit', log=None)
+        self._stub(monkeypatch, 'theirs')
+
+        for _ in range(2):
+            with pytest.raises(SystemExit) as exc:
+                self._push()
+            assert exc.value.code == 1
+
+    def test_dry_run_reports_but_does_not_exit(self, tmp_path, monkeypatch):
+        """`push -n` exists to show the diff; the gate reports and keeps going,
+        and leaves the ref where it was."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('v0')
+        base = refs.read_remote_ref()
+        Path(DESC).write_text(Path(DESC).read_text().replace('v0', 'mine'))
+        proc.run('git', 'commit', '-q', '-am', 'local edit', log=None)
+        self._stub(monkeypatch, 'theirs')
+        monkeypatch.setattr(push_mod, 'render_comment_diff', lambda *a, **kw: None)
+
+        self._push(dry_run=True)
+
+        assert refs.read_remote_ref() == base
+
+    def test_passes_when_remote_unchanged(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('v0')
+        Path(DESC).write_text(Path(DESC).read_text().replace('v0', 'mine'))
+        proc.run('git', 'commit', '-q', '-am', 'local edit', log=None)
+        self._stub(monkeypatch, 'v0')
+
+        self._push()
+
+        assert refs.read_remote_ref() == proc.line('git', 'rev-parse', 'HEAD', log=None)
+
+    def test_no_gate_overrides(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('v0')
+        Path(DESC).write_text(Path(DESC).read_text().replace('v0', 'mine'))
+        proc.run('git', 'commit', '-q', '-am', 'local edit', log=None)
+        self._stub(monkeypatch, 'theirs')
+
+        self._push(no_gate=True)
+
+        assert refs.read_remote_ref() == proc.line('git', 'rev-parse', 'HEAD', log=None)
+
+    def test_refusal_does_not_strand_local_work(self, tmp_path, monkeypatch):
+        """The refusal advances the ref, so the follow-up `pull` sees no *new*
+        remote change — it must still replay the local commit onto it."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('shared\nlocal-only')
+        Path(DESC).write_text(Path(DESC).read_text().replace('local-only', 'local-only\nmine'))
+        proc.run('git', 'commit', '-q', '-am', 'local edit', log=None)
+        self._stub(monkeypatch, 'shared-edited-remotely\nlocal-only')
+
+        with pytest.raises(SystemExit):
+            self._push()
+        pull_mod.pull(gist=False, dry_run=False, open_browser=False,
+                      gist_private=None, no_comments=False)
+
+        assert Path(DESC).read_text().split('\n')[2:5] == [
+            'shared-edited-remotely', 'local-only', 'mine',
+        ]
+        assert proc.check('git', 'merge-base', '--is-ancestor',
+                          refs.read_remote_ref(), 'HEAD', log=None)
+        # ...and the reconcile is what clears the gate, so the retry goes through.
+        self._push()
+        assert refs.read_remote_ref() == proc.line('git', 'rev-parse', 'HEAD', log=None)
+
+
+class TestSync:
+    def test_round_trip_is_pull_then_ungated_push(self, tmp_path, monkeypatch):
+        """`sync` keeps the old `pull` behavior, and skips the gate its own pull
+        just satisfied (otherwise every round trip fetches twice)."""
+        monkeypatch.chdir(tmp_path)
+        _git_init(tmp_path)
+        _seed('shared\nlocal-only')
+        Path(DESC).write_text(Path(DESC).read_text().replace('local-only', 'local-only\nmine'))
+        proc.run('git', 'commit', '-q', '-am', 'local edit', log=None)
+        pushes = _mock_remote(monkeypatch, 'shared-edited-remotely\nlocal-only')
+        monkeypatch.setattr(sync_mod, 'push', push_mod.push)
+
+        sync_mod.sync(gist=False, dry_run=False, footer=0, no_footer=True, open_browser=False,
+                      images=False, gist_private=None, no_comments=False, force_others=False)
+
+        assert Path(DESC).read_text().split('\n')[2:5] == [
+            'shared-edited-remotely', 'local-only', 'mine',
+        ]
+        assert [kw['no_gate'] for _, kw in pushes] == [True]
 
 
 class TestFetchComments:
@@ -406,7 +567,7 @@ class TestFetchComments:
             'created_at': '2025-01-01T00:00:00Z', 'updated_at': '2025-01-01T00:00:00Z',
         }])
 
-        pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+        pull_mod.pull(gist=False, dry_run=False, open_browser=False,
                       gist_private=None, no_comments=False)
 
         _, _, _, body = __import__('ghpr.comments', fromlist=['x']).read_comment_file(
@@ -432,7 +593,7 @@ class TestBootstrap:
         pushes = _mock_remote(monkeypatch, 'stale remote body')
 
         with pytest.raises(SystemExit) as exc:
-            pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+            pull_mod.pull(gist=False, dry_run=False, open_browser=False,
                           gist_private=None, no_comments=False)
 
         assert exc.value.code == 1
@@ -449,10 +610,11 @@ class TestBootstrap:
         head = proc.line('git', 'rev-parse', 'HEAD', log=None)
         pushes = _mock_remote(monkeypatch, 'v0')
 
-        pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+        pull_mod.pull(gist=False, dry_run=False, open_browser=False,
                       gist_private=None, no_comments=False)
 
-        assert (refs.read_remote_ref(), _body(), len(pushes)) == (head, 'v0', 1)
+        # `pull` no longer writes back to GitHub — that is `push`/`sync`'s job.
+        assert (refs.read_remote_ref(), _body(), pushes) == (head, 'v0', [])
 
     def test_overwrite_mode_resolves_ambiguity(self, tmp_path, monkeypatch):
         """`-m overwrite` says remote wins, which is exactly the missing answer."""
@@ -461,7 +623,7 @@ class TestBootstrap:
         _seed('local work GitHub never saw', set_ref=False)
         _mock_remote(monkeypatch, 'remote body')
 
-        pull_mod.pull(gist=False, dry_run=False, footer=None, open_browser=False,
+        pull_mod.pull(gist=False, dry_run=False, open_browser=False,
                       gist_private=None, no_comments=False, mode='overwrite')
 
         assert _body() == 'remote body'
@@ -502,11 +664,11 @@ class TestLegacyRefMigration:
         _git_init(tmp_path)
         _seed('v0', set_ref=False)
         head = proc.line('git', 'rev-parse', 'HEAD', log=None)
-        proc.run('git', 'update-ref', refs.LEGACY_REMOTE_REF, head, log=None)
+        proc.run('git', 'update-ref', refs.LEGACY_REMOTE_REFS[0], head, log=None)
 
         assert refs.read_remote_ref() == head
-        assert refs.REMOTE_REF == 'refs/remotes/github/remote'
-        assert proc.line('git', 'rev-parse', '--verify', '-q', refs.LEGACY_REMOTE_REF,
+        assert refs.REMOTE_REF == 'refs/remotes/github'
+        assert proc.line('git', 'rev-parse', '--verify', '-q', refs.LEGACY_REMOTE_REFS[0],
                          err_ok=True, log=None) in (None, '')
         # The whole point of the move: movements are now recorded.
         refs.set_remote_ref(head)

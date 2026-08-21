@@ -17,11 +17,64 @@ from ..config import get_pr_info_from_path
 from ..files import read_description_from_git, get_expected_description_filename, process_images_in_description
 from ..gist import add_gist_footer, create_gist, GIST_URL_WITH_USER_PATTERN, DEFAULT_GIST_REMOTE, find_gist_remote
 from ..patterns import extract_title_from_first_line
-from ..refs import REMOTE_REF, set_remote_ref
+from ..refs import REMOTE_REF, read_remote_ref, set_remote_ref
 from ..render import render_comment_diff, render_unified_diff
 
 
 _GHPR_FILE_GLOBS = ['DESCRIPTION.md', '*#*.md', '[0-9]*.md', 'new*.md', 'z-*.md']
+
+
+def _gate_upstream(
+    owner: str,
+    repo: str,
+    number: str,
+    item_type: str,
+    no_comments: bool,
+    dry_run: bool,
+) -> None:
+    """Refuse to push a HEAD that doesn't contain GitHub's current state.
+
+    `push` overwrites the item's description and comment bodies wholesale, so
+    pushing over a remote edit HEAD never incorporated silently reverts it. This
+    is git's non-fast-forward rule, and it is deliberately stated the same way:
+    the test is "is the remote-tracking ref an ancestor of HEAD", *not* "did this
+    fetch see anything new". The latter clears itself the moment the fetch is
+    recorded, so a second `push` would sail through and do the damage the first
+    one refused — which is exactly what it did before this was fixed.
+
+    Every reconcile makes the ref an ancestor, so `pull` (rebase, merge, or
+    overwrite alike) is the fix, and `-G` is the override.
+
+    A refusal still advances the ref: the fetch is an observation, and recording
+    it is what makes `git diff HEAD <ref>` show the change that caused the
+    refusal. `pull` reconciles off the same ancestry question, so the advance
+    can't strand local work.
+
+    Bootstrap pushes are deliberately ungated — with no recorded base there is
+    nothing to compare against, and `push` *is* the "local wins" resolution that
+    `bootstrap_is_ambiguous` names.
+    """
+    from .fetch import build_snapshot
+
+    base = read_remote_ref()
+    if base is None:
+        return
+    snap = build_snapshot(owner, repo, number, item_type, base, no_comments, keep=not dry_run)
+    if snap.changed and not dry_run:
+        set_remote_ref(snap.sha)
+    if proc.check('git', 'merge-base', '--is-ancestor', snap.sha, 'HEAD', log=None):
+        return
+    if dry_run:
+        # Report and keep going: the diff `-n` exists to show is still worth printing.
+        err(f"[DRY-RUN] HEAD does not contain the current {snap.item_label} state "
+            f"({snap.summary()}) — a real push would refuse (see `ghpr push -G`)")
+        return
+    err(f"Error: HEAD does not contain the current {snap.item_label} state: {snap.summary()}")
+    err(f"Pushing now would overwrite it. {REMOTE_REF} holds what was just observed:")
+    err(f"  Inspect:    git diff HEAD {REMOTE_REF}")
+    err("  Reconcile:  ghpr pull      (then re-run push)")
+    err("  Override:   ghpr push -G   (push anyway, discarding the remote change)")
+    exit(1)
 
 
 def _warn_uncommitted_ghpr_files() -> list[str]:
@@ -70,6 +123,7 @@ def push(
     gist_private: bool | None,
     no_comments: bool,
     force_others: bool,
+    no_gate: bool = False,
 ) -> None:
     """Push local description and comments to the PR/Issue."""
 
@@ -97,6 +151,9 @@ def push(
         _, item_type = get_item_metadata(owner, repo, number)
 
     item_label = 'issue' if item_type == 'issue' else 'PR'
+
+    if not no_gate:
+        _gate_upstream(owner, repo, number, item_type, no_comments, dry_run)
 
     # Read the current description file (from HEAD, not working directory)
     desc_content, desc_file = read_description_from_git('HEAD')
@@ -694,6 +751,7 @@ def register(cli):
 
     @cli.command()
     @flag('-C', '--force-others', help='Allow pushing edits to other users\' comments (may fail at API level)')
+    @flag('-G', '--no-gate', help='Push even if GitHub changed since the last fetch (discards the remote change)')
     @flag('--no-comments', help='Skip pushing comment changes')
     @opt('-p/-P', '--private/--public', 'gist_private', default=None, help='Gist visibility: -p = private, -P = public (default: match repo visibility)')
     @flag('-i', '--images', help='Upload local images and replace references')
@@ -702,6 +760,6 @@ def register(cli):
     @opt('-f', '--footer', count=True, help='Footer level: -f = hidden footer, -ff = visible footer')
     @flag('-n', '--dry-run', help='Show what would be done without making changes')
     @flag('-g', '--gist', help='Also sync to gist')
-    def push_cmd(force_others, no_comments, gist_private, images, open_browser, no_footer, footer, dry_run, gist):
+    def push_cmd(force_others, no_gate, no_comments, gist_private, images, open_browser, no_footer, footer, dry_run, gist):
         """Push local changes to GitHub PR/Issue and gist."""
-        push(gist, dry_run, footer, no_footer, open_browser, images, gist_private, no_comments, force_others)
+        push(gist, dry_run, footer, no_footer, open_browser, images, gist_private, no_comments, force_others, no_gate)

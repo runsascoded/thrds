@@ -1,4 +1,4 @@
-"""Fetch command - snapshot GitHub state into `refs/remotes/github/remote`.
+"""Fetch command - snapshot GitHub state into `refs/remotes/github`.
 
 `fetch` is the read-only half of `pull`: it materializes GitHub's current
 description / comments / review threads as a commit and advances
@@ -251,7 +251,9 @@ def fetch(dry_run: bool, no_comments: bool) -> Snapshot:
         exit(1)
     if not snap.changed:
         err(f"Already up to date with {snap.item_label}")
-        if bootstrap:
+        if bootstrap and not dry_run:
+            # The guess was confirmed by the fetch, so it's safe to adopt —
+            # but adopting is still a write, and `-n` doesn't write.
             set_remote_ref(base)
         return snap
     if dry_run:
@@ -269,5 +271,5 @@ def register(cli):
     @flag('--no-comments', help='Skip fetching comments and review threads')
     @flag('-n', '--dry-run', help='Show what would be fetched, without moving the ref')
     def fetch_cmd(no_comments, dry_run):
-        """Snapshot GitHub state into `refs/remotes/github/remote`, without touching the working tree."""
+        """Snapshot GitHub state into `refs/remotes/github`, without touching the working tree."""
         fetch(dry_run, no_comments)

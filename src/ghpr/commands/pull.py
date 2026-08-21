@@ -1,4 +1,11 @@
-"""Pull command - fetch GitHub state, reconcile the local branch, push back."""
+"""Pull command - fetch GitHub state, reconcile the local branch, mirror to the gist.
+
+`pull` does **not** write back to GitHub. Sending local state to the item is
+`push`'s job, exclusively — the same split git makes, and the reason `push` can
+gate on a stale upstream without double-fetching. `ghpr sync` is the round trip.
+"""
+
+import webbrowser
 
 from click import Choice
 from utz import proc, err
@@ -19,6 +26,11 @@ def _wt_dirty() -> list[str]:
     return proc.lines('git', 'status', '--porcelain', '--untracked-files=no', log=None) or []
 
 
+def _needs_reconcile(sha: str) -> bool:
+    """True when the branch isn't already sitting on top of the remote state."""
+    return not proc.check('git', 'merge-base', '--is-ancestor', sha, 'HEAD', log=None)
+
+
 def _resolve_mode(mode: str | None) -> str:
     if not mode:
         mode = proc.line('git', 'config', 'ghpr.pullMode', err_ok=True, log=None) or 'rebase'
@@ -31,8 +43,8 @@ def _resolve_mode(mode: str | None) -> str:
 def _reconcile(base: str, sha: str, mode: str) -> None:
     """Bring the checked-out branch onto the newly fetched remote state.
 
-    `base` is the previous `github/remote`, so `base..HEAD` is exactly the set
-    of local commits GitHub hasn't seen — the commits that must survive.
+    `base` is the previous `github` ref, so `base..HEAD` is exactly the set of
+    local commits GitHub hasn't seen — the commits that must survive.
     """
     n_local = int(proc.line('git', 'rev-list', '--count', f'{base}..HEAD', log=None))
     branch = _current_branch()
@@ -64,19 +76,38 @@ def _reconcile(base: str, sha: str, mode: str) -> None:
         err(f"Rebased {branch} onto remote state")
 
 
+def mirror_to_gist(
+    owner: str,
+    repo: str,
+    number: str,
+    gist: bool,
+    gist_private: bool | None,
+) -> None:
+    """Bring the gist read replica back in line with HEAD, after a reconcile.
+
+    The gist mirrors local state, so a reconcile that moved HEAD leaves it
+    stale. Only ever an update here: creating the first gist is `-g`'s job (or
+    `push`'s), since that also implies a footer edit on the GitHub body.
+    """
+    from .push import sync_to_gist
+    from ..files import read_description_from_git
+
+    has_gist = bool(proc.line('git', 'config', 'pr.gist', err_ok=True, log=None))
+    if not (gist or has_gist):
+        return
+    desc_content, _ = read_description_from_git('HEAD')
+    sync_to_gist(owner, repo, number, desc_content or '', gist_private=gist_private)
+
+
 def pull(
     gist: bool,
     dry_run: bool,
-    footer: bool | None,
     open_browser: bool,
     gist_private: bool | None,
     no_comments: bool,
     mode: str | None = None,
 ) -> None:
-    """Fetch the latest from GitHub, reconcile locally, then push back."""
-    # Import push here to avoid circular dependency
-    from . import push as push_module
-
+    """Fetch the latest from GitHub and reconcile it into the local branch."""
     mode = _resolve_mode(mode)
     owner, repo, number, item_type = resolve_item()
     base, bootstrap = resolve_base()
@@ -88,25 +119,41 @@ def pull(
     if bootstrap and bootstrap_is_ambiguous(snap, mode):
         exit(1)
 
-    if not snap.changed:
-        if bootstrap and not dry_run:
-            set_remote_ref(base)
-        err(f"No changes from {label}")
-    elif dry_run:
-        err(f"[DRY-RUN] Would fetch from {label}: {snap.summary()}")
-        proc.run('git', '--no-pager', 'diff', base, snap.sha, log=None)
-        n_local = int(proc.line('git', 'rev-list', '--count', f'{base}..HEAD', log=None))
-        err(f"[DRY-RUN] Would {mode} {n_local} local commit(s) onto the fetched state")
-    else:
+    if dry_run:
+        if snap.changed:
+            err(f"[DRY-RUN] Would fetch from {label}: {snap.summary()}")
+            proc.run('git', '--no-pager', 'diff', base, snap.sha, log=None)
+        else:
+            err(f"No changes from {label}")
+        if _needs_reconcile(snap.sha):
+            n_local = int(proc.line('git', 'rev-list', '--count', f'{snap.sha}..HEAD', log=None))
+            err(f"[DRY-RUN] Would {mode} {n_local} local commit(s) onto the fetched state")
+        return
+
+    if snap.changed:
         set_remote_ref(snap.sha)
         err(f"Fetched from {label}: {snap.summary()}")
-        _reconcile(base, snap.sha, mode)
+    else:
+        if bootstrap:
+            set_remote_ref(base)
+        err(f"No changes from {label}")
 
-    # Now push our version back
-    err(f"Pushing to {label}...")
-    # Convert pull's footer boolean to push's footer count
-    footer_count = 1 if footer else 0 if footer is False else 0
-    push_module.push(gist, dry_run, footer_count, no_footer=False, open_browser=open_browser, images=False, gist_private=gist_private, no_comments=no_comments, force_others=False)
+    # Reconcile off the ref's position, not off what this fetch happened to see:
+    # a `push` gate refusal advances the ref without moving HEAD, so "the fetch
+    # found nothing new" and "the branch is up to date" are different questions.
+    if not _needs_reconcile(snap.sha):
+        return
+    # `snap.sha == base` when the fetch found nothing, so this is `--onto base base`:
+    # a no-op replay of the same `base..HEAD` commits, which is exactly right.
+    _reconcile(base, snap.sha, mode)
+    mirror_to_gist(owner, repo, number, gist, gist_private)
+
+    if open_browser:
+        item_url = proc.line('git', 'config', 'pr.url', err_ok=True, log=None)
+        if not item_url:
+            path_part = 'pull' if item_type == 'pr' else 'issues'
+            item_url = f'https://github.com/{owner}/{repo}/{path_part}/{number}'
+        webbrowser.open(item_url)
 
 
 def register(cli):
@@ -117,9 +164,8 @@ def register(cli):
     @opt('-p/-P', '--private/--public', 'gist_private', default=None, help='Gist visibility: -p = private, -P = public (default: match repo visibility)')
     @flag('-o', '--open', 'open_browser', help='Open PR in browser after pulling')
     @opt('-m', '--mode', type=Choice(MODES), default=None, help='Reconcile local commits with fetched state (default: `git config ghpr.pullMode`, else rebase)')
-    @opt('-f/-F', '--footer/--no-footer', default=None, help='Add gist footer to PR (default: auto - add if gist exists)')
     @flag('-n', '--dry-run', help='Show what would be done')
-    @flag('-g', '--gist', help='Also sync to gist')
-    def pull_cmd(no_comments, gist_private, open_browser, mode, footer, dry_run, gist):
-        """Pull latest PR/Issue description and comments from GitHub."""
-        pull(gist, dry_run, footer, open_browser, gist_private, no_comments, mode)
+    @flag('-g', '--gist', help='Create the gist mirror if it does not exist yet')
+    def pull_cmd(no_comments, gist_private, open_browser, mode, dry_run, gist):
+        """Fetch GitHub state and reconcile it into the local branch (does not push)."""
+        pull(gist, dry_run, open_browser, gist_private, no_comments, mode)
