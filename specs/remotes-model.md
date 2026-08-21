@@ -67,6 +67,10 @@ The `slack/remote` → `slack/upstream` proposal went to ghpr's session, which a
 
 The platform prefix is gone entirely: a session is single-platform (stamped at init), so it was namespace noise. ghpr's own `github/remote` stays put for now — theirs genuinely is one remote's state, so it's a cosmetic wart on their side, and they migrated that namespace once already this week.
 
+## Observations are now write-free (2026-08-21)
+
+The one leak in "fetch touches nothing": staging/prod pulls download `emoji-*` files into the session dir as a side effect of custom-emoji substitution. Fixed via `download_emoji=False` on the pull methods — the substituted text only depends on the deterministic filename (`emoji-<name>.<ext>` from the workspace URL), not on the file existing, so an observation renders byte-identically to what `pull` would write while writing nothing. `remotes.observe` (feeding `fetch` and the push/promote gates) and `diff` pass it; `pull` still downloads, since it writes and commits the files anyway. Divergence window: a download that would *fail* leaves `pull`'s text literal where an observation substituted — transient, and the next pull surfaces it as an honest delta.
+
 ## Chrome is a per-remote property (2026-08-21, Ryan)
 
 > we should be able to configure msg "chrome" on a per-remote basis, e.g.: slck: staging-channel msgs get footer MD, prod msgs don't; gthb: "item" remotes get (in)visible footer Gist link; dscrd: maybe same as slck

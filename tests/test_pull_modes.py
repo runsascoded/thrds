@@ -37,10 +37,10 @@ class PullSpy:
     def list_channels_by_name(self) -> dict[str, str]:
         return {}
 
-    def pull_threads_staging(self, state, session_dir=None, slugs=None):
+    def pull_threads_staging(self, state, session_dir=None, slugs=None, download_emoji=True):
         return list(self.returns.values())
 
-    def pull_promoted_threads(self, state, session_dir=None, slugs=None):
+    def pull_promoted_threads(self, state, session_dir=None, slugs=None, download_emoji=True):
         return list(self.prod_returns.values())
 
     def pull_chrome_edits(self, state, filenames=None):

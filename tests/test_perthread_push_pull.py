@@ -52,14 +52,14 @@ class SyncSpy:
             deleted_slugs=[],
         )
 
-    def pull_threads_staging(self, state, session_dir=None, slugs=None):
+    def pull_threads_staging(self, state, session_dir=None, slugs=None, download_emoji=True):
         self.pull_calls.append(state.staging_channel)
         return self.pull_returns
 
     def pull_chrome_edits(self, state, filenames=None):
         return {}
 
-    def pull_promoted_threads(self, state, session_dir=None, slugs=None):
+    def pull_promoted_threads(self, state, session_dir=None, slugs=None, download_emoji=True):
         return self.prod_returns
 
     def adopt_new_staging_threads(self, state, session_dir):

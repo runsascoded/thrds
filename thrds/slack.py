@@ -1952,6 +1952,7 @@ class SlackClient:
         doc: Doc,
         state: SessionState,
         session_dir: Path,
+        download: bool = True,
     ) -> Doc:
         """Substitute custom `:name:` refs → `![:name:](emoji-<name>.<ext>)`.
 
@@ -1960,6 +1961,12 @@ class SlackClient:
         cached. Missing names (not in workspace or fetch failed) pass
         through as literal ``:name:``. Mutates ``state.workspace_emoji``;
         caller saves.
+
+        ``download=False`` computes the same substitution (the filename is
+        deterministic given the workspace URL) but writes nothing to
+        ``session_dir`` — for read-only observations (`fetch`, `diff`, the
+        push/promote gates), which must render the same text `pull` would
+        write while touching no files.
 
         `emoji.list` is fetched at most once per call, and only when an
         unknown shortcode is seen. State cache holds across sessions. If
@@ -2004,7 +2011,7 @@ class SlackClient:
                     ext = 'png'  # sane fallback
                 filename = f'emoji-{name}.{ext}'
                 dest = session_dir / filename
-                if not dest.exists():
+                if download and not dest.exists():
                     try:
                         self._download_url(url, dest)
                     except Exception as e:
@@ -2038,6 +2045,7 @@ class SlackClient:
         state: SessionState,
         session_dir: Path | None = None,
         slugs: Iterable[str] | None = None,
+        download_emoji: bool = True,
     ) -> list[DocThread]:
         """Fetch each per-thread draft's current state from the staging PC.
 
@@ -2062,7 +2070,7 @@ class SlackClient:
         only = None if slugs is None else set(slugs)
         doc = self._pull_doc(state.staging_channel, None, roots, only=only)
         if session_dir is not None:
-            doc = self._resolve_custom_emoji(doc, state, session_dir)
+            doc = self._resolve_custom_emoji(doc, state, session_dir, download=download_emoji)
         return doc.threads
 
     def pull_promoted_threads(
@@ -2070,6 +2078,7 @@ class SlackClient:
         state: SessionState,
         session_dir: Path | None = None,
         slugs: Iterable[str] | None = None,
+        download_emoji: bool = True,
     ) -> list[DocThread]:
         """Fetch each promoted thread's current PROD state (its own messages only).
 
@@ -2107,7 +2116,7 @@ class SlackClient:
             ))
         doc = Doc(threads=out)
         if session_dir is not None:
-            doc = self._resolve_custom_emoji(doc, state, session_dir)
+            doc = self._resolve_custom_emoji(doc, state, session_dir, download=download_emoji)
         return doc.threads
 
     def _resolve_chrome_channel(self, chrome: Chrome) -> str | None:

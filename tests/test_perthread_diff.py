@@ -38,11 +38,11 @@ class PullSpy:
             t for s, t in canned.items() if s in set(slugs)
         ]
 
-    def pull_threads_staging(self, state, session_dir=None, slugs=None):
+    def pull_threads_staging(self, state, session_dir=None, slugs=None, download_emoji=True):
         self.slug_calls.append(None if slugs is None else list(slugs))
         return self._filter(self.returns, slugs)
 
-    def pull_promoted_threads(self, state, session_dir=None, slugs=None):
+    def pull_promoted_threads(self, state, session_dir=None, slugs=None, download_emoji=True):
         return self._filter(self.prod_returns, slugs)
 
 

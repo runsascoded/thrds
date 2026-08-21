@@ -1286,16 +1286,22 @@ def _diff_threads(
             err('No staged threads to diff.')
             return
 
+    # `diff` is read-only: emoji substitution runs off the deterministic
+    # filenames without downloading anything.
     threads = {
         t.slug: t
-        for t in client.pull_threads_staging(state, session_dir=session_dir, slugs=wanted)
+        for t in client.pull_threads_staging(
+            state, session_dir=session_dir, slugs=wanted, download_emoji=False,
+        )
     }
     # Same precedence `pull` applies: for a promoted thread prod is canonical
     # and overrides the frozen staging copy. Diffing against staging instead
     # would report a hand-edit made at the target as a change `pull` would undo.
     threads.update({
         t.slug: t
-        for t in client.pull_promoted_threads(state, session_dir=session_dir, slugs=wanted)
+        for t in client.pull_promoted_threads(
+            state, session_dir=session_dir, slugs=wanted, download_emoji=False,
+        )
     })
     bases = _base_texts(session_dir)
     hinted = False

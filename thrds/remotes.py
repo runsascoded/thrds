@@ -72,6 +72,10 @@ def observe(
     A thread whose OP was deleted comes back with no messages; it's *absent*
     rather than present-and-empty, so a fetch records the file going away
     instead of a lone blank line. ``slugs`` scopes the read to those threads.
+
+    An observation touches no files: custom emoji are substituted by their
+    deterministic filenames without being downloaded (``download_emoji=False``),
+    so the rendered text still matches what `pull` would write.
     """
     names = {tf.slug: tf.name for tf in thread_files(session_dir)}
     pull = (
@@ -80,7 +84,7 @@ def observe(
     )
     return {
         names.get(t.slug, f'{t.slug}.md'): serialize_thread(t)
-        for t in pull(state, session_dir=session_dir, slugs=slugs)
+        for t in pull(state, session_dir=session_dir, slugs=slugs, download_emoji=False)
         if t.messages
     }
 
