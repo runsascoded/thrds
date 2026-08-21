@@ -46,3 +46,13 @@ Structurally no — per-remote tracking refs, per-remote write gates, push-from-
 4. **`fetch` is all-or-nothing.** Justified originally by composite coherence, but the composite can rebuild from stored refs without API reads (the promote verify already does exactly this), so per-remote fetch becomes legitimate whenever named remotes land. The constraint is an implementation convenience, not a semantic one.
 
 Bootstrap-outs message wording (`slck push` = local wins) is push/staging-scoped and would generalize to "push/promote to the disagreeing remote" — cosmetic.
+
+## Step 1 landed: the resolution layer + per-remote fetch (2026-08-21)
+
+`thrds/remotes.py` is now the seam between verbs and roles: `Remote(name, role, channel)` with `resolve(state)` deriving the default topology (staging from `staging_channel`; prod as the per-thread-targets role) in composite-merge order — prod last, which states the "prod is canonical for a posted thread" rule exactly once. `observe(remote, …)` is the one place that knows how a role is read, replacing four duplicated render-observed blocks in `cli.py`.
+
+- **Friction 3 (hardcoded roles) resolved at the helper layer.** `_gate_push`/`_verify_push`/`_gate_promote`/`_verify_promote`/`_update_remote_file` all take a `Remote`; only the *verbs* still choose one (`push` → staging, `promote` → prod), which is the model's own "default topology" claim. Their error messages interpolate `remote.name`, so today's output is byte-identical.
+- **Friction 4 (all-or-nothing fetch) resolved.** `slck fetch [staging|prod]...` reads only the named remotes; a skipped remote keeps its ref un-advanced and feeds the composite from its stored tree (`_merged_observations` — the same no-API rebuild the promote verify already did). Guard: a skipped remote that *has threads but no ref yet* is refused, because with nothing stored its threads would be misrecorded as deleted in the composite.
+- **`fetch remote` is refused by name** with a pointer that the composite is derived, refreshed on every fetch.
+
+**Config section deferred, deliberately.** A `remotes:` section in `thrds.json` that names remotes the readers can't honor would be config that lies: a second staging-role remote needs its own slug → ts map (per-remote thread pointers) and channel-parameterized pulls in `slack.py`. That data-model work is the real prerequisite for both the config section and `push [<remote>]`/`pull [<remote>]` args, so those land together, after it.

@@ -178,6 +178,14 @@ def tree_names(session_dir: Path, tree: str) -> tuple[str, ...]:
     return tuple(out.splitlines()) if out else ()
 
 
+def tree_files(session_dir: Path, rev: str) -> dict[str, str]:
+    """``{name: content}`` for every file in ``rev``'s (flat) tree."""
+    return {
+        name: read_tree_file(session_dir, rev, name)
+        for name in tree_names(session_dir, rev)
+    }
+
+
 def config_get(session_dir: Path, key: str) -> str | None:
     """``git config <key>``, or None when unset."""
     r = subprocess.run(

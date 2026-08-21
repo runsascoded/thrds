@@ -59,7 +59,7 @@ class SyncSpy:
     def pull_chrome_edits(self, state, filenames=None):
         return {}
 
-    def pull_promoted_threads(self, state, session_dir=None):
+    def pull_promoted_threads(self, state, session_dir=None, slugs=None):
         return self.prod_returns
 
     def adopt_new_staging_threads(self, state, session_dir):

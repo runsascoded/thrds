@@ -287,3 +287,101 @@ def test_ambiguous_bootstrap_withholds_the_composite(session, spy):
     assert _git(session, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/') == (
         'slack/prod\nslack/staging'
     )
+
+
+# --- per-remote fetch (`slck fetch <remote>...`) ---
+
+
+def _bootstrap_and_promote(session: Path, spy) -> None:
+    """Confirmed bootstrap, then alpha posted with its prod state recorded."""
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    _run()
+    _promote(session, 'alpha')
+    spy.prod_returns = {'alpha': thread('alpha', 'Live prod copy.')}
+    _run()
+
+
+def test_fetch_staging_leaves_prod_and_its_composite_share_alone(session, spy):
+    _bootstrap_and_promote(session, spy)
+    prod_before = _git(session, 'rev-parse', PROD)
+    spy.returns['beta'] = thread('beta', 'Beta OP, edited in Slack.')
+    # A prod read now would report alpha gone; if `fetch staging` made one,
+    # the assertions below would see alpha vanish from prod and the composite.
+    spy.prod_returns = {}
+    result = _run('staging')
+    assert result.exit_code == 0
+    assert result.stderr.splitlines() == [
+        'slack/staging: 1 file (02-beta.md)',
+        'slack/prod: skipped (last observation kept)',
+        'slack/remote: 1 file (02-beta.md)',
+    ]
+    assert _git(session, 'rev-parse', PROD) == prod_before
+    assert _git(session, 'show', f'{REMOTE}:01-alpha.md') == 'Live prod copy.'
+    assert _git(session, 'show', f'{REMOTE}:02-beta.md') == 'Beta OP, edited in Slack.'
+
+
+def test_fetch_prod_leaves_staging_and_its_composite_share_alone(session, spy):
+    _bootstrap_and_promote(session, spy)
+    staging_before = _git(session, 'rev-parse', STAGING)
+    spy.prod_returns = {'alpha': thread('alpha', 'Live, hand-edited.')}
+    # A staging read now would report every draft gone.
+    spy.returns = {}
+    result = _run('prod')
+    assert result.exit_code == 0
+    assert result.stderr.splitlines() == [
+        'slack/staging: skipped (last observation kept)',
+        'slack/prod: 1 file (01-alpha.md)',
+        'slack/remote: 1 file (01-alpha.md)',
+    ]
+    assert _git(session, 'rev-parse', STAGING) == staging_before
+    assert _git(session, 'show', f'{REMOTE}:01-alpha.md') == 'Live, hand-edited.'
+    assert _git(session, 'show', f'{REMOTE}:02-beta.md') == 'Beta OP.'
+
+
+def test_unknown_remote_is_refused(session, spy):
+    result = _run('bogus')
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        'Error: unknown remote(s): bogus; this session has: staging, prod.'
+    )
+
+
+def test_the_composite_is_not_fetchable_by_name(session, spy):
+    result = _run('remote')
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        "Error: unknown remote(s): remote; this session has: staging, prod. "
+        "('remote' is the derived merge base — it refreshes on every fetch, "
+        "not by name)"
+    )
+
+
+def test_partial_fetch_refuses_when_the_skipped_remote_was_never_fetched(session, spy):
+    """A never-fetched remote that has threads can't be skipped: with no
+    stored ref, its threads would be misrecorded as deleted in the composite."""
+    _promote(session, 'alpha')
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    result = _run('staging')
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        'Error: slack/prod has threads but has never been fetched; skipping '
+        'it would misrecord them as deleted in the composite. Run a full '
+        '`slck fetch` first.'
+    )
+    assert _git(session, 'for-each-ref', 'refs/remotes/') == ''
+
+
+def test_partial_fetch_proceeds_when_the_skipped_remote_holds_nothing(session, spy):
+    """No posted threads = an unset prod ref and an empty prod are the same
+    fact; nothing is at risk of being misrecorded."""
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    result = _run('staging')
+    assert result.exit_code == 0
+    assert result.stderr.splitlines() == [
+        'slack/staging: initialized (2 files)',
+        'slack/prod: skipped (never fetched)',
+        'slack/remote: initialized (3 files)',
+    ]
+    assert _git(session, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/') == (
+        'slack/remote\nslack/staging'
+    )
