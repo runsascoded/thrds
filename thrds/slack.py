@@ -46,8 +46,10 @@ from .refs import (
     thread_has_refs,
     validate_refs,
 )
+from .remotes import Remote
 from .richtext import render as render_rich_text, rich_text_enabled
 from .state import SessionState, ThreadEntry, ThreadTarget
+from .tracking import STAGING
 from .threadfile import (
     SLUG_RE,
     dedupe_thread_filename,
@@ -2040,81 +2042,75 @@ class SlackClient:
             ],
         )
 
-    def pull_threads_staging(
+    def pull_thread_states(
         self,
+        remote: Remote,
         state: SessionState,
         session_dir: Path | None = None,
         slugs: Iterable[str] | None = None,
         download_emoji: bool = True,
     ) -> list[DocThread]:
-        """Fetch each per-thread draft's current state from the staging PC.
+        """Fetch each thread's current state at one remote, in slug order.
 
-        The per-thread-model counterpart to :meth:`pull_doc_staging`, keyed off
-        ``state.threads[slug].staging_ts``. Returns threads in slug order;
-        callers write each back to its own ``NN-slug.md``, which is what makes
-        an edit (or a *deletion*) made in Slack land as a version of that one
-        message rather than as a change to a shared doc.
+        The remote-parameterized reader (`specs/remotes-model.md`): which
+        threads to read, and from which channel, comes from each thread's
+        pointer at ``remote.name`` — so a second staging-role remote reads its
+        own pointers rather than being a declared fiction. What "read" means
+        is the role's behavior:
 
-        ``slugs`` limits the fetch to those threads — ``diff <slug>`` shouldn't
-        cost one API round trip per unrelated draft in the session.
-        """
-        if state.staging_channel is None:
-            raise ValueError(
-                "No staging channel — the session hasn't pushed a staging Doc yet."
-            )
-        roots = {
-            slug: e.staging_ts
-            for slug, e in sorted(state.threads.items())
-            if e.staging_ts is not None
-        }
-        only = None if slugs is None else set(slugs)
-        doc = self._pull_doc(state.staging_channel, None, roots, only=only)
-        if session_dir is not None:
-            doc = self._resolve_custom_emoji(doc, state, session_dir, download=download_emoji)
-        return doc.threads
-
-    def pull_promoted_threads(
-        self,
-        state: SessionState,
-        session_dir: Path | None = None,
-        slugs: Iterable[str] | None = None,
-        download_emoji: bool = True,
-    ) -> list[DocThread]:
-        """Fetch each promoted thread's current PROD state (its own messages only).
-
-        Staging pull covers drafts; once a thread is promoted, its canonical
-        copy lives at the target, where it can be hand-edited after the fact.
-        This reads each posted slug's recorded messages (``posted_msg_ts``,
-        falling back to ``posted_ts``) from the target channel so the local
-        file — and the gist mirror — track the prod record. Staging copies
-        are deliberately left alone: a promoted thread's staged copy is a
-        frozen artifact of the drafting phase, not a second source of truth.
+        - **staging role**: observe the whole channel — every thread with a
+          root there, foreign replies included. We own the channel, and a
+          Slack-side edit (or deletion) must land as a version of that one
+          thread's file.
+        - **prod role**: read only threads whose *upstream* is this remote
+          (a reopened thread is being revised in staging — its frozen prod
+          copy is deliberately not pulled over the revision), and only *our
+          own* messages there (``msg_ts``, falling back to the root ``ts``
+          for entries predating the whitelist): the target is shared, and
+          foreign replies are not ours to sync.
 
         ``slugs`` limits the fetch, for callers scoped to one thread.
         """
         only = None if slugs is None else set(slugs)
-        out: list[DocThread] = []
-        for slug, entry in sorted(state.threads.items()):
-            if entry.state != 'posted' or entry.target is None:
-                continue
-            if only is not None and slug not in only:
-                continue
-            own = set(entry.posted_msg_ts or ([entry.posted_ts] if entry.posted_ts else []))
-            root = entry.target.thread_ts or entry.posted_ts
-            if not own or root is None:
-                continue
-            prev_channel, self.channel = self.channel, entry.target.channel
-            try:
-                msgs = [m for m in self.list_messages(root) if m.id in own]
-            finally:
-                self.channel = prev_channel
-            if not msgs:
-                continue
-            out.append(DocThread(
-                slug=slug,
-                messages=[DocMessage(content=m.content) for m in msgs],
-            ))
-        doc = Doc(threads=out)
+        if remote.role == STAGING:
+            if remote.channel is None:
+                raise ValueError(
+                    f"No channel for remote {remote.name!r} — the session "
+                    f"hasn't pushed a staging Doc yet."
+                )
+            roots = {
+                slug: p.ts
+                for slug, e in sorted(state.threads.items())
+                if (p := e.remotes.get(remote.name)) is not None and p.ts is not None
+            }
+            doc = self._pull_doc(remote.channel, None, roots, only=only)
+        else:
+            out: list[DocThread] = []
+            for slug, entry in sorted(state.threads.items()):
+                if entry.upstream != remote.name:
+                    continue
+                if only is not None and slug not in only:
+                    continue
+                p = entry.remotes.get(remote.name)
+                if p is None:
+                    continue
+                channel = p.channel or remote.channel
+                own = set(p.msg_ts or ([p.ts] if p.ts else []))
+                root = p.thread_ts or p.ts
+                if not own or root is None or channel is None:
+                    continue
+                prev_channel, self.channel = self.channel, channel
+                try:
+                    msgs = [m for m in self.list_messages(root) if m.id in own]
+                finally:
+                    self.channel = prev_channel
+                if not msgs:
+                    continue
+                out.append(DocThread(
+                    slug=slug,
+                    messages=[DocMessage(content=m.content) for m in msgs],
+                ))
+            doc = Doc(threads=out)
         if session_dir is not None:
             doc = self._resolve_custom_emoji(doc, state, session_dir, download=download_emoji)
         return doc.threads

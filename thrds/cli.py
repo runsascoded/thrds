@@ -1118,7 +1118,10 @@ def slack_pull(channel: str | None, mode: str | None, dry_run: bool, prod: bool,
                     f"{', '.join(dirty)}. Commit them (or `-m overwrite`)."
                 )
 
-        threads = client.pull_threads_staging(state, session_dir=session_dir)
+        rmts = remotes.resolve(state)
+        threads = client.pull_thread_states(
+            rmts[tracking.STAGING], state, session_dir=session_dir,
+        )
         files = {f.slug: f.name for f in thread_files(session_dir)}
         renames: list[tuple[Path, Path]] = []
         for slug, edit in client.pull_chrome_edits(state, files).items():
@@ -1140,7 +1143,9 @@ def slack_pull(channel: str | None, mode: str | None, dry_run: bool, prod: bool,
         # Promoted threads: prod is canonical (hand-edits happen there), so it
         # overrides whatever the frozen staging copy says. Staging is NOT
         # re-synced to match — the staged copy is a drafting artifact.
-        prod_threads = client.pull_promoted_threads(state, session_dir=session_dir)
+        prod_threads = client.pull_thread_states(
+            rmts[tracking.PROD], state, session_dir=session_dir,
+        )
         for t in prod_threads:
             by_slug[t.slug] = t
             err(f"pulled prod state for {t.slug} (posted)")
@@ -1307,22 +1312,19 @@ def _diff_threads(
             return
 
     # `diff` is read-only: emoji substitution runs off the deterministic
-    # filenames without downloading anything.
-    threads = {
-        t.slug: t
-        for t in client.pull_threads_staging(
-            state, session_dir=session_dir, slugs=wanted, download_emoji=False,
-        )
-    }
-    # Same precedence `pull` applies: for a promoted thread prod is canonical
-    # and overrides the frozen staging copy. Diffing against staging instead
-    # would report a hand-edit made at the target as a change `pull` would undo.
-    threads.update({
-        t.slug: t
-        for t in client.pull_promoted_threads(
-            state, session_dir=session_dir, slugs=wanted, download_emoji=False,
-        )
-    })
+    # filenames without downloading anything. Remotes are read in resolve
+    # order — same precedence `pull` applies: for a promoted thread prod is
+    # canonical and overrides the frozen staging copy, and diffing against
+    # staging instead would report a hand-edit made at the target as a change
+    # `pull` would undo.
+    threads = {}
+    for rmt in remotes.resolve(state).values():
+        threads.update({
+            t.slug: t
+            for t in client.pull_thread_states(
+                rmt, state, session_dir=session_dir, slugs=wanted, download_emoji=False,
+            )
+        })
     bases = _base_texts(session_dir)
     hinted = False
     for slug in wanted:
@@ -1669,7 +1671,7 @@ def _gate_promote(
     For a posted thread, compare the target's current copy of *our* messages
     against the remote ref's record — a difference means someone hand-edited
     the posted message since our last pull, and converging would overwrite it.
-    Foreign replies never trip this: `pull_promoted_threads` reads only our
+    Foreign replies never trip this: the prod-role reader reads only our
     own message ids.
 
     The observation is recorded either way, like `push`'s gate.

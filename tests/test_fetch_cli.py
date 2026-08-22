@@ -38,14 +38,11 @@ class PullSpy:
     def list_channels_by_name(self) -> dict[str, str]:
         return {}
 
-    def pull_threads_staging(self, state, session_dir=None, slugs=None, download_emoji=True):
+    def pull_thread_states(self, remote, state, session_dir=None, slugs=None, download_emoji=True):
         # `fetch` is an observation: it must never ask for emoji downloads.
         assert download_emoji is False
-        return list(self.returns.values())
-
-    def pull_promoted_threads(self, state, session_dir=None, slugs=None, download_emoji=True):
-        assert download_emoji is False
-        return list(self.prod_returns.values())
+        returns = self.returns if remote.name == 'staging' else self.prod_returns
+        return list(returns.values())
 
 
 def thread(slug: str, *contents: str) -> DocThread:

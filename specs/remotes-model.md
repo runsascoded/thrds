@@ -97,7 +97,16 @@ The prerequisite everything else queues behind (config section, `push`/`pull` re
 
 **Why the tracked state file stays (vs ghpr having none)**: it's the multi-machine record — the gist-mirror restoration (2026-08-19 incident) worked because state is tracked and mirrored. ghpr needs none only because its remote topology is implicit in the clone; a gthb session with named remotes / per-item upstreams / chrome config converges *toward* this file, not away from it.
 
-Still open here: the readers step (channel-parameterized pulls), then `remotes:` config with **preset chrome defaults** — resolve-time defaults keyed by (role, platform) so config records only deviations, accepting a preset name as string shorthand or a full mapping.
+### Landed 2026-08-21: the readers step
+
+`pull_threads_staging` / `pull_promoted_threads` are gone; `pull_thread_states(remote, …)` is the one reader, and everything remote-specific comes from the `Remote` and the thread's pointer at `remote.name`. Role is the behavior bundle, stated once:
+
+- **staging role**: observe the whole channel (`remote.channel` — `state.staging_channel` is no longer consulted), every thread with a root pointer there, foreign replies included.
+- **prod role**: read only threads whose **upstream is this remote** — the old `state == 'posted'` gate restated in remotes vocabulary, and it's load-bearing: `reopen` keeps prod pointers while flipping upstream back to staging, so a reopened thread's frozen prod copy is not pulled over the revision in progress. Only *our own* messages (`msg_ts`, falling back to root `ts`); channel from the pointer, falling back to `remote.channel` (a prod-role remote with one fixed target channel now works).
+
+A second staging-role remote (Discord's own-server staging shape) is now real at the reader level — pinned by a unit test that reads a `scratch` remote's own channel via its own pointers. `remotes.observe`, `pull`, and `diff` all go through the one reader (diff iterates remotes in resolve order, which *is* the prod-over-staging precedence).
+
+Still open here: `remotes:` config with **preset chrome defaults** — resolve-time defaults keyed by (role, platform) so config records only deviations, accepting a preset name as string shorthand or a full mapping.
 
 ## Observations are now write-free (2026-08-21)
 

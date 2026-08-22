@@ -78,13 +78,11 @@ def observe(
     so the rendered text still matches what `pull` would write.
     """
     names = {tf.slug: tf.name for tf in thread_files(session_dir)}
-    pull = (
-        client.pull_threads_staging if remote.role == tracking.STAGING
-        else client.pull_promoted_threads
-    )
     return {
         names.get(t.slug, f'{t.slug}.md'): serialize_thread(t)
-        for t in pull(state, session_dir=session_dir, slugs=slugs, download_emoji=False)
+        for t in client.pull_thread_states(
+            remote, state, session_dir=session_dir, slugs=slugs, download_emoji=False,
+        )
         if t.messages
     }
 

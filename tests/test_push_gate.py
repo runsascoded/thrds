@@ -43,11 +43,9 @@ class PushSpy:
     def list_channels_by_name(self) -> dict[str, str]:
         return {}
 
-    def pull_threads_staging(self, state, session_dir=None, slugs=None, download_emoji=True):
-        return list(self.returns.values())
-
-    def pull_promoted_threads(self, state, session_dir=None, slugs=None, download_emoji=True):
-        return list(self.prod_returns.values())
+    def pull_thread_states(self, remote, state, session_dir=None, slugs=None, download_emoji=True):
+        returns = self.returns if remote.name == 'staging' else self.prod_returns
+        return list(returns.values())
 
     def pull_chrome_edits(self, state, filenames=None):
         return {}
