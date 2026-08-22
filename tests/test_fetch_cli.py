@@ -216,7 +216,7 @@ def test_non_git_session_is_refused(tmp_path, monkeypatch, spy):
 
 def test_composite_preserves_files_slack_knows_nothing_about(session, spy):
     """The merge base is HEAD's tree with threads overlaid, not the threads
-    alone. `README.md`, `thrds.json` and `emoji-*.png` have no Slack-side
+    alone. `README.md`, `thrds.yml` and `emoji-*.png` have no Slack-side
     counterpart, and a base that omitted them would have `pull`'s
     `git rebase --onto` delete them — a rebase replays commits onto the new
     tree, so whatever isn't there is gone."""
@@ -226,7 +226,7 @@ def test_composite_preserves_files_slack_knows_nothing_about(session, spy):
     spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
     _run()
     assert sorted(_git(session, 'ls-tree', '--name-only', REMOTE).splitlines()) == [
-        '01-alpha.md', '02-beta.md', 'README.md', 'thrds.json',
+        '01-alpha.md', '02-beta.md', 'README.md', 'thrds.yml',
     ]
     assert _git(session, 'diff', '--name-only', REMOTE, 'HEAD') == ''
 
@@ -242,7 +242,7 @@ def test_composite_drops_a_thread_slack_no_longer_has(session, spy):
     del spy.returns['beta']
     _run()
     assert sorted(_git(session, 'ls-tree', '--name-only', REMOTE).splitlines()) == [
-        '01-alpha.md', 'README.md', 'thrds.json',
+        '01-alpha.md', 'README.md', 'thrds.yml',
     ]
 
 

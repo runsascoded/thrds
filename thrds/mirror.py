@@ -4,7 +4,7 @@ Session dir layout (ghpr-style, per `gh/{number}/`):
 
     <parent-git-root-or-cwd>/thrds/<slug>/    session dir; one per doc
       .git/                                   private git repo (nested is fine)
-      thrds.json                              thrds state (flat: gists reject dirs)
+      thrds.yml                              thrds state (flat: gists reject dirs)
       <slug>.md                               the doc
 
 The nested `.git/` is invisible to any surrounding project's git — parent's
@@ -122,6 +122,13 @@ def amend(session_dir: Path, paths: list[str], message: str | None = None) -> st
     args += ['-m', message] if message is not None else ['--no-edit']
     _run(args, cwd=session_dir)
     return _run(['git', 'rev-parse', 'HEAD'], cwd=session_dir).stdout.strip()
+
+
+def is_tracked(session_dir: Path, path: str) -> bool:
+    """True iff ``path`` is tracked in ``session_dir``'s repo (even if deleted
+    from the working tree — `git add` can then stage the deletion)."""
+    r = _run(['git', 'ls-files', '--', path], cwd=session_dir)
+    return bool(r.stdout.strip())
 
 
 def has_remote(session_dir: Path, name: str) -> bool:

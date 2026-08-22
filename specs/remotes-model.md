@@ -67,7 +67,7 @@ The `slack/remote` → `slack/upstream` proposal went to ghpr's session, which a
 
 The platform prefix is gone entirely: a session is single-platform (stamped at init), so it was namespace noise. ghpr's own `github/remote` stays put for now — theirs genuinely is one remote's state, so it's a cosmetic wart on their side, and they migrated that namespace once already this week.
 
-## Next: per-remote thread pointers (design)
+## Per-remote thread pointers — schema + YAML landed; readers next
 
 The prerequisite everything else queues behind (config section, `push`/`pull` remote args, per-remote chrome). Today `ThreadEntry` hardcodes the two-remote topology in its field names: `staging_ts` is "my ts at the staging remote", and `target`/`posted_ts`/`posted_msg_ts` are "my location and message ids at the prod remote". Generalized:
 
@@ -88,6 +88,16 @@ The prerequisite everything else queues behind (config section, `push`/`pull` re
 - **Migration**: on load, old fields rewrite to `remotes` entries (`staging_ts` → `remotes.staging.ts`, `target`+`posted_*` → `remotes.prod.*`); saved back on the next state write. Old fields dropped after migration — BC shim lives in `__post_init__` only.
 - **Readers become channel-parameterized**: `pull_threads_staging` / `pull_promoted_threads` collapse toward one `pull_thread_states(remote, …)` keyed off each thread's pointers at that remote — which is what makes a second staging-role remote (Discord's own-server staging) or N prod targets real rather than declared.
 - Then the `remotes:` session config section lands honestly, `promote` becomes `push -u prod <thread>` sugar, and audit friction 2 (`prod` ref conflating N targets) resolves per-remote.
+
+### Landed 2026-08-21: the storage half
+
+`ThreadEntry` is now `{state, remotes: {name → RemotePointer(ts, msg_ts, channel, thread_ts, url)}}`; `upstream` is a derived property (`posted` → prod, else staging) rather than stored, so there's one source of truth until a thread can name one of several prods. The pre-pointers names (`staging_ts`, `target`, `posted_*`) survive as constructor kwargs + read/write properties over the map — legacy files load through them, and call sites migrate to remote-parameterized access in the readers step rather than big-bang.
+
+**State file is now `thrds.yml`** (Ryan: YAML "generally seems nicer to read and edit by humans"), and the extension change is the deliberate version boundary: old code can't half-read new state, new code migrates the JSON explicitly — `load` reads either, `save` writes YAML and unlinks the JSON, and `_stage_paths` adds the tracked-but-deleted `thrds.json` to the next commit so the gist records the swap. YAML footgun handled: `safe_dump` quotes number-like strings on the way out, and an unquoted hand-edited ts (which YAML parses as a float, silently losing precision) is **refused on load** with a quoting hint. `None`s are pruned on save (load restores defaults; empty strings/containers are kept — `channel_prefix: ''` ≠ unset).
+
+**Why the tracked state file stays (vs ghpr having none)**: it's the multi-machine record — the gist-mirror restoration (2026-08-19 incident) worked because state is tracked and mirrored. ghpr needs none only because its remote topology is implicit in the clone; a gthb session with named remotes / per-item upstreams / chrome config converges *toward* this file, not away from it.
+
+Still open here: the readers step (channel-parameterized pulls), then `remotes:` config with **preset chrome defaults** — resolve-time defaults keyed by (role, platform) so config records only deviations, accepting a preset name as string shorthand or a full mapping.
 
 ## Observations are now write-free (2026-08-21)
 

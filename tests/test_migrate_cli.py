@@ -22,7 +22,7 @@ def _legacy_session(
     doc: str = "=== a\n\nA body.\n\n=== b\n\nB body.\n",
     **state_kw,
 ) -> SessionState:
-    """Write a legacy single-doc session (doc + thrds.json) into ``tmp``."""
+    """Write a legacy single-doc session (doc + thrds.yml) into ``tmp``."""
     (tmp / 'draft.md').write_text(doc)
     kw = {'doc_path': 'draft.md', 'staging_threads': {'a': '1.1', 'b': '2.2'}}
     kw.update(state_kw)
@@ -140,7 +140,7 @@ def test_migrate_refuses_already_migrated_session(in_tmp):
     result = CliRunner().invoke(cli, ['slack', 'migrate'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        'Error: This session is already on the per-thread model (1 thread(s) in thrds.json).'
+        'Error: This session is already on the per-thread model (1 thread(s) in thrds.yml).'
     )
 
 
@@ -169,7 +169,7 @@ def test_migrate_reports_unslugged_thread(in_tmp):
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
         "Error: Cannot migrate: thread(s) at position [1] have no `=== slug`; "
-        "a slug is the thread's filename and its identity in `thrds.json` — "
+        "a slug is the thread's filename and its identity in `thrds.yml` — "
         "add one to each before migrating"
     )
 
@@ -207,5 +207,5 @@ def test_migrate_twice_refuses_second_time(in_tmp):
     second = CliRunner().invoke(cli, ['slack', 'migrate'])
     assert second.exit_code == 2
     assert second.stderr.splitlines()[-1] == (
-        'Error: This session is already on the per-thread model (2 thread(s) in thrds.json).'
+        'Error: This session is already on the per-thread model (2 thread(s) in thrds.yml).'
     )

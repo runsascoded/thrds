@@ -145,8 +145,8 @@ def test_plan_rewrites_state_into_per_thread_shape(repo):
 def test_plan_carries_staging_ts_into_thread_entries(repo):
     plans, _ = plan_replay(repo, 'HEAD', 'draft.md')
     state = json.loads(plans[2].new_files['thrds.json'])
-    assert state['threads']['a']['staging_ts'] == '1.1'
-    assert state['threads']['c']['staging_ts'] is None
+    assert state['threads']['a']['remotes']['staging']['ts'] == '1.1'
+    assert state['threads']['c']['remotes'] == {}
 
 
 def test_plan_unknown_ref_raises(repo):

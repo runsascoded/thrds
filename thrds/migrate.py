@@ -181,7 +181,7 @@ def plan_migration(
     if unslugged:
         raise ValueError(
             f"Cannot migrate: thread(s) at position {unslugged} have no `=== slug`; "
-            f"a slug is the thread's filename and its identity in `thrds.json` — "
+            f"a slug is the thread's filename and its identity in `thrds.yml` — "
             f"add one to each before migrating"
         )
 

@@ -263,7 +263,7 @@ def test_reorder_handles_a_swap(session):
 
 
 def test_reorder_leaves_state_untouched(session):
-    """`thrds.json` is keyed by slug, so staging pointers follow their thread."""
+    """`thrds.yml` is keyed by slug, so staging pointers follow their thread."""
     _run('reorder', 'gamma')
     assert {s: e.staging_ts for s, e in SessionState.load(session).threads.items()} == {
         'alpha': '1.1', 'beta': '2.2', 'gamma': '3.3',

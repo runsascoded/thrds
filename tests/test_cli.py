@@ -10,6 +10,8 @@ via subprocess mocking.
 from __future__ import annotations
 
 import json
+
+import yaml
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -291,13 +293,13 @@ def test_init_refuses_when_already_fully_initialized(in_tmp, monkeypatch):
 
 
 def test_init_refuses_when_target_dir_exists_without_state_json(in_tmp):
-    """Existing target dir without a thrds.json — refuse (not our dir)."""
+    """Existing target dir without a thrds.yml — refuse (not our dir)."""
     _write_doc(in_tmp)
     (in_tmp / 'thrds' / 'trainium').mkdir(parents=True)
     result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        f"Error: Target dir exists but has no thrds.json — not a thrds session dir: {in_tmp / 'thrds' / 'trainium'}"
+        f"Error: Target dir exists but has no thrds.yml — not a thrds session dir: {in_tmp / 'thrds' / 'trainium'}"
     )
 
 
@@ -309,11 +311,11 @@ def test_init_creates_empty_doc_when_source_absent(in_tmp):
     assert dest.read_text() == ""
 
 
-def test_init_state_json_is_valid_pretty_printed(in_tmp):
+def test_init_state_file_is_valid_yaml(in_tmp):
     _write_doc(in_tmp)
     CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     text = (in_tmp / 'thrds' / 'trainium' / STATE_PATH).read_text()
-    data = json.loads(text)
+    data = yaml.safe_load(text)
     assert data['doc_path'] == 'trainium.md'
     assert data['staging_archived'] is False
     assert text.endswith('\n') and not text.endswith('\n\n')
@@ -617,7 +619,7 @@ def test_push_requires_state_json(in_tmp, spy):
     result = CliRunner().invoke(cli, ['slack', 'push'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        "Error: No thrds session state at thrds.json; run `thrds <platform> init` first."
+        "Error: No thrds session state at thrds.yml; run `thrds <platform> init` first."
     )
 
 
@@ -709,7 +711,7 @@ def _recovered(session_id='s-1', doc_slug='trainium', preamble_ts=None,
 
 
 def test_recover_writes_state_and_doc_from_scan(in_tmp, monkeypatch, spy):
-    """Single-session channel → auto-select → thrds.json + doc written; prod routing."""
+    """Single-session channel → auto-select → thrds.yml + doc written; prod routing."""
     spy_pull_doc = Doc(
         preamble='hello',
         threads=[
@@ -736,7 +738,7 @@ def test_recover_writes_state_and_doc_from_scan(in_tmp, monkeypatch, spy):
     result = CliRunner().invoke(cli, ['slack', 'recover', 'C_PROD'])
     assert result.exit_code == 0, (result.output, result.stderr)
 
-    # thrds.json shape
+    # thrds.yml shape
     state = SessionState.load()
     assert state.session_id == 's-1'
     assert state.doc_path == 'trainium.md'
@@ -849,8 +851,8 @@ def test_recover_no_sessions_found_errors(in_tmp, monkeypatch):
 
 
 def test_recover_refuses_to_overwrite_existing_state(in_tmp, monkeypatch):
-    """Preexisting thrds.json in CWD → refuse (recover is for empty session dirs)."""
-    _init_session(in_tmp, monkeypatch)   # leaves a thrds.json in CWD via chdir
+    """Preexisting thrds.yml in CWD → refuse (recover is for empty session dirs)."""
+    _init_session(in_tmp, monkeypatch)   # leaves a thrds.yml in CWD via chdir
     result = CliRunner().invoke(cli, ['slack', 'recover', 'C_PROD'])
     assert result.exit_code == 2
     assert 'refusing to overwrite' in result.stderr
@@ -1127,7 +1129,7 @@ def test_list_sessions_forwards_scan_flags(in_tmp, monkeypatch):
 
 
 def test_list_sessions_writes_no_state_or_doc(in_tmp, monkeypatch):
-    """`list-sessions` is read-only — no thrds.json or .md ever written."""
+    """`list-sessions` is read-only — no thrds.yml or .md ever written."""
     def factory(*, token, channel):
         s = SlackSpy(token=token, channel=channel)
         s.scan_returns = {'s-1': _recovered()}

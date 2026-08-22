@@ -174,7 +174,7 @@ def test_plan_unslugged_thread_raises():
         plan_migration(doc, SessionState.new(), 'd.md')
     assert str(e.value) == (
         "Cannot migrate: thread(s) at position [1] have no `=== slug`; "
-        "a slug is the thread's filename and its identity in `thrds.json` — "
+        "a slug is the thread's filename and its identity in `thrds.yml` — "
         "add one to each before migrating"
     )
 

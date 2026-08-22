@@ -3,7 +3,7 @@
 Capture-only sessions have no platform target — just a git-tracked doc dir
 optionally mirrored to a gist. Covers:
 
-- `capture init` writes `platform='capture'` into `thrds.json`
+- `capture init` writes `platform='capture'` into `thrds.yml`
 - `capture init` with gist enabled: mocked `create_gist` / `align` / `push`
   boundary, gist_id ends up in state (same shape as `slack init`)
 - `capture push` autocommits the doc + state

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import yaml
+
 import pytest
 
 from thrds import SessionState, ThreadEntry, ThreadTarget
@@ -92,20 +94,22 @@ def test_threads_round_trip_through_save_and_load(tmp_path):
     assert loaded.threads == state.threads
 
 
-def test_threads_serialize_as_nested_json(tmp_path):
+def test_threads_serialize_as_per_remote_pointers(tmp_path):
+    """The pointers schema (`specs/remotes-model.md`): legacy field names are
+    constructor sugar; what persists is the remote → pointer map, Nones
+    pruned. A quoted ts stays a string through the YAML round trip."""
     state = SessionState.new(
         threads={'a': ThreadEntry(staging_ts='1.1', target=ThreadTarget(channel='#c'))},
     )
     state.save(tmp_path)
-    written = json.loads((tmp_path / STATE_PATH).read_text())
+    written = yaml.safe_load((tmp_path / STATE_PATH).read_text())
     assert written['threads'] == {
         'a': {
-            'staging_ts': '1.1',
-            'target': {'channel': '#c', 'thread_ts': None},
             'state': 'draft',
-            'posted_ts': None,
-            'posted_url': None,
-            'posted_msg_ts': None,
+            'remotes': {
+                'staging': {'ts': '1.1'},
+                'prod': {'channel': '#c'},
+            },
         },
     }
 

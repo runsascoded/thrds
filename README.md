@@ -154,7 +154,7 @@ Every commit is rebuilt with the doc split into thread files, preserving message
 
 **One file per thread.** A session directory holds `01-slug.md`, `02-slug.md`, … — one Slack thread each (`+++` still separates replies *within* a thread). Per-file git history then reads as "*this message* went v2→v3" rather than "the doc changed", which is the point when the gist history is the artifact you're keeping.
 
-**Destination is a property of the thread, not the session.** Each thread records its own `{channel, thread_ts?}` target in `thrds.json`; the session-level `prod_channel` is just a default for threads that don't set one. A target with no `thread_ts` posts a new top-level message; with one, the thread's messages go in as replies to that existing message — so "draft a considered reply to someone else's post" and "batch six messages into one channel" are the same mechanism.
+**Destination is a property of the thread, not the session.** Each thread records its own `{channel, thread_ts?}` target in `thrds.yml`; the session-level `prod_channel` is just a default for threads that don't set one. A target with no `thread_ts` posts a new top-level message; with one, the thread's messages go in as replies to that existing message — so "draft a considered reply to someone else's post" and "batch six messages into one channel" are the same mechanism.
 
 **Staging-only chrome.** Staged messages carry one extra line saying where the draft is aimed, what it became once posted, and which file in the gist it is:
 
@@ -164,7 +164,7 @@ Every commit is rebuilt with the doc split into thread files, preserving message
 ✅ #marin-alerts · 02-cw-summary.md
 ```
 
-In the second, the arrow itself links to the message being replied to — the `thread_ts` is what a machine needs and a human never reads. The third is a posted thread: `→` is an affordance (edit it and the draft goes elsewhere), so once it's spent, the line condenses to one link — our posted permalink, channel name as anchor text — and `✅` replaces the word "posted". Nothing is lost, since that permalink carries the thread root as `?thread_ts=` and `thrds.json` holds the machine-readable copy. The gist link deep-links the file (`#file-01-mfu-md`), not just the gist. Configured in `thrds.json`, never written into doc content:
+In the second, the arrow itself links to the message being replied to — the `thread_ts` is what a machine needs and a human never reads. The third is a posted thread: `→` is an affordance (edit it and the draft goes elsewhere), so once it's spent, the line condenses to one link — our posted permalink, channel name as anchor text — and `✅` replaces the word "posted". Nothing is lost, since that permalink carries the thread root as `?thread_ts=` and `thrds.yml` holds the machine-readable copy. The gist link deep-links the file (`#file-01-mfu-md`), not just the gist. Configured in `thrds.yml`, never written into doc content:
 
 ```jsonc
 "staging_chrome": {
@@ -186,7 +186,7 @@ A push renders it back to canonical form, so the hand-typed shape only has to su
 
 **Start a thread by writing one in the staging channel.** Post a top-level message there with a chrome line and the next `pull` adopts it: creates its `NN-slug.md` (named by the chrome line's filename, or slugified from the opening words), records its target, and takes over syncing it. A message with no chrome line stays a note to self — that's what separates the two.
 
-**Reordering.** `slck reorder` renumbers files to a gapless `01..NN`; `slck reorder gamma alpha` puts those first. Only files move — `thrds.json` is keyed by slug, so staging pointers, targets and posted timestamps all follow their thread. Renaming is cheap because a commit records a *tree*: `git log --follow` reconstructs each thread's history across the rename.
+**Reordering.** `slck reorder` renumbers files to a gapless `01..NN`; `slck reorder gamma alpha` puts those first. Only files move — `thrds.yml` is keyed by slug, so staging pointers, targets and posted timestamps all follow their thread. Renaming is cheap because a commit records a *tree*: `git log --follow` reconstructs each thread's history across the rename.
 
 **Finalizing.** Once a thread is `posted` or `dropped`, its staged copy re-renders with chrome in a `context` block. Slack strips the Edit affordance from any message carrying blocks — a liability for a draft, and exactly the point for one that's already gone out: the staged copy visibly locks. `slck reopen <slug>` moves it back to `draft` (keeping `posted_ts`, so a later `promote` syncs the existing message rather than posting a second one), and the next push unlocks it. Set `finalize_terminal: false` to keep everything editable.
 
@@ -241,7 +241,7 @@ thrds bsky render | pbcopy       # MD → clipboard
 thrds bsky open                  # browse the gist
 ```
 
-Every session's `platform` is stamped into `thrds.json` at init and guarded on every subsequent verb — running `thrds slack push` inside a capture-inited session errors immediately with a clear message rather than trying and failing halfway through.
+Every session's `platform` is stamped into `thrds.yml` at init and guarded on every subsequent verb — running `thrds slack push` inside a capture-inited session errors immediately with a clear message rather than trying and failing halfway through.
 
 [raw-spec]: specs/done/raw-mrkdwn-passthrough.md
 

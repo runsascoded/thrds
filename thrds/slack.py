@@ -1128,7 +1128,7 @@ class SlackClient:
         """Bring the staged message at ``op_ts`` in line with its desired chrome.
 
         Body reconciliation can't cover this: `core.sync` compares *content*,
-        and the footer isn't part of content — it's derived from `thrds.json`.
+        and the footer isn't part of content — it's derived from `thrds.yml`.
         An OP whose text is unchanged is SKIPped, so a thread promoted since
         the last push would never gain its `posted` link. Chrome that only
         lands when the body happens to change is chrome you can't trust to
@@ -1173,7 +1173,7 @@ class SlackClient:
         in link text, where a draft's ``<#C…>`` mention lets Slack do the
         naming. One `conversations.info` per channel — versus paginating
         `conversations.list` over the whole workspace for a display string —
-        and it persists in `thrds.json`, so a session pays at most once.
+        and it persists in `thrds.yml`, so a session pays at most once.
 
         Failures are swallowed like `_target_urls`': a name we can't resolve
         means the footer renders its longer form, not that the push fails.

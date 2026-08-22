@@ -1,6 +1,6 @@
 """Local session state for a thrds session — the write-through cache of thread ownership.
 
-Written to ``thrds.json`` at the session root, tracked and gist-mirrored via
+Written to ``thrds.yml`` at the session root, tracked and gist-mirrored via
 the git repo so multi-machine sees the same authoritative slug → thread_ts map
 without needing to scan Slack. The Slack ``metadata`` field on each posted message
 carries the same info (session_id, slug, kind) as belt-and-suspenders: if the
@@ -52,8 +52,16 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
 
-STATE_PATH = Path('thrds.json')  # flat filename (not `.thrds/state.json`) — GitHub gists reject directories
+
+# Flat filenames (not `.thrds/state.yml`) — GitHub gists reject directories.
+# YAML since the per-remote-pointers schema (`specs/remotes-model.md`): nicer
+# to read and hand-edit, and the extension change doubles as the version
+# boundary — old code can't half-read new state, and new code migrates the
+# legacy JSON explicitly (`load` reads it, the next `save` replaces it).
+STATE_PATH = Path('thrds.yml')
+LEGACY_STATE_PATH = Path('thrds.json')
 DEFAULT_GIST_REMOTE = 'g'  # matches ghpr's convention
 CHANNEL_PREFIX_ENV = 'THRDS_CHANNEL_PREFIX'
 
@@ -104,7 +112,7 @@ class StagingChrome:
         # `context_block` was the shipped default before blocks turned out to
         # make staged messages uneditable. Coerce rather than raise: it names a
         # version, not a choice, and refusing to load would strand any session
-        # written by that version behind a hand-edit of `thrds.json`.
+        # written by that version behind a hand-edit of `thrds.yml`.
         if self.style == RETIRED_CHROME_STYLE:
             self.style = 'footer'
         if self.style != 'footer':
@@ -139,44 +147,176 @@ class ThreadTarget:
             raise ValueError("ThreadTarget.channel must be non-empty")
 
 
+STAGING_REMOTE = 'staging'
+PROD_REMOTE = 'prod'
+
+
+def _require_ts_str(name: str, value: Any) -> None:
+    if isinstance(value, (int, float)):
+        raise ValueError(
+            f"{name} parsed as a number ({value!r}) — Slack ts values must be "
+            f"quoted strings in {STATE_PATH} (unquoted YAML turns them into "
+            f"floats and can lose precision)"
+        )
+
+
 @dataclass
-class ThreadEntry:
-    """Per-thread state: where its draft lives, where it's going, and its status.
+class RemotePointer:
+    """One thread's footprint at one remote (`specs/remotes-model.md`).
 
-    ``staging_ts`` is the OP ts of this thread's draft in the staging channel.
-    ``target`` is the prod destination (None until set). ``posted_ts`` is the
-    ts of *our* message once it lands at the target — distinct from
-    ``target.thread_ts``, which is the message we're replying *to*.
-
-    ``posted_url`` is that message's permalink. It's stored rather than derived
-    because deriving one needs the workspace domain, which only Slack knows —
-    and both paths that set ``posted_ts`` (``promote``, ``adopt``) already hold
-    a permalink at that moment. Persisting it keeps every later reader
-    (staging chrome, ``status``) offline.
+    ``ts`` is our root message there; ``msg_ts`` every message id we've posted
+    there — the reconcile whitelist for re-converging into shared threads.
+    ``channel`` + ``thread_ts`` say where, and what we replied *into*
+    (staging-role pointers omit them, inheriting the session's staging
+    channel). ``url`` is the root's permalink — stored rather than derived
+    because deriving one needs the workspace domain, which only Slack knows,
+    and every path that sets ``ts`` already holds one; persisting it keeps
+    later readers (chrome, ``status``) offline.
     """
-    staging_ts: str | None = None
-    target: ThreadTarget | None = None
-    state: str = DEFAULT_THREAD_STATE
-    posted_ts: str | None = None
-    posted_url: str | None = None
-    # Every message ts this slug has posted at its target — the reconcile
-    # whitelist for re-promotes into shared threads. None = never promoted
-    # under the whitelist regime (legacy entries fall back to `posted_ts`
-    # when it isn't the thread root; see promote_thread).
-    posted_msg_ts: list[str] | None = None
+    ts: str | None = None
+    msg_ts: list[str] | None = None
+    channel: str | None = None
+    thread_ts: str | None = None
+    url: str | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.target, dict):
-            self.target = ThreadTarget(**self.target)
-        if self.state not in VALID_THREAD_STATES:
+        _require_ts_str('ts', self.ts)
+        _require_ts_str('thread_ts', self.thread_ts)
+        for v in self.msg_ts or ():
+            _require_ts_str('msg_ts', v)
+
+
+@dataclass(init=False)
+class ThreadEntry:
+    """Per-thread state: its lifecycle, and its pointers at each remote.
+
+    ``remotes`` maps remote name → :class:`RemotePointer`; ``upstream`` (which
+    remote is canonical right now) is derived from ``state`` until a thread
+    can name one of several prod-role remotes.
+
+    The pre-pointers field names (``staging_ts``, ``target``, ``posted_ts``,
+    ``posted_url``, ``posted_msg_ts``) survive as constructor kwargs and
+    read/write properties over the pointer map — old `thrds.json` entries load
+    through them, and call sites migrate to remote-parameterized access
+    incrementally. They are no longer serialized.
+    """
+    state: str
+    remotes: dict[str, RemotePointer]
+
+    def __init__(
+        self,
+        state: str = DEFAULT_THREAD_STATE,
+        remotes: dict[str, RemotePointer | dict] | None = None,
+        *,
+        staging_ts: str | None = None,
+        target: ThreadTarget | dict | None = None,
+        posted_ts: str | None = None,
+        posted_url: str | None = None,
+        posted_msg_ts: list[str] | None = None,
+    ) -> None:
+        if state not in VALID_THREAD_STATES:
             raise ValueError(
-                f"Invalid thread state {self.state!r}; must be one of {VALID_THREAD_STATES}"
+                f"Invalid thread state {state!r}; must be one of {VALID_THREAD_STATES}"
             )
+        self.state = state
+        self.remotes = {
+            name: p if isinstance(p, RemotePointer) else RemotePointer(**p)
+            for name, p in (remotes or {}).items()
+        }
+        if staging_ts is not None:
+            self.staging_ts = staging_ts
+        if isinstance(target, dict):
+            target = ThreadTarget(**target)
+        if target is not None:
+            self.target = target
+        if posted_ts is not None:
+            self.posted_ts = posted_ts
+        if posted_url is not None:
+            self.posted_url = posted_url
+        if posted_msg_ts is not None:
+            self.posted_msg_ts = posted_msg_ts
+
+    def pointer(self, remote: str) -> RemotePointer:
+        """The pointer at ``remote``, created empty on first access."""
+        if remote not in self.remotes:
+            self.remotes[remote] = RemotePointer()
+        return self.remotes[remote]
+
+    @property
+    def upstream(self) -> str:
+        """Which remote is canonical for this thread right now."""
+        return PROD_REMOTE if self.state == 'posted' else STAGING_REMOTE
 
     @property
     def is_terminal(self) -> bool:
         """True once this thread has been posted or explicitly dropped."""
         return self.state in TERMINAL_THREAD_STATES
+
+    # --- pre-pointers accessors (see class docstring) -----------------------
+
+    @property
+    def staging_ts(self) -> str | None:
+        p = self.remotes.get(STAGING_REMOTE)
+        return p.ts if p is not None else None
+
+    @staging_ts.setter
+    def staging_ts(self, value: str | None) -> None:
+        self.pointer(STAGING_REMOTE).ts = value
+
+    @property
+    def target(self) -> ThreadTarget | None:
+        p = self.remotes.get(PROD_REMOTE)
+        if p is None or p.channel is None:
+            return None
+        return ThreadTarget(channel=p.channel, thread_ts=p.thread_ts)
+
+    @target.setter
+    def target(self, value: ThreadTarget | None) -> None:
+        if value is None:
+            p = self.remotes.get(PROD_REMOTE)
+            if p is not None:
+                p.channel = None
+                p.thread_ts = None
+            return
+        p = self.pointer(PROD_REMOTE)
+        p.channel = value.channel
+        p.thread_ts = value.thread_ts
+
+    @property
+    def posted_ts(self) -> str | None:
+        p = self.remotes.get(PROD_REMOTE)
+        return p.ts if p is not None else None
+
+    @posted_ts.setter
+    def posted_ts(self, value: str | None) -> None:
+        self.pointer(PROD_REMOTE).ts = value
+
+    @property
+    def posted_url(self) -> str | None:
+        p = self.remotes.get(PROD_REMOTE)
+        return p.url if p is not None else None
+
+    @posted_url.setter
+    def posted_url(self, value: str | None) -> None:
+        self.pointer(PROD_REMOTE).url = value
+
+    @property
+    def posted_msg_ts(self) -> list[str] | None:
+        p = self.remotes.get(PROD_REMOTE)
+        return p.msg_ts if p is not None else None
+
+    @posted_msg_ts.setter
+    def posted_msg_ts(self, value: list[str] | None) -> None:
+        self.pointer(PROD_REMOTE).msg_ts = value
+
+
+def _prune_none(value: Any) -> Any:
+    """Drop ``None`` values recursively; keep empty containers and strings."""
+    if isinstance(value, dict):
+        return {k: _prune_none(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_prune_none(v) for v in value]
+    return value
 
 
 def resolve_channel_prefix(session_override: str | None) -> str:
@@ -255,19 +395,36 @@ class SessionState:
 
     @classmethod
     def load(cls, root: Path | str = '.') -> 'SessionState':
-        """Load from ``<root>/thrds.json``; raise if missing."""
+        """Load from ``<root>/thrds.yml`` (or the legacy ``thrds.json``); raise if missing.
+
+        A legacy file loads through :class:`ThreadEntry`'s pre-pointers
+        kwargs; the next :meth:`save` writes ``thrds.yml`` and removes it.
+        """
         path = Path(root) / STATE_PATH
-        if not path.exists():
-            raise FileNotFoundError(
-                f"No thrds session state at {path}; run `thrds <platform> init` first."
-            )
-        return cls(**json.loads(path.read_text()))
+        if path.exists():
+            return cls(**yaml.safe_load(path.read_text()))
+        legacy = Path(root) / LEGACY_STATE_PATH
+        if legacy.exists():
+            return cls(**json.loads(legacy.read_text()))
+        raise FileNotFoundError(
+            f"No thrds session state at {path}; run `thrds <platform> init` first."
+        )
 
     def save(self, root: Path | str = '.') -> None:
-        """Persist to ``<root>/thrds.json``, creating the parent dir if needed."""
+        """Persist to ``<root>/thrds.yml``, creating the parent dir if needed.
+
+        ``None`` values are pruned (load restores them as defaults) so the
+        YAML stays readable; empty containers are kept — ``channel_prefix: ''``
+        and ``channel_prefix: null`` mean different things. Removes the legacy
+        ``thrds.json`` — callers' commits record the swap (`_stage_paths`).
+        """
         path = Path(root) / STATE_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), indent=2) + '\n')
+        path.write_text(yaml.safe_dump(
+            _prune_none(asdict(self)), sort_keys=False, allow_unicode=True,
+        ))
+        legacy = Path(root) / LEGACY_STATE_PATH
+        legacy.unlink(missing_ok=True)
 
     def get_thread_ts(self, channel: str, slug: str) -> str | None:
         """Look up the recorded thread_ts for ``(channel, slug)``; None if not present."""
@@ -314,7 +471,7 @@ class SessionState:
         """The :class:`ThreadEntry` for ``slug``, creating an empty one if absent.
 
         Creating-on-access is right here because a thread's existence is
-        determined by its file on disk; ``thrds.json`` only accumulates what
+        determined by its file on disk; ``thrds.yml`` only accumulates what
         we've learned about it (where its draft landed, where it's going).
         """
         if slug not in self.threads:

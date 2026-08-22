@@ -31,7 +31,7 @@ somewhere else. Once posted that pointer is spent, and the two links it left
 behind (`→` target, and the word `posted`) pointed at nearly the same place:
 our posted permalink already carries the thread root as `?thread_ts=`, so the
 target is derivable from it, and the machine-readable copy lives in
-`thrds.json` regardless. So one link survives, the channel name as its anchor
+`thrds.yml` regardless. So one link survives, the channel name as its anchor
 text, and `✅` replaces the word.
 """
 from __future__ import annotations

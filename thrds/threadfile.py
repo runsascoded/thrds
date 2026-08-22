@@ -16,7 +16,7 @@ trajectory.
 
 The ``NN`` prefix gives deterministic ordering for the batch case (post six
 messages in a known order) and costs nothing for the reply case. It carries no
-identity: the ``slug`` is what keys ``thrds.json``'s ``threads`` map, is stamped
+identity: the ``slug`` is what keys ``thrds.yml``'s ``threads`` map, is stamped
 into each posted message's Slack metadata, and is the target of ``[text](#slug)``
 cross-references from sibling threads. So renumbering is cheap — `reorder` (or
 editing the name in a staged message's chrome line) moves files and nothing
@@ -83,7 +83,7 @@ def parse_thread_filename(name: str) -> tuple[int, str] | None:
     """Parse ``NN-slug.md`` → ``(index, slug)``; None if it isn't a thread file.
 
     Returning None (rather than raising) lets callers scan a session directory
-    that also holds ``thrds.json``, downloaded emoji, and a README without
+    that also holds ``thrds.yml``, downloaded emoji, and a README without
     having to pre-filter.
     """
     m = THREAD_FILE_RE.match(name)

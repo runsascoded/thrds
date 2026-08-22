@@ -146,7 +146,7 @@ def _basic_doc() -> Doc:
 
 
 def _new_state(tmp_path, monkeypatch, **overrides) -> SessionState:
-    """Fresh session state whose save()s land in tmp_path/thrds.json."""
+    """Fresh session state whose save()s land in tmp_path/thrds.yml."""
     monkeypatch.chdir(tmp_path)
     return SessionState.new(doc_path='trainium-update.md', **overrides)
 

@@ -174,7 +174,7 @@ def overlay_tree(
 
     What the *composite* ref needs, and the reason it can't be a bare
     :func:`build_tree`. A session dir holds more than threads — `README.md`,
-    `thrds.json`, downloaded `emoji-*.png` — none of which Slack has any
+    `thrds.yml`, downloaded `emoji-*.png` — none of which Slack has any
     opinion about. A merge base whose tree omitted them would read as "HEAD
     has four files the remote doesn't", and, far worse, a later
     `git rebase --onto upstream` would *delete* them: a rebase replays

@@ -1,7 +1,9 @@
-"""Tests for the session state persistence layer (thrds.json)."""
+"""Tests for the session state persistence layer (thrds.yml)."""
 from __future__ import annotations
 
 import json
+
+import yaml
 import re
 import uuid
 from pathlib import Path
@@ -82,13 +84,15 @@ def test_save_load_round_trip_with_threads(tmp_path):
     assert loaded == original
 
 
-def test_save_format_is_pretty_printed_json_with_trailing_newline(tmp_path):
-    """State file is human-readable: pretty-printed JSON, ends with a single newline."""
+def test_save_format_is_yaml_with_nones_pruned(tmp_path):
+    """State file is human-readable YAML: no `null` noise (load restores
+    defaults), first key first, single trailing newline."""
     s = SessionState(session_id='fixed-uuid', prod_channel='C0PROD')
     s.save(tmp_path)
     text = (tmp_path / STATE_PATH).read_text()
-    assert json.loads(text)['session_id'] == 'fixed-uuid'
-    assert '  "session_id"' in text.split('\n')[1]
+    assert yaml.safe_load(text)['session_id'] == 'fixed-uuid'
+    assert text.split('\n')[0] == 'session_id: fixed-uuid'
+    assert [l for l in text.split('\n') if 'null' in l] == []
     assert text.endswith('\n') and not text.endswith('\n\n')
 
 

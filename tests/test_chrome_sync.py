@@ -643,7 +643,7 @@ def test_resolve_channel_names_caches_into_state(monkeypatch):
 
 
 def test_resolve_channel_names_skips_what_is_already_cached(monkeypatch):
-    """A session pays at most once — the cache persists in `thrds.json`."""
+    """A session pays at most once — the cache persists in `thrds.yml`."""
     state = _posted_state(channel_names={'C0T': 'marin-alerts'})
     client, calls = _naming_client(monkeypatch, {'C0T': 'marin-alerts'})
     client._resolve_channel_names(state, ['a'])

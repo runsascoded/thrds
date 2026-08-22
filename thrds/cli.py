@@ -17,7 +17,7 @@ Each session lives in its own directory (ghpr-style:
 at init becomes the ``g`` remote; state-mutating verbs auto-commit + push, so
 the mirror always reflects the current session state.
 
-Platform is stamped into ``thrds.json`` at init and every subsequent verb
+Platform is stamped into ``thrds.yml`` at init and every subsequent verb
 guards on it: running `thrds slack push` inside a capture-inited session
 errors with a clear message rather than blowing up deep inside Slack code.
 
@@ -84,7 +84,7 @@ from .md import diff_docs, diff_texts, parse_doc, serialize_doc, serialize_threa
 from .migrate import apply_migration, plan_migration
 from .replay import ReplayError, plan_replay, verify_plan, write_replay
 from .slack import ScanCapReached, SlackClient
-from .state import STATE_PATH, SessionState, ThreadTarget
+from .state import LEGACY_STATE_PATH, STATE_PATH, SessionState, ThreadTarget
 from . import remotes, tracking
 from .remotes import Remote
 from .threadfile import (
@@ -177,7 +177,7 @@ def _notify_promoted(client: SlackClient, slug: str, channel: str, message_ts: s
 
 
 def _load_state(expected_platform: str | None = None) -> SessionState:
-    """Load ``thrds.json`` from CWD or exit clearly.
+    """Load ``thrds.yml`` from CWD or exit clearly.
 
     ``expected_platform`` (set by every platform-group verb to its own name)
     catches mis-platforming — running ``thrds slack push`` inside a session
@@ -265,6 +265,21 @@ def _print_sync_summary(kind: str, result) -> None:
         err(f"  deleted (terraform): {result.deleted_slugs}")
 
 
+def _stage_paths(session_dir: Path, paths: list[str]) -> list[str]:
+    """``paths``, plus the legacy `thrds.json` when its deletion needs recording.
+
+    `SessionState.save` migrates a session to `thrds.yml` by writing it and
+    unlinking the JSON; the commit that follows must stage that deletion or
+    the gist mirror keeps serving stale state under the old name.
+    """
+    if not mirror.is_git_repo(session_dir):
+        return paths
+    legacy = str(LEGACY_STATE_PATH)
+    if (session_dir / legacy).exists() or not mirror.is_tracked(session_dir, legacy):
+        return paths
+    return [*paths, legacy]
+
+
 def _autocommit(session_root: Path, paths: list[str], message: str) -> None:
     """Commit ``paths`` (relative to session_root) and push to gist if configured.
 
@@ -274,7 +289,7 @@ def _autocommit(session_root: Path, paths: list[str], message: str) -> None:
     if not mirror.is_git_repo(session_root):
         return
     try:
-        mirror.commit_and_push(session_root, paths, message)
+        mirror.commit_and_push(session_root, _stage_paths(session_root, paths), message)
     except mirror.MirrorError as e:
         err(f"warning: mirror commit/push failed: {e}")
 
@@ -333,8 +348,7 @@ def _do_init(
     target = mirror.resolve_session_dir(Path.cwd(), slug)
 
     if target.exists():
-        state_path = target / STATE_PATH
-        if not state_path.is_file():
+        if not (target / STATE_PATH).is_file() and not (target / LEGACY_STATE_PATH).is_file():
             raise click.UsageError(
                 f"Target dir exists but has no {STATE_PATH} — not a thrds session dir: {target}"
             )
@@ -620,7 +634,7 @@ def cli():
 
     Subgroups: ``slack`` (Slack session + CRUD verbs), ``capture`` (gist-only
     trajectory, no platform target). Every session's platform is stamped
-    into `thrds.json` at init and enforced on subsequent verbs.
+    into `thrds.yml` at init and enforced on subsequent verbs.
     """
     pass
 
@@ -655,7 +669,7 @@ def slack_init(no_gist: bool, prefix: str | None, doc_path: str):
     creates a secret gist and adds it as the ``g`` remote.
 
     Auto-resume: if the target dir already exists and holds a valid
-    ``thrds.json`` (matching platform) with ``gist_id: null``, finishes
+    ``thrds.yml`` (matching platform) with ``gist_id: null``, finishes
     the gist-creation step instead of refusing (recovers from an earlier
     init that failed at the gist step — e.g. network hiccup, `gh` unauth'd).
     """
@@ -858,7 +872,10 @@ def slack_push(channel: str | None, force: bool, keep_staging: bool, dry_run: bo
         )
         _print_sync_summary('pushed to staging' + (' (dry-run)' if dry_run else ''), result)
         if not dry_run:
-            paths = [f.name for f in thread_files(session_dir)] + [str(STATE_PATH)]
+            paths = _stage_paths(
+                session_dir,
+                [f.name for f in thread_files(session_dir)] + [str(STATE_PATH)],
+            )
             if not is_git:
                 return
             try:
@@ -914,7 +931,7 @@ def _refresh_composite(
     see `_merged_observations`), passthrough files from the *new* HEAD. No API
     reads — the thread content is a fetch the verb already did. Without this,
     every pull leaves `git diff upstream HEAD` dangling on the
-    `thrds.json` the pull itself committed."""
+    `thrds.yml` the pull itself committed."""
     return tracking.snapshot(
         session_dir,
         tracking.ref_name(tracking.COMPOSITE),
@@ -941,7 +958,7 @@ def _reconcile_pull(
     deliberately still at the old base (see `_fetch_refs`), so retrying
     reproduces the conflict instead of forgetting it.
 
-    Only thread files are materialized from the merged tree. `thrds.json` is
+    Only thread files are materialized from the merged tree. `thrds.yml` is
     in there too, but it's HEAD's copy — the in-memory state (chrome edits,
     adoptions) supersedes it and is saved separately.
     """
@@ -997,7 +1014,10 @@ def _reconcile_pull(
     emoji_paths = [p.name for p in session_dir.glob('emoji-*') if p.is_file()]
     removed = [src.name for src, _ in renames]
     added = [dst.name for _, dst in renames]
-    paths = [*written, *deleted, *removed, *added, str(STATE_PATH), *emoji_paths]
+    paths = _stage_paths(
+        session_dir,
+        [*written, *deleted, *removed, *added, str(STATE_PATH), *emoji_paths],
+    )
     if mode == 'merge' and base is not None and fetched != base:
         # The commit records the fetched snapshot as its second parent — the
         # branch's history connects to the remote state it reconciled against.
@@ -1928,7 +1948,7 @@ def slack_reorder(dry_run: bool, slugs: tuple[str, ...]):
     keeps its relative position after them. With no SLUGS this just compacts
     gaps left by adding and dropping threads.
 
-    Only files move. `thrds.json` is keyed by slug, not by index, so the
+    Only files move. `thrds.yml` is keyed by slug, not by index, so the
     staging messages, targets and posted timestamps all follow their thread
     without being touched — the number says where a thread sorts, nothing more.
     """
@@ -2070,7 +2090,7 @@ def slack_migrate(dry_run: bool):
 
     Converts a legacy one-doc-many-threads session to the per-thread model
     (see ``specs/per-thread-model.md``): each ``=== slug`` section becomes its
-    own file, and `thrds.json` gains a `threads` map carrying each thread's
+    own file, and `thrds.yml` gains a `threads` map carrying each thread's
     staging ts, destination, and state. A preamble becomes ``00-preamble.md``.
 
     The payoff is per-file git history — a commit reads as "*this message*
@@ -2087,7 +2107,7 @@ def slack_migrate(dry_run: bool):
         if state.threads:
             raise click.UsageError(
                 'This session is already on the per-thread model '
-                f'({len(state.threads)} thread(s) in thrds.json).'
+                f'({len(state.threads)} thread(s) in thrds.yml).'
             )
         raise click.UsageError('Nothing to migrate: this session has no threads recorded.')
 
@@ -2195,7 +2215,7 @@ def slack_list_sessions(cursor, oldest_days, latest_days, max_pages, channel):
 @click.option('-i', '--session-id', help='Session ID to recover (required if channel holds >1 session).')
 @click.option('-m', '--max-pages', type=int, default=50, show_default=True, help='Safety cap on `conversations.history` pages fetched (200 msgs/page). Pass 0 to disable.')
 @click.option('-s', '--staging', is_flag=True, help='Route recovered pointers to staging_threads (default: prod_threads[channel]).')
-@click.option('-W', '--no-write-doc', is_flag=True, help='Skip the doc-pull step; write thrds.json only.')
+@click.option('-W', '--no-write-doc', is_flag=True, help='Skip the doc-pull step; write thrds.yml only.')
 @click.argument('channel')
 def slack_recover(
     cursor: str | None,
@@ -2207,15 +2227,15 @@ def slack_recover(
     no_write_doc: bool,
     channel: str,
 ):
-    """Rebuild `thrds.json` (and DOC.md) from Slack metadata in CHANNEL.
+    """Rebuild `thrds.yml` (and DOC.md) from Slack metadata in CHANNEL.
 
     Every ``thrds`` post carries ``event_type='thrds'`` metadata (session_id,
     doc_slug, thread_slug, kind); ``recover`` scans CHANNEL for those tags
     and reassembles the local session state — the durability story for the
-    write-through cache in ``thrds.json``.
+    write-through cache in ``thrds.yml``.
 
     Run inside an empty session dir. Refuses to overwrite an existing
-    ``thrds.json`` (that's a live session, not a recovery target).
+    ``thrds.yml`` (that's a live session, not a recovery target).
 
     Bare invocation lists sessions found in the channel and exits (code 2)
     if there's more than one — pass ``-i/--session-id`` to pick one; a
@@ -2226,7 +2246,7 @@ def slack_recover(
     narrow with ``-d/--oldest-days N`` — the cheapest lever.
     """
     session_dir = Path.cwd()
-    if (session_dir / STATE_PATH).is_file():
+    if (session_dir / STATE_PATH).is_file() or (session_dir / LEGACY_STATE_PATH).is_file():
         raise click.UsageError(
             f'{STATE_PATH} already exists in {session_dir} — refusing to overwrite. '
             'cd into a fresh session dir before running `thrds slack recover`.'
