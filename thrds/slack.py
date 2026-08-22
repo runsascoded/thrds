@@ -1055,15 +1055,18 @@ class SlackClient:
         slug: str,
         filename: str,
         target_url: str | None = None,
+        chrome: StagingChrome | None = None,
     ) -> str | None:
         """One staged thread's footer line, or None if there's nothing to say.
 
         Three affordances, all derived from state rather than content: where
         the draft is bound, the message it became once posted, and a deep link
         to its file in the gist. See `thrds.chrome` for the shape and why it
-        lives in the text rather than in blocks.
+        lives in the text rather than in blocks. ``chrome`` is the remote's
+        resolved config (defaults to the default staging remote's).
         """
-        chrome = remotes.resolve(state)[STAGING].chrome
+        if chrome is None:
+            chrome = remotes.resolve(state)[STAGING].chrome
         if chrome is None:
             return None
         entry = state.threads.get(slug)
@@ -1206,9 +1209,9 @@ class SlackClient:
         threads: list[DocThread],
         state: SessionState,
         filenames: dict[str, str],
+        chrome: StagingChrome | None,
     ) -> dict[str, str]:
-        """Map each thread's slug → its footer line."""
-        chrome = remotes.resolve(state)[STAGING].chrome
+        """Map each thread's slug → its footer line (per the remote's chrome)."""
         if chrome is None or not chrome.any_enabled:
             return {}
         slugs = [t.slug for t in threads]
@@ -1221,6 +1224,7 @@ class SlackClient:
                 thread.slug,
                 filenames.get(thread.slug, f'{thread.slug}.md'),
                 target_urls.get(thread.slug),
+                chrome=chrome,
             )
             if line:
                 by_slug[thread.slug] = line
@@ -1262,6 +1266,7 @@ class SlackClient:
         jitter: float = 0.0,
         suppress_unfurls: bool = True,
         filenames: dict[str, str] | None = None,
+        remote: Remote | None = None,
     ) -> DocSyncResult:
         """Terraform-sync a session's thread files into its staging PC.
 
@@ -1285,29 +1290,34 @@ class SlackClient:
                     "a thread's slug is its filename."
                 )
 
+        if remote is None:
+            remote = remotes.resolve(state)[STAGING]
+
         doc = Doc(threads=threads)
         phase2_doc = self._prepare_doc_for_refs(doc, dry_run)
 
-        if state.staging_channel is None and not dry_run:
+        if remote.channel is None and not dry_run:
+            # Only the default staging remote is provisionable (an extra
+            # staging-role remote must declare its channel at config time).
             state.staging_channel = self.create_private_channel(state.staging_channel_name())
             state.save()  # persist eagerly — a mid-run failure shouldn't leak the channel handle
-        channel = state.staging_channel if state.staging_channel is not None else "<new-pc>"
+            remote = remotes.resolve(state)[remote.name]
+        channel = remote.channel if remote.channel is not None else "<new-pc>"
 
         prev_channel = self.channel
         self.channel = channel
         # Chrome is staging-only by construction: it's attached here and
         # nowhere in `promote_thread`, so a prod post can't carry it.
         self._chrome_by_slug = self._chrome_for_threads(
-            phase2_doc.threads, state, filenames or {},
+            phase2_doc.threads, state, filenames or {}, remote.chrome,
         )
         # A terminal thread's staged copy finalizes: chrome moves into blocks,
         # which Slack renders more quietly and — the point — makes uneditable.
         # `reopen` is the way back.
-        staging_chrome = remotes.resolve(state)[STAGING].chrome
         self._finalized_slugs = {
             slug for slug, e in state.threads.items()
-            if e.is_terminal and staging_chrome is not None
-            and staging_chrome.finalize_terminal
+            if e.is_terminal and remote.chrome is not None
+            and remote.chrome.finalize_terminal
         }
         self._register_chrome(doc.threads)
         self._register_chrome(phase2_doc.threads)
@@ -1316,13 +1326,18 @@ class SlackClient:
             # Only those with a staging message to delete are considered — an
             # entry that never reached staging has nothing to clean up.
             desired = {t.slug for t in phase2_doc.threads}
+
+            def root_at(e: ThreadEntry) -> str | None:
+                p = e.remotes.get(remote.name)
+                return p.ts if p is not None else None
+
             stale = [
                 slug for slug, e in sorted(state.threads.items())
-                if slug not in desired and e.staging_ts is not None
+                if slug not in desired and root_at(e) is not None
             ]
             for slug in stale:
                 if not dry_run:
-                    self._delete_thread(state.threads[slug].staging_ts, pace=pace, jitter=jitter)
+                    self._delete_thread(root_at(state.threads[slug]), pace=pace, jitter=jitter)
                     del state.threads[slug]
 
             thread_ts_by_slug: dict[str, str] = {}
@@ -1331,7 +1346,7 @@ class SlackClient:
                 entry = state.thread(thread.slug)
                 op_ts, sync_result = self._sync_doc_thread(
                     thread,
-                    entry.staging_ts,
+                    root_at(entry),
                     state,
                     dry_run=dry_run,
                     pace=pace,
@@ -1339,7 +1354,7 @@ class SlackClient:
                     suppress_unfurls=suppress_unfurls,
                 )
                 if not dry_run:
-                    entry.staging_ts = op_ts
+                    entry.pointer(remote.name).ts = op_ts
                     # The OP's body may have been SKIPped (unchanged) while its
                     # chrome drifted — e.g. the thread got promoted since the
                     # last push, so a `✓ posted` link is now due.

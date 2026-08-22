@@ -128,7 +128,7 @@ Installing `thrds` also installs **`slck`**, which *is* the `thrds slack` group 
 ```bash
 slck init draft.md                     # scaffold session dir + gist mirror
 slck migrate                           # split the doc into per-thread NN-slug.md files
-slck push                              # commit, then sync every thread to staging (refuses if staging moved; -f)
+slck push [-r <remote>]                # commit, then sync every thread to a staging-role remote (refuses if it moved; -f)
 slck pull                              # fetch + reconcile; local commits survive (-m rebase|merge|overwrite)
 slck fetch [staging|prod]...           # record Slack's state in staging/prod/upstream refs (default: all)
 slck diff [<slug>]                     # local vs. Slack per thread; classified once fetched

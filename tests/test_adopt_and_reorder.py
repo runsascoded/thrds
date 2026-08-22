@@ -320,7 +320,7 @@ class _ChromeSpy:
             return None
         return self.list_channels_by_name().get(chrome.channel_name)
 
-    def sync_threads_staging(self, threads, state, dry_run=False, filenames=None):
+    def sync_threads_staging(self, threads, state, dry_run=False, filenames=None, remote=None):
         from thrds.doc import DocSyncResult
         self.synced = threads
         return DocSyncResult(

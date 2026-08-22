@@ -791,7 +791,8 @@ def _verify_push(
     observed = remotes.observe(remote, client, state, session_dir)
     staged = {
         names[slug] for slug, e in state.threads.items()
-        if e.staging_ts is not None and slug in names
+        if (p := e.remotes.get(remote.name)) is not None and p.ts is not None
+        and slug in names
     }
     drift = []
     for name in sorted(staged | set(observed)):
@@ -822,18 +823,21 @@ def _verify_push(
 @click.option('-k', '--keep-staging', is_flag=True, help='Do not auto-archive the staging PC after --prod (legacy).')
 @click.option('-n', '--dry-run', is_flag=True, help='Show plan without side effects.')
 @click.option('-p', '--prod', is_flag=True, help='Push to prod (legacy sessions only; use `promote` instead).')
+@click.option('-r', '--remote', 'remote_name', help='Staging-role remote to push to (default: staging).')
 @click.argument('doc_path', required=False)
-def slack_push(channel: str | None, force: bool, keep_staging: bool, dry_run: bool, prod: bool, doc_path: str | None):
-    """Push this session's threads to the staging PC (terraform).
+def slack_push(channel: str | None, force: bool, keep_staging: bool, dry_run: bool, prod: bool, remote_name: str | None, doc_path: str | None):
+    """Push this session's threads to a staging-role remote (terraform).
 
     On a per-thread session, pushes every `NN-slug.md` and takes no `--prod`:
     promoting to a real channel is per-thread and deliberate, via
-    `thrds slack promote <slug>`.
+    `thrds slack promote <slug>`. `-r` picks a declared staging-role remote
+    (`remotes:` in thrds.yml); default is the session's staging PC.
 
     On a git session the push is gated and transactional: it refuses if
-    staging changed since your last pull (`--force` overrides), auto-commits
-    *before* writing so what goes to Slack is exactly a commit's content, and
-    afterwards records Slack's observed state in the tracking refs.
+    the remote changed since your last pull (`--force` overrides),
+    auto-commits *before* writing so what goes to Slack is exactly a
+    commit's content, and afterwards records Slack's observed state in the
+    tracking refs.
 
     `--prod` remains only for legacy single-doc sessions that haven't been
     through `thrds slack migrate` yet.
@@ -860,9 +864,18 @@ def slack_push(channel: str | None, force: bool, keep_staging: bool, dry_run: bo
         if is_git:
             _ensure_refs(session_dir, state)
         names = {f.slug: f.name for f in files}
-        # The verb's default remote (specs/remotes-model.md: `push [<remote>]`,
-        # staging today); the gate and verify are already remote-agnostic.
-        rmt = remotes.resolve(state)[tracking.STAGING]
+        rmts = remotes.resolve(state)
+        name = remote_name if remote_name is not None else tracking.STAGING
+        if name not in rmts:
+            raise click.UsageError(
+                f"unknown remote {name!r}; this session has: {', '.join(rmts)}."
+            )
+        rmt = rmts[name]
+        if rmt.role != tracking.STAGING:
+            raise click.UsageError(
+                f'remote {name!r} is prod-role; `slck promote <slug>` posts a '
+                f'thread to its target.'
+            )
         if is_git and not dry_run:
             _gate_push(client, state, session_dir, rmt, force)
             # Commit-first: what goes to Slack is exactly a commit's content
@@ -870,13 +883,13 @@ def slack_push(channel: str | None, force: bool, keep_staging: bool, dry_run: bo
             # correct side of that fork). The auto-commit UX survives; only
             # the ordering changes.
             content_sha = mirror.commit(
-                session_dir, [f.name for f in files], 'thrds: push staging',
+                session_dir, [f.name for f in files], f'thrds: push {rmt.name}',
             )
         result = client.sync_threads_staging(
             threads, state, dry_run=dry_run,
-            filenames=names,
+            filenames=names, remote=rmt,
         )
-        _print_sync_summary('pushed to staging' + (' (dry-run)' if dry_run else ''), result)
+        _print_sync_summary(f'pushed to {rmt.name}' + (' (dry-run)' if dry_run else ''), result)
         if not dry_run:
             paths = _stage_paths(
                 session_dir,
@@ -890,13 +903,15 @@ def slack_push(channel: str | None, force: bool, keep_staging: bool, dry_run: bo
                     # into the same commit; nothing external saw the SHA yet.
                     mirror.amend(session_dir, paths)
                 else:
-                    mirror.commit(session_dir, paths, 'thrds: push staging')
+                    mirror.commit(session_dir, paths, f'thrds: push {rmt.name}')
                 mirror.push(session_dir)
             except mirror.MirrorError as e:
                 err(f"warning: mirror commit/push failed: {e}")
             _verify_push(client, state, session_dir, rmt)
         return
 
+    if remote_name is not None:
+        raise click.UsageError('-r/--remote applies to per-thread sessions only.')
     doc = _load_doc(state, doc_path)
     if not prod and channel is not None:
         raise click.UsageError('--channel requires --prod.')

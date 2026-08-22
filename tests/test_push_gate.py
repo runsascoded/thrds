@@ -31,19 +31,25 @@ class PushSpy:
     sync overwrites it with what was pushed, like the real channel would."""
     returns: dict[str, DocThread] = field(default_factory=dict)
     prod_returns: dict[str, DocThread] = field(default_factory=dict)
+    by_name: dict[str, dict[str, DocThread]] = field(default_factory=dict)
     synced: list[list[str]] = field(default_factory=list)
+    synced_remotes: list[str] = field(default_factory=list)
     normalize: dict[str, str] = field(default_factory=dict)
 
     def __init__(self, *, token, channel):
         self.returns = {}
         self.prod_returns = {}
+        self.by_name = {}
         self.synced = []
+        self.synced_remotes = []
         self.normalize = {}
 
     def list_channels_by_name(self) -> dict[str, str]:
         return {}
 
     def pull_thread_states(self, remote, state, session_dir=None, slugs=None, download_emoji=True):
+        if remote.name in self.by_name:
+            return list(self.by_name[remote.name].values())
         returns = self.returns if remote.name == 'staging' else self.prod_returns
         return list(returns.values())
 
@@ -53,16 +59,21 @@ class PushSpy:
     def adopt_new_staging_threads(self, state, session_dir):
         return []
 
-    def sync_threads_staging(self, threads, state, dry_run=False, filenames=None, **kw):
+    def sync_threads_staging(self, threads, state, dry_run=False, filenames=None, remote=None, **kw):
         self.synced.append([t.slug for t in threads])
+        self.synced_remotes.append(remote.name if remote is not None else None)
         if not dry_run:
-            self.returns = {
+            stored = {
                 t.slug: DocThread(slug=t.slug, messages=[
                     DocMessage(content=self.normalize.get(m.content, m.content))
                     for m in t.messages
                 ])
                 for t in threads
             }
+            if remote is not None and remote.name in self.by_name:
+                self.by_name[remote.name] = stored
+            else:
+                self.returns = stored
         return DocSyncResult(
             channel='C0STAGE',
             preamble_ts=None,
@@ -253,3 +264,43 @@ def test_dry_run_neither_gates_nor_commits(session, spy):
     assert _git(session, 'rev-parse', 'HEAD') == head_before
     # (_git strips, so porcelain's leading space is gone.)
     assert _git(session, 'status', '--porcelain').splitlines() == ['M 01-alpha.md']
+
+
+# --- `push -r <remote>` ---
+
+
+def test_push_r_unknown_remote_is_refused(session, spy):
+    result = _push('-r', 'bogus', ok=False)
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        "Error: unknown remote 'bogus'; this session has: staging, prod."
+    )
+    assert spy.synced == []
+
+
+def test_push_r_prod_role_is_refused(session, spy):
+    result = _push('-r', 'prod', ok=False)
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        "Error: remote 'prod' is prod-role; `slck promote <slug>` posts a "
+        'thread to its target.'
+    )
+    assert spy.synced == []
+
+
+def test_push_r_syncs_gates_and_verifies_against_that_remote(session, spy):
+    """`-r scratch` end to end: the sync targets the named remote, and the
+    post-write verification records what it observed in *that* remote's ref —
+    the default staging ref is never created."""
+    state = SessionState.load(session)
+    state.remotes = {'scratch': {'role': 'staging', 'channel': 'C0SCRATCH'}}
+    state.save(session)
+    _git(session, 'add', 'thrds.yml')
+    _git(session, 'commit', '-q', '-m', 'declare scratch')
+    spy.by_name = {'scratch': {}}
+    result = _push('-r', 'scratch')
+    assert spy.synced_remotes == ['scratch']
+    assert _git(session, 'show', 'refs/remotes/scratch:01-alpha.md') == 'Alpha OP.'
+    assert _git(
+        session, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/',
+    ) == 'scratch'
