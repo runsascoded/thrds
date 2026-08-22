@@ -17,6 +17,7 @@ from click.testing import CliRunner
 
 from thrds import DocMessage, DocThread, SessionState, ThreadEntry, ThreadTarget, tracking
 from thrds.cli import SLACK_TOKEN_ENV, cli
+from thrds.state import RemotePointer
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -34,6 +35,7 @@ class PullSpy:
     def __init__(self, *, token, channel):
         self.returns = {}
         self.prod_returns = {}
+        self.by_name = {}
 
     def list_channels_by_name(self) -> dict[str, str]:
         return {}
@@ -41,6 +43,8 @@ class PullSpy:
     def pull_thread_states(self, remote, state, session_dir=None, slugs=None, download_emoji=True):
         # `fetch` is an observation: it must never ask for emoji downloads.
         assert download_emoji is False
+        if remote.name in self.by_name:
+            return list(self.by_name[remote.name].values())
         returns = self.returns if remote.name == 'staging' else self.prod_returns
         return list(returns.values())
 
@@ -418,3 +422,26 @@ def test_legacy_refs_migrate_on_first_touch(session, spy):
     assert _git(session, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/') == (
         'prod\nstaging'
     )
+
+
+def test_a_declared_extra_remote_fetches_into_its_own_ref(session, spy):
+    """The `remotes:` config section end to end: a scratch staging-role
+    remote gets its own tracking ref, and its copy lands in the composite
+    after the default staging remote's (declaration order within the role)."""
+    spy.returns = {'alpha': thread('alpha', 'Alpha OP.'), 'beta': thread('beta', 'Beta OP.')}
+    _run()  # confirmed bootstrap; staging + prod refs exist
+    state = SessionState.load(session)
+    state.remotes = {'scratch': {'role': 'staging', 'channel': 'C0SCRATCH'}}
+    state.threads['alpha'].remotes['scratch'] = RemotePointer(ts='5.5')
+    state.save(session)
+    spy.by_name = {'scratch': {'alpha': thread('alpha', 'Scratch copy.')}}
+    result = _run('scratch')
+    assert result.exit_code == 0
+    assert result.stderr.splitlines() == [
+        'staging: skipped (last observation kept)',
+        'scratch: initialized (1 file)',
+        'prod: skipped (last observation kept)',
+        'upstream: 1 file (01-alpha.md)',
+    ]
+    assert _git(session, 'show', 'refs/remotes/scratch:01-alpha.md') == 'Scratch copy.'
+    assert _git(session, 'show', f'{REMOTE}:01-alpha.md') == 'Scratch copy.'

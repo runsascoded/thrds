@@ -371,7 +371,8 @@ class SessionState:
     workspace_emoji: dict[str, str] = field(default_factory=dict)                    # custom emoji name → local filename (relative to session dir)
     channel_names: dict[str, str] = field(default_factory=dict)                      # channel id → name; a display-only cache, so a rename just goes stale
     threads: dict[str, ThreadEntry] = field(default_factory=dict)                    # slug → per-thread state (per-thread model; see `threads_legacy`)
-    staging_chrome: StagingChrome = field(default_factory=StagingChrome)             # staging-only affordances; never written into doc content
+    staging_chrome: StagingChrome = field(default_factory=StagingChrome)             # the default staging remote's chrome (session-level knob)
+    remotes: dict[str, dict] = field(default_factory=dict)                           # remotes config: name → {role, channel, chrome}; see `thrds.remotes.resolve`
 
     def __post_init__(self) -> None:
         if self.platform not in VALID_PLATFORMS:

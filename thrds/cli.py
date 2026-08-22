@@ -194,6 +194,12 @@ def _load_state(expected_platform: str | None = None) -> SessionState:
             f"use `thrds {state.platform} <verb>` instead of "
             f"`thrds {expected_platform} <verb>`."
         )
+    try:
+        # Validate the `remotes:` config once, at the door — every later
+        # `resolve` call in this invocation sees the same state.
+        remotes.resolve(state)
+    except ValueError as e:
+        raise click.UsageError(f'invalid remotes config in {STATE_PATH}: {e}')
     return state
 
 
@@ -1203,9 +1209,10 @@ def slack_pull(channel: str | None, mode: str | None, dry_run: bool, prod: bool,
                 'thrds: pull staging',
             )
             if is_git:
-                _refresh_composite(
-                    session_dir, state, {**staging_files, **render(prod_threads)},
-                )
+                _refresh_composite(session_dir, state, _merged_observations(
+                    session_dir, state,
+                    {tracking.STAGING: staging_files, tracking.PROD: render(prod_threads)},
+                ))
             return
 
         # rebase / merge: reconcile committed state onto the fetched base.
@@ -1218,9 +1225,10 @@ def slack_pull(channel: str | None, mode: str | None, dry_run: bool, prod: bool,
             session_dir, state, mode, comp_snap,
             renames=renames, adopted=adopted,
         )
-        _refresh_composite(
-            session_dir, state, {**staging_files, **render(prod_threads)},
-        )
+        _refresh_composite(session_dir, state, _merged_observations(
+            session_dir, state,
+            {tracking.STAGING: staging_files, tracking.PROD: render(prod_threads)},
+        ))
         return
 
     doc = (
@@ -1422,6 +1430,15 @@ def _fetch_refs(
         label = rmt.name
         if name not in fetched:
             ref_set = tracking.read_ref(session_dir, rmt.ref) is not None
+            if not ref_set and remotes.has_threads(rmt, state):
+                # Backstop for `pull`, which reads only the default remotes:
+                # with no stored observation, this remote's threads would be
+                # misrecorded as deleted in the composite (`slck fetch` has
+                # its own earlier guard with the same rule).
+                raise click.ClickException(
+                    f'{label} has threads but has never been fetched; run '
+                    f'`slck fetch {name}` first.'
+                )
             files = _stored_files(session_dir, state, name)
             err(f"{label}: skipped ({'last observation kept' if ref_set else 'never fetched'})")
         else:

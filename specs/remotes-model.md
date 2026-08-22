@@ -106,7 +106,21 @@ The prerequisite everything else queues behind (config section, `push`/`pull` re
 
 A second staging-role remote (Discord's own-server staging shape) is now real at the reader level — pinned by a unit test that reads a `scratch` remote's own channel via its own pointers. `remotes.observe`, `pull`, and `diff` all go through the one reader (diff iterates remotes in resolve order, which *is* the prod-over-staging precedence).
 
-Still open here: `remotes:` config with **preset chrome defaults** — resolve-time defaults keyed by (role, platform) so config records only deviations, accepting a preset name as string shorthand or a full mapping.
+### Landed 2026-08-22: the `remotes:` config section + chrome presets
+
+Roadmap item 1, honestly this time — the readers exist, so declared remotes work. `thrds.yml`:
+
+```yaml
+remotes:
+  staging: {chrome: none}                            # defaults accept channel/chrome overrides; roles fixed
+  scratch: {role: staging, channel: C0SCRATCH}       # staging-role extras must name their channel
+  archive: {role: prod}                              # prod-role extras may (pointers carry their own)
+```
+
+- **Chrome resolution**: explicit `chrome:` (preset name `footer`/`none`, or a `StagingChrome` mapping) > session-level `staging_chrome` for the default staging remote (the existing knob keeps working) > role preset (staging → `footer`, prod → `none`). The five chrome sites in `slack.py` now read the resolved staging remote's chrome, and a resolved `None` disables rendering — "prod messages carry no chrome" is now prod's chrome config, not a hardcoded rule. Platform-keyed presets (gthb item → gist-link footer; dscrd like slck) are the extension point when those platforms land.
+- **Validation at the door**: `resolve` raises on unknown keys, bad roles, a role override on a default, a channel-less staging-role extra, `upstream` as a name, unknown presets; `_load_state` surfaces it once as a usage error.
+- **Composite honesty for extras**: order is all staging-role remotes then all prod-role (within a role: defaults, then declaration order); `pull`'s composite refresh goes through `_merged_observations` so extras' stored refs feed the merge base; and both `fetch`'s partial guard and a `_fetch_refs` backstop (for `pull`, which only reads the default remotes) refuse when a declared remote has thread pointers but no stored observation — its threads would be misrecorded as deleted.
+- What extras can *do* today: `fetch <name>` fully, feed `diff`'s classification and the merge base, carry chrome config. `push`/`pull`/`promote` still address the defaults — verbs taking a remote argument is the remaining roadmap item, now purely a CLI-surface change.
 
 ## Observations are now write-free (2026-08-21)
 

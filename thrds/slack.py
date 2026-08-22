@@ -46,6 +46,7 @@ from .refs import (
     thread_has_refs,
     validate_refs,
 )
+from . import remotes
 from .remotes import Remote
 from .richtext import render as render_rich_text, rich_text_enabled
 from .state import SessionState, ThreadEntry, ThreadTarget
@@ -1062,7 +1063,9 @@ class SlackClient:
         to its file in the gist. See `thrds.chrome` for the shape and why it
         lives in the text rather than in blocks.
         """
-        chrome = state.staging_chrome
+        chrome = remotes.resolve(state)[STAGING].chrome
+        if chrome is None:
+            return None
         entry = state.threads.get(slug)
         target = state.target_for(slug) if chrome.target_link else None
         posted = entry.posted_url if (
@@ -1205,7 +1208,8 @@ class SlackClient:
         filenames: dict[str, str],
     ) -> dict[str, str]:
         """Map each thread's slug → its footer line."""
-        if not state.staging_chrome.any_enabled:
+        chrome = remotes.resolve(state)[STAGING].chrome
+        if chrome is None or not chrome.any_enabled:
             return {}
         slugs = [t.slug for t in threads]
         target_urls = self._target_urls(state, slugs)
@@ -1299,9 +1303,11 @@ class SlackClient:
         # A terminal thread's staged copy finalizes: chrome moves into blocks,
         # which Slack renders more quietly and — the point — makes uneditable.
         # `reopen` is the way back.
+        staging_chrome = remotes.resolve(state)[STAGING].chrome
         self._finalized_slugs = {
             slug for slug, e in state.threads.items()
-            if e.is_terminal and state.staging_chrome.finalize_terminal
+            if e.is_terminal and staging_chrome is not None
+            and staging_chrome.finalize_terminal
         }
         self._register_chrome(doc.threads)
         self._register_chrome(phase2_doc.threads)
@@ -2140,7 +2146,8 @@ class SlackClient:
         why renaming is safe. Terminal threads are skipped: a `posted` thread's
         target is a record of where it went, not an instruction.
         """
-        if state.staging_channel is None or not state.staging_chrome.any_enabled:
+        chrome_cfg = remotes.resolve(state)[STAGING].chrome
+        if state.staging_channel is None or chrome_cfg is None or not chrome_cfg.any_enabled:
             return {}
         prev_channel, self.channel = self.channel, state.staging_channel
         edits: dict[str, ChromeEdit] = {}
@@ -2155,7 +2162,7 @@ class SlackClient:
                 was, now = entry.target, None
                 channel = (
                     self._resolve_chrome_channel(chrome)
-                    if state.staging_chrome.target_link else None
+                    if chrome_cfg.target_link else None
                 )
                 if channel is not None:
                     candidate = ThreadTarget(channel=channel, thread_ts=chrome.thread_ts)

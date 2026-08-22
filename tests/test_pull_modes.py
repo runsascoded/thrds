@@ -16,6 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 from thrds import DocMessage, DocThread, SessionState, ThreadEntry, tracking
+from thrds.state import RemotePointer
 from thrds.cli import SLACK_TOKEN_ENV, cli
 
 
@@ -268,3 +269,22 @@ def test_dry_run_moves_nothing(session, spy):
     assert (session / '01-alpha.md').read_text() == 'Alpha OP.\n'
     assert _git(session, 'rev-parse', REMOTE) == ref_before
     assert _git(session, 'rev-parse', 'HEAD') == head_before
+
+
+def test_pull_refuses_a_declared_remote_that_was_never_fetched(session, spy):
+    """`pull` reads only the default remotes, so an extra remote with thread
+    pointers but no stored observation would have its threads misrecorded as
+    deleted in the composite — same rule as `fetch`'s partial guard."""
+    _seed(spy)
+    state = SessionState.load(session)
+    state.remotes = {'scratch': {'role': 'staging', 'channel': 'C0SCRATCH'}}
+    state.threads['alpha'].remotes['scratch'] = RemotePointer(ts='5.5')
+    state.save(session)
+    _git(session, 'add', 'thrds.yml')
+    _git(session, 'commit', '-q', '-m', 'declare scratch')
+    result = _run(ok=False)
+    assert result.exit_code == 1
+    assert result.stderr.splitlines()[-1] == (
+        'Error: scratch has threads but has never been fetched; run '
+        '`slck fetch scratch` first.'
+    )
