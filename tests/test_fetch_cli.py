@@ -293,6 +293,13 @@ def test_ambiguous_bootstrap_withholds_the_composite(session, spy):
         'prod\nstaging'
     )
     assert _git(session, 'for-each-ref', 'refs/heads/upstream') == ''
+    # Same reasoning one level down: an observation that disagrees with local
+    # is not an incorporation, so it must not become the push gate's base —
+    # that would let the next push believe it had already taken Slack's side.
+    # (`base/prod` is set because prod came back empty: nothing to incorporate.)
+    assert _git(
+        session, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/base/',
+    ) == 'base/prod'
 
 
 # --- per-remote fetch (`slck fetch <remote>...`) ---
