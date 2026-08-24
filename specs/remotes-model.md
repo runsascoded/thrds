@@ -135,3 +135,36 @@ The one leak in "fetch touches nothing": staging/prod pulls download `emoji-*` f
 > we should be able to configure msg "chrome" on a per-remote basis, e.g.: slck: staging-channel msgs get footer MD, prod msgs don't; gthb: "item" remotes get (in)visible footer Gist link; dscrd: maybe same as slck
 
 The feature table above already hinted at this ("staging-only chrome footer | a rendering option of the staging remote") — this makes it a design commitment: chrome config hangs off the *remote*, not the platform or the lifecycle state. Today's `StagingChrome` is then the staging remote's chrome block, and "prod messages carry no chrome" stops being a hardcoded rule and becomes the prod remote's (empty) chrome config. The ghpr case shows why remote-level is the right altitude: its *item* remotes carry a gist-link footer (ghpr's existing visible/HTML-comment footer modes ≈ the `(in)visible` knob), while its gist remote carries none — same tool, different chrome per remote. Lands with the `remotes:` config section: `{name: {role, channel, chrome: {...}}}`, with `render`/`parse` (`thrds.chrome`) taking the remote's chrome config instead of reading session-level `staging_chrome`. Migration: session-level `staging_chrome` becomes the default chrome block `init` writes onto staging-role remotes.
+
+## Landed 2026-08-23: ghpr merged in as the `github` platform adapter (Ryan)
+
+The convergence recorded above was a *protocol* convergence maintained by hand across two repos: verb surface, `pull -m` modes, `refs/remotes/<name>`, the truthful-ref rule, the push gate, gist-as-record. Ryan rejected leaving it there —
+
+> i don't like the idea of the 2 libraries just staying in sync (re: "protocol") without sharing code. it was a lot of work and back and forth b/w the 2 to get to this state, we should lock in the convergence now. factoring a shared core to its own library seems like polyrepo-overkill; that core may as well exist in one of the existing repos.
+
+— and the argument this session made for waiting does not survive its own evidence. "Rule of three hasn't fired" was false (slack/discord/bsky are already three adapters, ghpr the fourth implementation of the sync discipline); "ghpr is more mature/published" is immaterial at ~0 external users; and "the interface is still being discovered" cuts the other way, since discovery happens here and every discovery had to be hand-carried across by spec round-trip. The drift was already concrete: **ghpr's push gate moved to `merge-base --is-ancestor`** after catching the content-level check self-clearing (a refusal advances the ref, so the retry sees nothing new and the overwrite lands), and flagged that thrds' gate inherits the same property. That is still open here — see below.
+
+**Layout.** The seam both sides independently found is `{filename: content}` — `remotes.observe()` returns it, ghpr's `build_snapshot()` builds from it — so the sync engine never needs to know what a remote *is*. Target shape:
+
+```
+thrds/
+  sync/       refs, fetch, reconcile, gate, bootstrap, mirror, remotes, pointers
+  doc/        md parse/serialize, file-layout interface, lint
+  platforms/  slack/ discord/ bsky/ github/
+```
+
+**How the merge was done.** `git mv` relocation as one commit on top of `ghpr/main` (built here, since a sibling session owns that working tree), then `git merge --allow-unrelated-histories`. Conflict-free — only four tracked paths collided (`pyproject.toml`, `uv.lock`, `README.md`, the release workflow), and `specs/`, `tests/`, and the source trees are disjoint. Deliberately *not* `filter-repo --to-subdirectory-filter`: that rewrites every ghpr SHA, and this spec and `converge-fetch-refs-ux.md` cross-reference several by hash. ghpr's SHAs are ancestors of HEAD and `git log --follow` walks through the rename.
+
+**What landed:** the relocation + merge; `utz` as a dep; `ghpr` as a console script pointing at the group `thrds github` mounts (same arrangement as `slck`, so the name and the `ghprc`/`ghprd`/`ghprp` aliases outlive the distribution); a `_LazyGroup` that defers the `utz` import (~400ms of pandas/IPython) off every `slck` invocation; and per-platform session dirs (`slck/`, `dscrd/`, `bsky/`, `capture/`) converging with `gh/`. 1264 tests passing, both suites in one run.
+
+**Explicitly not done yet — the unification itself**, bottom-up, each step deleting one of two implementations:
+
+1. **Refs** — `ghpr/refs.py` + `thrds/tracking.py` → one module. Smallest and most converged; do it first.
+2. **The push gate**, which forces the open question above: adopt `merge-base --is-ancestor`, or define what "HEAD contains what the remote currently says" means for a composite that is a side chain by design. This is a live bug-class, not a cleanup.
+3. **Bootstrap ambiguity** — ghpr refuses to guess unless the fetch confirms the guess; thrds sidesteps structurally via the composite overlay. Pick one.
+4. **The gist mirror** — `ghpr/gist.py`'s mirror half + `thrds/mirror.py`.
+5. **Named remotes on the GitHub side** — item and gist become two remotes, at which point ghpr's (in)visible gist-link footer is per-remote chrome exactly as the section above predicts.
+
+**Also converge, noticed in passing:** ghpr locates its clone by walking parent dirs for `gh/<n>/` plus git config (`pr.owner`/`pr.repo`/`pr.number`), so its verbs work anywhere inside a clone; thrds' `_load_state` reads `thrds.yml` from the cwd and errors otherwise. ghpr's is the better behavior.
+
+**ghpr's repo** archives; the PyPI distribution `ghpr-py` gets a deprecation note rather than a yank (yanking breaks anyone pinned and buys nothing). The `ghpr` *command* is unaffected — it ships from here now.
