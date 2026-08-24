@@ -160,8 +160,8 @@ thrds/
 **Explicitly not done yet — the unification itself**, bottom-up, each step deleting one of two implementations:
 
 1. **Refs** — `ghpr/refs.py` + `thrds/tracking.py` → one module. Smallest and most converged; do it first.
-2. **The push gate**, which forces the open question above: adopt `merge-base --is-ancestor`, or define what "HEAD contains what the remote currently says" means for a composite that is a side chain by design. This is a live bug-class, not a cleanup.
-3. **Bootstrap ambiguity** — ghpr refuses to guess unless the fetch confirms the guess; thrds sidesteps structurally via the composite overlay. Pick one.
+2. ~~**The push gate**~~ — **done 2026-08-24**, ahead of the refs merge because it was a live bug rather than a cleanup. thrds' gate self-cleared exactly as ghpr's had; the answer for a side-chain composite turned out to be a second ref (`refs/heads/base/<name>`) recording what HEAD has *incorporated*, which is the same standing question `--is-ancestor` asks without needing the composite to be an ancestor. Both adapters now refuse a second time. `specs/done/push-gate-ancestry.md`.
+3. **Bootstrap ambiguity** — ghpr refuses to guess unless the fetch confirms the guess; thrds sidesteps structurally via the composite overlay. Pick one. **Now the remaining hole in the gate**: with no base recorded, `push` still proceeds as "local wins".
 4. **The gist mirror** — `ghpr/gist.py`'s mirror half + `thrds/mirror.py`.
 5. **Named remotes on the GitHub side** — item and gist become two remotes, at which point ghpr's (in)visible gist-link footer is per-remote chrome exactly as the section above predicts.
 
