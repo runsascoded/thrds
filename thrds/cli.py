@@ -741,9 +741,16 @@ def _ensure_refs(session_dir: Path, state: SessionState) -> None:
     `refs/remotes/{staging,prod}` + `refs/heads/upstream` (converged with
     ghpr: remote-name-first, and the composite out of `refs/remotes/`
     entirely, since it isn't one). Quiet when there's nothing to move.
+
+    Also seeds the push gate's base refs once, for sessions that predate them
+    — otherwise their first push after the upgrade would be ungated. See
+    `tracking.seed_base_refs`.
     """
     for old, new in tracking.migrate_refs(session_dir, state.platform):
         err(f'ref migrated: {old} → {new}')
+    seeded = tracking.seed_base_refs(session_dir, list(remotes.resolve(state)))
+    if seeded:
+        err(f"gate base seeded from last observation: {', '.join(seeded)}")
 
 
 def _stored_files(session_dir: Path, state: SessionState, name: str) -> dict[str, str]:

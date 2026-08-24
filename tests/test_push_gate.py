@@ -351,3 +351,38 @@ def test_push_r_syncs_gates_and_verifies_against_that_remote(session, spy):
     assert _git(
         session, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/',
     ) == 'scratch'
+
+
+def test_gate_survives_a_session_that_predates_the_base_ref(session, spy):
+    """A session fetched before base refs existed has an observation ref and no
+    base. Starting it at "nothing incorporated" would leave the first push
+    after the upgrade completely unguarded — strictly worse than the behavior
+    being replaced, which did gate against the observation."""
+    _seed(spy)
+    # A session from before the upgrade: observation refs, no base, and no
+    # record of having been seeded.
+    _git(session, 'update-ref', '-d', 'refs/heads/base/staging')
+    _git(session, 'config', '--unset', tracking.SEEDED_KEY)
+    spy.returns['alpha'] = thread('alpha', 'Alpha OP, edited in Slack.')
+    (session / '01-alpha.md').write_text('Alpha OP, edited locally.\n')
+    result = _push(ok=False)
+    assert result.exit_code == 1
+    assert spy.synced == []
+
+
+def test_the_base_seed_does_not_repeat(session, spy):
+    """The seed is a one-time migration, not a rule.
+
+    "Base missing → adopt the observation" would be the self-clearing bug
+    wearing a different hat, since a diverged fetch also leaves the base unset.
+    The config flag, not the ref's absence, is what makes it happen once.
+    """
+    _seed(spy)
+    _git(session, 'update-ref', '-d', 'refs/heads/base/staging')
+    spy.returns['alpha'] = thread('alpha', 'Alpha OP, edited in Slack.')
+    CliRunner().invoke(cli, ['slack', 'fetch'], catch_exceptions=False)
+    # `base/prod` survives from the seed (only staging's was deleted); the
+    # point is that staging's is *not* recreated from the diverged observation.
+    assert _git(
+        session, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/base/',
+    ) == 'base/prod'

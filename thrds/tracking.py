@@ -103,6 +103,39 @@ def set_base(session_dir: Path, name: str, sha: str) -> None:
     _git(session_dir, 'update-ref', base_ref_name(name), sha)
 
 
+SEEDED_KEY = 'thrds.baseRefsSeeded'
+
+
+def seed_base_refs(session_dir: Path, names: list[str]) -> list[str]:
+    """One-time: adopt each remote's observation ref as its gate base.
+
+    A session fetched before base refs existed has observations but no record
+    of what HEAD incorporated. Left unset, the *first* push after the upgrade
+    would find no base and sail through as a bootstrap — unguarded, which is
+    strictly worse than the behavior being replaced (that one gated against the
+    observation). Seeding from the observation restores exactly the old
+    protection, and is safe in the same way the old gate was.
+
+    Guarded by a config flag rather than by "is the base missing?", because
+    missing is *also* how a legitimately diverged fetch leaves things: re-seeding
+    on every command would hand the gate its own answer again, which is the bug
+    the base ref exists to prevent. Runs once per session, then never again.
+
+    Returns the names seeded (empty on every call after the first).
+    """
+    if config_get(session_dir, SEEDED_KEY) is not None:
+        return []
+    seeded = []
+    for name in names:
+        if read_ref(session_dir, base_ref_name(name)) is not None:
+            continue
+        if (sha := read_ref(session_dir, ref_name(name))) is not None:
+            set_base(session_dir, name, sha)
+            seeded.append(name)
+    _git(session_dir, 'config', SEEDED_KEY, '1')
+    return seeded
+
+
 def migrate_refs(session_dir: Path, platform: str) -> list[tuple[str, str]]:
     """Move a session's refs from the legacy layout to the current one.
 
