@@ -12,7 +12,7 @@ Two platform subgroups today:
   (Discord, elsewhere) while still capturing iteration history to a gist.
 
 Each session lives in its own directory (ghpr-style:
-``<git-root-or-cwd>/thrds/<slug>/``) with its own private git repo (nested
+``<git-root-or-cwd>/slck/<slug>/``) with its own private git repo (nested
 `.git/` is invisible to any surrounding project's git). A secret gist created
 at init becomes the ``g`` remote; state-mutating verbs auto-commit + push, so
 the mirror always reflects the current session state.
@@ -352,7 +352,7 @@ def _do_init(
     slug = doc_p.stem
     if not slug:
         raise click.UsageError(f"cannot derive a slug from DOC_PATH: {doc_path!r}")
-    target = mirror.resolve_session_dir(Path.cwd(), slug)
+    target = mirror.resolve_session_dir(Path.cwd(), slug, platform)
 
     if target.exists():
         if not (target / STATE_PATH).is_file() and not (target / LEGACY_STATE_PATH).is_file():
@@ -716,7 +716,7 @@ def slack_cli():
 def slack_init(no_gist: bool, prefix: str | None, doc_path: str):
     """Initialize a `thrds slack` session for DOC_PATH (a `.md` file).
 
-    Creates ``<git-root-or-cwd>/thrds/<slug>/`` (ghpr-style), copies or
+    Creates ``<git-root-or-cwd>/slck/<slug>/`` (ghpr-style), copies or
     creates the doc there, `git init`s the session dir, and by default
     creates a secret gist and adds it as the ``g`` remote.
 
@@ -2516,7 +2516,7 @@ def capture_cli():
     """Capture-only sessions: git + gist trajectory, no platform posting.
 
     Same on-disk shape as slack sessions (session dir under
-    ``<git-root-or-cwd>/thrds/<slug>/``, git-tracked, gist-mirrored) minus
+    ``<git-root-or-cwd>/capture/<slug>/``, git-tracked, gist-mirrored) minus
     any Slack/Discord/etc. plumbing. Useful for drafting posts you'll
     paste manually (Discord in a channel the bot can't reach, arbitrary
     forum, etc.) while still capturing iteration history to a gist.
@@ -2618,7 +2618,7 @@ def discord_init(no_gist: bool, doc_path: str):
     """Initialize a `thrds discord` session for DOC_PATH.
 
     Same on-disk shape as `slack init` / `capture init` — session dir under
-    ``<git-root-or-cwd>/thrds/<slug>/``, optionally gist-mirrored. No Slack
+    ``<git-root-or-cwd>/capture/<slug>/``, optionally gist-mirrored. No Slack
     plumbing.
     """
     target, state, was_resume = _do_init(doc_path, no_gist, channel_prefix=None, platform='discord')
@@ -2722,7 +2722,7 @@ def bsky_init(no_gist: bool, doc_path: str):
     """Initialize a `thrds bsky` session for DOC_PATH.
 
     Same on-disk shape as `slack init` / `discord init` / `capture init` —
-    session dir under ``<git-root-or-cwd>/thrds/<slug>/``, optionally
+    session dir under ``<git-root-or-cwd>/bsky/<slug>/``, optionally
     gist-mirrored. No atproto plumbing.
     """
     target, state, was_resume = _do_init(doc_path, no_gist, channel_prefix=None, platform='bsky')

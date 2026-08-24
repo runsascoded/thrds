@@ -2,7 +2,7 @@
 
 Session dir layout (ghpr-style, per `gh/{number}/`):
 
-    <parent-git-root-or-cwd>/thrds/<slug>/    session dir; one per doc
+    <parent-git-root-or-cwd>/<platform>/<slug>/   session dir; one per doc
       .git/                                   private git repo (nested is fine)
       thrds.yml                              thrds state (flat: gists reject dirs)
       <slug>.md                               the doc
@@ -62,7 +62,7 @@ def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess
 def find_git_root(start: Path) -> Path | None:
     """Walk up from ``start`` to the nearest git repo root; None if none.
 
-    Used to place ``thrds/<slug>/`` under the enclosing project's root when
+    Used to place ``<platform>/<slug>/`` under the enclosing project's root when
     one exists (co-located with the work it's for); falls back to ``start``
     otherwise.
     """
@@ -78,10 +78,28 @@ def is_git_repo(path: Path) -> bool:
     return (path / '.git').is_dir()
 
 
-def resolve_session_dir(cwd: Path, doc_slug: str) -> Path:
-    """Compute the target session dir: ``<git-root-or-cwd>/thrds/<slug>/``."""
+# A session dir is named for its *platform*, not for the tool: one repo can
+# hold `gh/` PR clones beside `slck/` Slack sessions and they stay visibly
+# separate. Each name is that platform's conventional short form — the same
+# one its CLI alias uses. (`gh/` follows the same rule from the GitHub side:
+# it names the platform, while `ghpr` names the tool.)
+SESSION_DIRS = {
+    'slack': 'slck',
+    'discord': 'dscrd',
+    'bsky': 'bsky',
+    'capture': 'capture',
+}
+
+
+def resolve_session_dir(cwd: Path, doc_slug: str, platform: str) -> Path:
+    """Compute the target session dir: ``<git-root-or-cwd>/<platform>/<slug>/``."""
     root = find_git_root(cwd) or cwd
-    return root / 'thrds' / doc_slug
+    if platform not in SESSION_DIRS:
+        raise ValueError(
+            f"No session dir configured for platform {platform!r} "
+            f"(known: {', '.join(sorted(SESSION_DIRS))})"
+        )
+    return root / SESSION_DIRS[platform] / doc_slug
 
 
 def init_repo(session_dir: Path) -> None:

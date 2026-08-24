@@ -46,7 +46,7 @@ def _init_discord(in_tmp: Path, monkeypatch, doc_name: str = 'draft.md',
     result = CliRunner().invoke(cli, ['discord', 'init', '--no-gist', doc_name])
     assert result.exit_code == 0, (result.output, result.stderr)
     slug = Path(doc_name).stem
-    session_dir = in_tmp / 'thrds' / slug
+    session_dir = in_tmp / 'dscrd' / slug
     monkeypatch.chdir(session_dir)
     return session_dir
 
@@ -58,7 +58,7 @@ def test_discord_init_writes_platform_discord(in_tmp):
     _write_doc(in_tmp)
     result = CliRunner().invoke(cli, ['discord', 'init', '--no-gist', 'draft.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
-    session = in_tmp / 'thrds' / 'draft'
+    session = in_tmp / 'dscrd' / 'draft'
     state = SessionState.load(session)
     assert state.platform == 'discord'
     assert state.doc_path == 'draft.md'
@@ -171,7 +171,7 @@ def test_discord_verb_on_slack_session_errors_clearly(in_tmp, monkeypatch):
     r1 = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'draft.md'])
     assert r1.exit_code == 0
     slug = Path('draft.md').stem
-    monkeypatch.chdir(in_tmp / 'thrds' / slug)
+    monkeypatch.chdir(in_tmp / 'slck' / slug)
 
     result = CliRunner().invoke(cli, ['discord', 'lint'])
     assert result.exit_code == 2

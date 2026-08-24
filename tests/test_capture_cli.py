@@ -55,7 +55,7 @@ def _init_capture(in_tmp: Path, monkeypatch, doc_name: str = 'notes.md') -> Path
     result = CliRunner().invoke(cli, ['capture', 'init', '--no-gist', doc_name])
     assert result.exit_code == 0, (result.output, result.stderr)
     slug = Path(doc_name).stem
-    session_dir = in_tmp / 'thrds' / slug
+    session_dir = in_tmp / 'capture' / slug
     monkeypatch.chdir(session_dir)
     return session_dir
 
@@ -66,7 +66,7 @@ def _init_slack(in_tmp: Path, monkeypatch, doc_name: str = 'notes.md') -> Path:
     result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', doc_name])
     assert result.exit_code == 0, (result.output, result.stderr)
     slug = Path(doc_name).stem
-    session_dir = in_tmp / 'thrds' / slug
+    session_dir = in_tmp / 'slck' / slug
     monkeypatch.chdir(session_dir)
     return session_dir
 
@@ -78,7 +78,7 @@ def test_capture_init_no_gist_writes_platform_capture(in_tmp):
     _write_doc(in_tmp)
     result = CliRunner().invoke(cli, ['capture', 'init', '--no-gist', 'notes.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
-    session = in_tmp / 'thrds' / 'notes'
+    session = in_tmp / 'capture' / 'notes'
     state = SessionState.load(session)
     assert state.platform == 'capture'
     assert state.doc_path == 'notes.md'
@@ -90,7 +90,7 @@ def test_capture_init_no_gist_writes_platform_capture(in_tmp):
 def test_capture_init_no_gist_creates_git_repo_with_initial_commit(in_tmp):
     _write_doc(in_tmp)
     CliRunner().invoke(cli, ['capture', 'init', '--no-gist', 'notes.md'])
-    session = in_tmp / 'thrds' / 'notes'
+    session = in_tmp / 'capture' / 'notes'
     log = subprocess.run(
         ['git', 'log', '--format=%s'],
         cwd=session, capture_output=True, text=True, check=True,
@@ -138,7 +138,7 @@ def test_capture_init_gist_flow_calls_create_gist_and_records_gist_id(in_tmp, mo
     result = CliRunner().invoke(cli, ['capture', 'init', 'notes.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
 
-    session_dir = in_tmp / 'thrds' / 'notes'
+    session_dir = in_tmp / 'capture' / 'notes'
     state = SessionState.load(session_dir)
     assert state.platform == 'capture'
     assert state.gist_id == 'abc123'
@@ -253,36 +253,35 @@ def test_capture_open_on_slack_session_errors_clearly(in_tmp, monkeypatch):
     )
 
 
-# --- cross-platform init reject ---
+# --- cross-platform init ---
 
 
-def test_capture_init_rejects_slack_partial_init_dir(in_tmp, monkeypatch):
-    """Partial `slack init` on disk (gist_id=None) → `capture init <same doc>` refuses
-    rather than silently rewriting the session's platform. Message tells the user to
-    re-run with the original platform (or delete the dir to reset)."""
-    # Bootstrap a partial slack init: no-gist mode leaves state.gist_id=None even
-    # after "successful" init, so it looks the same as a real partial-init dir.
+def test_init_across_platforms_no_longer_collides(in_tmp):
+    """Per-platform session dirs mean one doc can hold a session per platform.
+
+    These two inits used to fight over a single ``thrds/<slug>/``; they now
+    land in ``slck/notes`` and ``capture/notes`` and never see each other.
+    """
     _write_doc(in_tmp)
     r1 = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'notes.md'])
-    assert r1.exit_code == 0
-    # But we need to also NOT be in the "already exists (no-gist mode)" branch —
-    # so make the state look partial by clearing gist_id AND removing the --no-gist
-    # early-exit hint (which requires re-invoking capture init WITHOUT --no-gist).
-    r2 = CliRunner().invoke(cli, ['capture', 'init', 'notes.md'])
-    assert r2.exit_code == 2
-    # The first `if existing.platform != platform:` check fires before any of
-    # the gist-id branches, so the message names the mismatch cleanly.
-    assert r2.stderr.splitlines()[-1] == (
-        "Error: Target session dir was inited for platform 'slack'; "
-        "use `thrds slack init` (or delete the dir to reset)."
-    )
+    assert r1.exit_code == 0, (r1.output, r1.stderr)
+    r2 = CliRunner().invoke(cli, ['capture', 'init', '--no-gist', 'notes.md'])
+    assert r2.exit_code == 0, (r2.output, r2.stderr)
+    assert [
+        SessionState.load(in_tmp / d / 'notes').platform
+        for d in ('slck', 'capture')
+    ] == ['slack', 'capture']
 
 
-def test_slack_init_rejects_capture_partial_init_dir(in_tmp, monkeypatch):
-    """Symmetric: `slack init` on a capture-inited dir refuses."""
+def test_init_rejects_a_dir_inited_for_another_platform(in_tmp):
+    """The platform guard now only fires on a hand-moved dir — so it must read
+    the *stamped* platform, not infer one from the path it was found at."""
     _write_doc(in_tmp)
     r1 = CliRunner().invoke(cli, ['capture', 'init', '--no-gist', 'notes.md'])
-    assert r1.exit_code == 0
+    assert r1.exit_code == 0, (r1.output, r1.stderr)
+    (in_tmp / 'slck').mkdir()
+    (in_tmp / 'capture' / 'notes').rename(in_tmp / 'slck' / 'notes')
+
     r2 = CliRunner().invoke(cli, ['slack', 'init', 'notes.md'])
     assert r2.exit_code == 2
     assert r2.stderr.splitlines()[-1] == (

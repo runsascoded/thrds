@@ -173,7 +173,7 @@ def _init_session(in_tmp: Path, monkeypatch, doc_name: str = 'trainium.md',
                   doc_text: str = "=== a\n\nOP a.\n") -> Path:
     """Write the doc, run `thrds slack init --no-gist <doc>`, chdir to session dir.
 
-    Returns the session dir path (=``in_tmp / 'thrds' / <slug>``). Every
+    Returns the session dir path (=``in_tmp / 'slck' / <slug>``). Every
     test that needs a live session uses this helper; init-specific tests
     call `init` directly and inspect the target dir.
     """
@@ -181,7 +181,7 @@ def _init_session(in_tmp: Path, monkeypatch, doc_name: str = 'trainium.md',
     result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', doc_name])
     assert result.exit_code == 0, (result.output, result.stderr)
     slug = Path(doc_name).stem
-    session_dir = in_tmp / 'thrds' / slug
+    session_dir = in_tmp / 'slck' / slug
     monkeypatch.chdir(session_dir)
     return session_dir
 
@@ -192,7 +192,7 @@ def test_init_creates_session_subdir_with_state_json_and_doc(in_tmp):
     _write_doc(in_tmp)
     result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
-    session = in_tmp / 'thrds' / 'trainium'
+    session = in_tmp / 'slck' / 'trainium'
     assert (session / STATE_PATH).is_file()
     assert (session / 'trainium.md').read_text() == "=== a\n\nOP a.\n"
     state = SessionState.load(session)
@@ -205,7 +205,7 @@ def test_init_creates_session_subdir_with_state_json_and_doc(in_tmp):
 def test_init_creates_git_repo_with_initial_commit(in_tmp):
     _write_doc(in_tmp)
     CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
-    session = in_tmp / 'thrds' / 'trainium'
+    session = in_tmp / 'slck' / 'trainium'
     assert (session / '.git').is_dir()
     log = subprocess.run(
         ['git', 'log', '--format=%s'],
@@ -217,7 +217,7 @@ def test_init_creates_git_repo_with_initial_commit(in_tmp):
 def test_init_records_prefix_override(in_tmp):
     _write_doc(in_tmp)
     CliRunner().invoke(cli, ['slack', 'init', '--no-gist', '-p', 'rw-', 'trainium.md'])
-    state = SessionState.load(in_tmp / 'thrds' / 'trainium')
+    state = SessionState.load(in_tmp / 'slck' / 'trainium')
     assert state.channel_prefix == 'rw-'
 
 
@@ -228,7 +228,7 @@ def test_init_refuses_second_run_with_no_gist(in_tmp):
     result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        f"Error: Target session dir already exists (no-gist mode): {in_tmp / 'thrds' / 'trainium'}"
+        f"Error: Target session dir already exists (no-gist mode): {in_tmp / 'slck' / 'trainium'}"
     )
 
 
@@ -242,7 +242,7 @@ def test_init_resumes_partial_when_gist_id_null_and_gist_flag_set(in_tmp, monkey
     # First init: no gist, leaves state.json with gist_id=None.
     r1 = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     assert r1.exit_code == 0, (r1.output, r1.stderr)
-    session = in_tmp / 'thrds' / 'trainium'
+    session = in_tmp / 'slck' / 'trainium'
     assert SessionState.load(session).gist_id is None
 
     # Mock the mirror module boundary so the resumed gist step succeeds
@@ -286,7 +286,7 @@ def test_init_refuses_when_already_fully_initialized(in_tmp, monkeypatch):
 
     r2 = CliRunner().invoke(cli, ['slack', 'init', 'trainium.md'])
     assert r2.exit_code == 2
-    session = in_tmp / 'thrds' / 'trainium'
+    session = in_tmp / 'slck' / 'trainium'
     assert r2.stderr.splitlines()[-2] == (
         f"Error: Target session dir already fully initialized (gist_id=fully_done): {session}"
     )
@@ -295,11 +295,11 @@ def test_init_refuses_when_already_fully_initialized(in_tmp, monkeypatch):
 def test_init_refuses_when_target_dir_exists_without_state_json(in_tmp):
     """Existing target dir without a thrds.yml — refuse (not our dir)."""
     _write_doc(in_tmp)
-    (in_tmp / 'thrds' / 'trainium').mkdir(parents=True)
+    (in_tmp / 'slck' / 'trainium').mkdir(parents=True)
     result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        f"Error: Target dir exists but has no thrds.yml — not a thrds session dir: {in_tmp / 'thrds' / 'trainium'}"
+        f"Error: Target dir exists but has no thrds.yml — not a thrds session dir: {in_tmp / 'slck' / 'trainium'}"
     )
 
 
@@ -307,14 +307,14 @@ def test_init_creates_empty_doc_when_source_absent(in_tmp):
     """If DOC_PATH doesn't exist in CWD, init creates it empty in the session dir."""
     result = CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'brandnew.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
-    dest = in_tmp / 'thrds' / 'brandnew' / 'brandnew.md'
+    dest = in_tmp / 'slck' / 'brandnew' / 'brandnew.md'
     assert dest.read_text() == ""
 
 
 def test_init_state_file_is_valid_yaml(in_tmp):
     _write_doc(in_tmp)
     CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
-    text = (in_tmp / 'thrds' / 'trainium' / STATE_PATH).read_text()
+    text = (in_tmp / 'slck' / 'trainium' / STATE_PATH).read_text()
     data = yaml.safe_load(text)
     assert data['doc_path'] == 'trainium.md'
     assert data['staging_archived'] is False
@@ -351,7 +351,7 @@ def test_init_gist_flow_calls_create_gist_aligns_and_records_gist_id(in_tmp, mon
     result = CliRunner().invoke(cli, ['slack', 'init', 'trainium.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
 
-    session_dir = in_tmp / 'thrds' / 'trainium'
+    session_dir = in_tmp / 'slck' / 'trainium'
     state = SessionState.load(session_dir)
     assert state.gist_id == 'abc123'
 
@@ -505,7 +505,7 @@ def test_pull_prod_passes_channel(in_tmp, monkeypatch, spy):
     assert spy.pull_calls == [{
         'mode': 'prod',
         'channel': 'C_OTHER',
-        'session_dir': in_tmp / 'thrds' / 'trainium',
+        'session_dir': in_tmp / 'slck' / 'trainium',
     }]
 
 

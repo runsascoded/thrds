@@ -32,7 +32,7 @@ def _init_bsky(in_tmp: Path, monkeypatch, doc_name: str = 'draft.md',
     result = CliRunner().invoke(cli, ['bsky', 'init', '--no-gist', doc_name])
     assert result.exit_code == 0, (result.output, result.stderr)
     slug = Path(doc_name).stem
-    session_dir = in_tmp / 'thrds' / slug
+    session_dir = in_tmp / 'bsky' / slug
     monkeypatch.chdir(session_dir)
     return session_dir
 
@@ -44,7 +44,7 @@ def test_bsky_init_writes_platform_bsky(in_tmp):
     _write_doc(in_tmp)
     result = CliRunner().invoke(cli, ['bsky', 'init', '--no-gist', 'draft.md'])
     assert result.exit_code == 0, (result.output, result.stderr)
-    session = in_tmp / 'thrds' / 'draft'
+    session = in_tmp / 'bsky' / 'draft'
     state = SessionState.load(session)
     assert state.platform == 'bsky'
     assert state.doc_path == 'draft.md'
@@ -144,7 +144,7 @@ def test_bsky_verb_on_discord_session_errors_clearly(in_tmp, monkeypatch):
     _write_doc(in_tmp)
     r1 = CliRunner().invoke(cli, ['discord', 'init', '--no-gist', 'draft.md'])
     assert r1.exit_code == 0
-    monkeypatch.chdir(in_tmp / 'thrds' / 'draft')
+    monkeypatch.chdir(in_tmp / 'dscrd' / 'draft')
 
     result = CliRunner().invoke(cli, ['bsky', 'lint'])
     assert result.exit_code == 2

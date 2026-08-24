@@ -24,6 +24,7 @@ from thrds.mirror import (
     is_git_repo,
     push,
     resolve_session_dir,
+    SESSION_DIRS,
 )
 
 
@@ -63,11 +64,33 @@ def test_resolve_session_dir_uses_git_root(tmp_path):
     subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
     nested = tmp_path / 'sub'
     nested.mkdir()
-    assert resolve_session_dir(nested, 'trainium') == tmp_path / 'thrds' / 'trainium'
+    assert resolve_session_dir(nested, 'trainium', 'slack') == tmp_path / 'slck' / 'trainium'
 
 
 def test_resolve_session_dir_falls_back_to_cwd_outside_repo(tmp_path):
-    assert resolve_session_dir(tmp_path, 'trainium') == tmp_path / 'thrds' / 'trainium'
+    assert resolve_session_dir(tmp_path, 'trainium', 'slack') == tmp_path / 'slck' / 'trainium'
+
+
+def test_session_dir_is_named_for_the_platform(tmp_path):
+    """One repo holds `gh/` PR clones beside `slck/` sessions without either
+    hiding the other, so each platform gets its own top-level dir."""
+    assert [
+        resolve_session_dir(tmp_path, 'trainium', p) for p in SESSION_DIRS
+    ] == [
+        tmp_path / 'slck' / 'trainium',
+        tmp_path / 'dscrd' / 'trainium',
+        tmp_path / 'bsky' / 'trainium',
+        tmp_path / 'capture' / 'trainium',
+    ]
+
+
+def test_resolve_session_dir_rejects_an_unknown_platform(tmp_path):
+    with pytest.raises(ValueError) as e:
+        resolve_session_dir(tmp_path, 'trainium', 'myspace')
+    assert str(e.value) == (
+        "No session dir configured for platform 'myspace' "
+        "(known: bsky, capture, discord, slack)"
+    )
 
 
 # --- init_repo ---
