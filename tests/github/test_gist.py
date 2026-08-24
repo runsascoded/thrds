@@ -2,7 +2,7 @@
 
 import pytest
 
-from ghpr.gist import extract_gist_footer, add_gist_footer
+from thrds.platforms.github.gist import extract_gist_footer, add_gist_footer
 
 
 class TestExtractGistFooter:

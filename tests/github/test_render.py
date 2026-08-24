@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from ghpr.render import render_unified_diff
+from thrds.platforms.github.render import render_unified_diff
 
 
 class TestRenderUnifiedDiff:

@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from ghpr.files import (
+from thrds.platforms.github.files import (
     get_expected_description_filename,
     find_description_file,
     write_description_with_link_ref,

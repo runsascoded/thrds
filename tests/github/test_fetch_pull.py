@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 from utz import proc
 
-from ghpr import refs
-from ghpr.commands import fetch as fetch_mod
-from ghpr.commands import pull as pull_mod
-from ghpr.commands import push as push_mod
-from ghpr.commands import sync as sync_mod
+from thrds.platforms.github import refs
+from thrds.platforms.github.commands import fetch as fetch_mod
+from thrds.platforms.github.commands import pull as pull_mod
+from thrds.platforms.github.commands import push as push_mod
+from thrds.platforms.github.commands import sync as sync_mod
 
 DESC = 'r#5.md'
 
@@ -570,7 +570,7 @@ class TestFetchComments:
         pull_mod.pull(gist=False, dry_run=False, open_browser=False,
                       gist_private=None, no_comments=False)
 
-        _, _, _, body = __import__('ghpr.comments', fromlist=['x']).read_comment_file(
+        _, _, _, body = __import__('thrds.platforms.github.comments', fromlist=['x']).read_comment_file(
             Path('z900-someone.md'))
         assert body == 'hi there'
 

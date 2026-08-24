@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from utz import proc
 
-from ghpr import reviews
+from thrds.platforms.github import reviews
 
 
 def make_head(head_id, author='Copilot', node_id='PRRT_x', resolved=False,
@@ -241,7 +241,7 @@ class TestThreadConvenience:
 class TestReviewCommands:
     def test_resolve_and_unresolve(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
-        from ghpr.cli import cli
+        from thrds.platforms.github.cli import cli
         monkeypatch.chdir(tmp_path)
         make_head('100', resolved=False)
 
@@ -253,7 +253,7 @@ class TestReviewCommands:
 
     def test_reply_with_message(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
-        from ghpr.cli import cli
+        from thrds.platforms.github.cli import cli
         monkeypatch.chdir(tmp_path)
         make_head('100')
         runner = CliRunner()
@@ -263,7 +263,7 @@ class TestReviewCommands:
 
     def test_unknown_thread_errors(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
-        from ghpr.cli import cli
+        from thrds.platforms.github.cli import cli
         monkeypatch.chdir(tmp_path)
         assert runner_invoke_exit(cli, ['review', 'resolve', '999']) == 1
 

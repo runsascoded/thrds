@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ghpr import comments, patterns
+from thrds.platforms.github import comments, patterns
 
 
 class TestDraftCommentDetection:
@@ -197,7 +197,7 @@ class TestCommentLineEndings:
 class TestDraftCommentWorkflow:
     """Integration tests for the draft comment workflow."""
 
-    @patch('ghpr.cli.proc')
+    @patch('thrds.platforms.github.cli.proc')
     def test_draft_file_detection_in_push(self, mock_proc, tmp_path):
         """Test that push command detects draft files."""
         # Create a draft comment

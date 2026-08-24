@@ -6,7 +6,7 @@ import sys
 
 def test_package_imports():
     """Test that all modules can be imported."""
-    from ghpr import api, cli, comments, config, files, gist, patterns
+    from thrds.platforms.github import api, cli, comments, config, files, gist, patterns
     assert api is not None
     assert cli is not None
     assert comments is not None
@@ -82,7 +82,7 @@ def test_shell_integration_outputs():
 
 def test_patterns_regex():
     """Test that regex patterns compile and work."""
-    from ghpr.patterns import parse_pr_spec, extract_title_from_first_line
+    from thrds.platforms.github.patterns import parse_pr_spec, extract_title_from_first_line
 
     # Test PR spec parsing
     owner, repo, number, item_type = parse_pr_spec("owner/repo#123")
@@ -97,7 +97,7 @@ def test_patterns_regex():
 
 def test_comment_filename_parsing():
     """Test comment filename parsing (both old and new formats)."""
-    from ghpr.comments import get_comment_id_from_filename
+    from thrds.platforms.github.comments import get_comment_id_from_filename
 
     # New format: z{id}-{author}.md
     comment_id = get_comment_id_from_filename("z123456789-ryan-williams.md")

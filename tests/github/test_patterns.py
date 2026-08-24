@@ -2,7 +2,7 @@
 
 import pytest
 
-from ghpr.patterns import parse_pr_spec, extract_title_from_first_line
+from thrds.platforms.github.patterns import parse_pr_spec, extract_title_from_first_line
 
 
 class TestParseProSpec:

@@ -270,7 +270,7 @@ def push(
             remote_body = (pr_data['body'] or '').rstrip()
 
             # Strip footers for comparison
-            from ghpr.gist import extract_gist_footer
+            from thrds.platforms.github.gist import extract_gist_footer
             local_body_without_footer, _ = extract_gist_footer(body)
             remote_body_without_footer, _ = extract_gist_footer(remote_body)
 

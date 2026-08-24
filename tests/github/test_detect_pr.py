@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from ghpr.commands.clone import _detect_current_branch_pr
+from thrds.platforms.github.commands.clone import _detect_current_branch_pr
 
 
 class TestDetectCurrentBranchPR:
@@ -16,7 +16,7 @@ class TestDetectCurrentBranchPR:
             'number': 100,
             'url': 'https://github.com/Quantum-Accelerators/electrai/pull/100',
         }
-        with patch('ghpr.commands.clone.proc') as mock_proc:
+        with patch('thrds.platforms.github.commands.clone.proc') as mock_proc:
             mock_proc.json.return_value = mock_data
             owner, repo, number, item_type = _detect_current_branch_pr()
         assert owner == 'Quantum-Accelerators'
@@ -28,7 +28,7 @@ class TestDetectCurrentBranchPR:
         """When URL doesn't match pattern, fall back to `gh repo view`."""
         pr_data = {'number': 42, 'url': ''}
         repo_data = {'owner': {'login': 'someorg'}, 'name': 'somerepo'}
-        with patch('ghpr.commands.clone.proc') as mock_proc:
+        with patch('thrds.platforms.github.commands.clone.proc') as mock_proc:
             mock_proc.json.side_effect = [pr_data, repo_data]
             owner, repo, number, item_type = _detect_current_branch_pr()
         assert owner == 'someorg'
@@ -38,21 +38,21 @@ class TestDetectCurrentBranchPR:
 
     def test_returns_none_when_no_pr(self):
         """When `gh pr view` fails (no PR for branch), return None tuple."""
-        with patch('ghpr.commands.clone.proc') as mock_proc:
+        with patch('thrds.platforms.github.commands.clone.proc') as mock_proc:
             mock_proc.json.side_effect = Exception('no PR found')
             result = _detect_current_branch_pr()
         assert result == (None, None, None, None)
 
     def test_returns_none_when_empty_response(self):
         """When `gh pr view` returns None/empty, return None tuple."""
-        with patch('ghpr.commands.clone.proc') as mock_proc:
+        with patch('thrds.platforms.github.commands.clone.proc') as mock_proc:
             mock_proc.json.return_value = None
             result = _detect_current_branch_pr()
         assert result == (None, None, None, None)
 
     def test_returns_none_when_number_missing(self):
         """When response lacks a number field, return None tuple."""
-        with patch('ghpr.commands.clone.proc') as mock_proc:
+        with patch('thrds.platforms.github.commands.clone.proc') as mock_proc:
             mock_proc.json.return_value = {'url': 'https://github.com/a/b/pull/1'}
             result = _detect_current_branch_pr()
         assert result == (None, None, None, None)
@@ -71,7 +71,7 @@ class TestDetectCurrentBranchPR:
         ]
         for url, expected in cases:
             data = {'number': int(expected[2]), 'url': url}
-            with patch('ghpr.commands.clone.proc') as mock_proc:
+            with patch('thrds.platforms.github.commands.clone.proc') as mock_proc:
                 mock_proc.json.return_value = data
                 result = _detect_current_branch_pr()
             assert result == expected, f"Failed for URL: {url}"

@@ -8,8 +8,8 @@ from tempfile import TemporaryDirectory
 import os
 from click.testing import CliRunner
 
-from ghpr.cli import cli
-from ghpr.commands.create import (
+from thrds.platforms.github.cli import cli
+from thrds.platforms.github.commands.create import (
     create_new_pr,
     create_new_issue,
     _resolve_draft_path,
@@ -158,7 +158,7 @@ class TestCreateWithGitignoredGh:
         for var in ('GIT_AUTHOR_NAME', 'GIT_COMMITTER_NAME'):
             monkeypatch.setenv(var, 'T')
 
-        from ghpr.commands import create as create_mod
+        from thrds.platforms.github.commands import create as create_mod
 
         def fake_text(*args, **kwargs):
             if args[:3] == ('gh', 'issue', 'create'):
@@ -167,7 +167,7 @@ class TestCreateWithGitignoredGh:
 
         with patch.object(create_mod.proc, 'text', side_effect=fake_text), \
              patch.object(create_mod, 'get_owner_repo', return_value=('owner', 'repo')), \
-             patch('ghpr.commands.push.push'):
+             patch('thrds.platforms.github.commands.push.push'):
             create_mod.create_new_issue(repo_arg=None, yes=2, dry_run=False)
 
         # Draft dir was renamed to gh/42/
@@ -207,7 +207,7 @@ class TestCreateWithGitignoredGh:
 
         monkeypatch.chdir(draft_dir)
 
-        from ghpr.commands import create as create_mod
+        from thrds.platforms.github.commands import create as create_mod
 
         def fake_text(*args, **kwargs):
             if args[:3] == ('gh', 'issue', 'create'):
@@ -216,7 +216,7 @@ class TestCreateWithGitignoredGh:
 
         with patch.object(create_mod.proc, 'text', side_effect=fake_text), \
              patch.object(create_mod, 'get_owner_repo', return_value=('owner', 'repo')), \
-             patch('ghpr.commands.push.push'):
+             patch('thrds.platforms.github.commands.push.push'):
             create_mod.create_new_issue(repo_arg=None, yes=2, dry_run=False)
 
         # Renamed dir and committed file
@@ -241,7 +241,7 @@ class TestInitSlugMode:
     def test_init_with_slug_creates_gh_drafts_slug(self, tmp_path):
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            with patch('ghpr.commands.create.proc'):
+            with patch('thrds.platforms.github.commands.create.proc'):
                 result = runner.invoke(cli, ['init', '-r', 'o/r', 'foo'])
                 assert result.exit_code == 0, result.output
                 assert Path('gh/drafts/foo').is_dir()
@@ -252,7 +252,7 @@ class TestInitSlugMode:
     def test_init_two_drafts_in_parallel(self, tmp_path):
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            with patch('ghpr.commands.create.proc'):
+            with patch('thrds.platforms.github.commands.create.proc'):
                 r1 = runner.invoke(cli, ['init', '-r', 'o/r', 'foo'])
                 r2 = runner.invoke(cli, ['init', '-r', 'o/r', 'bar'])
                 assert r1.exit_code == 0
@@ -263,7 +263,7 @@ class TestInitSlugMode:
     def test_init_default_prints_ghpr_dir_marker(self, tmp_path):
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            with patch('ghpr.commands.create.proc'):
+            with patch('thrds.platforms.github.commands.create.proc'):
                 result = runner.invoke(cli, ['init', '-r', 'o/r'])
                 assert result.exit_code == 0
                 assert 'GHPR_DIR:gh/new' in result.stdout
@@ -273,7 +273,7 @@ class TestInitSlugMode:
         with runner.isolated_filesystem(temp_dir=tmp_path):
             Path('gh/drafts/foo').mkdir(parents=True)
             Path('gh/drafts/foo/DESCRIPTION.md').write_text('# existing\n')
-            with patch('ghpr.commands.create.proc'):
+            with patch('thrds.platforms.github.commands.create.proc'):
                 result = runner.invoke(cli, ['init', '-r', 'o/r', 'foo'])
                 assert result.exit_code != 0
 
@@ -286,7 +286,7 @@ class TestInit:
         runner = CliRunner()
 
         with runner.isolated_filesystem(temp_dir=tmp_path):
-            with patch('ghpr.commands.create.proc') as mock_proc:
+            with patch('thrds.platforms.github.commands.create.proc') as mock_proc:
                 result = runner.invoke(cli, ['init', '-r', 'test-owner/test-repo'])
 
                 assert result.exit_code == 0
@@ -331,9 +331,9 @@ class TestCreateIssue:
         Path('DESCRIPTION.md').write_text('# Test Issue\n\nTest body content\n')
         Path('.git').mkdir()
 
-        with patch('ghpr.commands.create.proc') as mock_proc, \
-             patch('ghpr.commands.create.get_owner_repo') as mock_get_repo, \
-             patch('ghpr.commands.create.err'):
+        with patch('thrds.platforms.github.commands.create.proc') as mock_proc, \
+             patch('thrds.platforms.github.commands.create.get_owner_repo') as mock_get_repo, \
+             patch('thrds.platforms.github.commands.create.err'):
 
             mock_get_repo.return_value = ('test-owner', 'test-repo')
 
@@ -350,12 +350,12 @@ class TestCreateIssue:
         Path('DESCRIPTION.md').write_text('# Test Issue\n\nTest body content\n')
         Path('.git').mkdir()
 
-        with patch('ghpr.commands.create.proc') as mock_proc, \
-             patch('ghpr.commands.create.get_owner_repo') as mock_get_repo, \
-             patch('ghpr.commands.create.read_description_file') as mock_read_desc, \
-             patch('ghpr.commands.create.write_description_with_link_ref') as mock_write, \
-             patch('ghpr.commands.push.push') as mock_push, \
-             patch('ghpr.commands.create.err'), \
+        with patch('thrds.platforms.github.commands.create.proc') as mock_proc, \
+             patch('thrds.platforms.github.commands.create.get_owner_repo') as mock_get_repo, \
+             patch('thrds.platforms.github.commands.create.read_description_file') as mock_read_desc, \
+             patch('thrds.platforms.github.commands.create.write_description_with_link_ref') as mock_write, \
+             patch('thrds.platforms.github.commands.push.push') as mock_push, \
+             patch('thrds.platforms.github.commands.create.err'), \
              patch('os.rename'):
 
             mock_get_repo.return_value = ('test-owner', 'test-repo')
@@ -391,12 +391,12 @@ class TestCreateIssue:
         Path('DESCRIPTION.md').write_text('# Test Issue\n\nTest body\n')
         Path('.git').mkdir()
 
-        with patch('ghpr.commands.create.proc') as mock_proc, \
-             patch('ghpr.commands.create.get_owner_repo') as mock_get_repo, \
-             patch('ghpr.commands.create.read_description_file') as mock_read_desc, \
-             patch('ghpr.commands.create.write_description_with_link_ref'), \
-             patch('ghpr.commands.push.push'), \
-             patch('ghpr.commands.create.err'), \
+        with patch('thrds.platforms.github.commands.create.proc') as mock_proc, \
+             patch('thrds.platforms.github.commands.create.get_owner_repo') as mock_get_repo, \
+             patch('thrds.platforms.github.commands.create.read_description_file') as mock_read_desc, \
+             patch('thrds.platforms.github.commands.create.write_description_with_link_ref'), \
+             patch('thrds.platforms.github.commands.push.push'), \
+             patch('thrds.platforms.github.commands.create.err'), \
              patch('os.rename'):
 
             mock_get_repo.return_value = ('other-owner', 'other-repo')
@@ -424,11 +424,11 @@ class TestCreatePR:
         Path('DESCRIPTION.md').write_text('# Test PR\n\nTest body\n')
         Path('.git').mkdir()
 
-        with patch('ghpr.commands.create.proc') as mock_proc, \
-             patch('ghpr.commands.create.read_description_file') as mock_read_desc, \
-             patch('ghpr.commands.create.write_description_with_link_ref') as mock_write, \
-             patch('ghpr.commands.push.push'), \
-             patch('ghpr.commands.create.err'), \
+        with patch('thrds.platforms.github.commands.create.proc') as mock_proc, \
+             patch('thrds.platforms.github.commands.create.read_description_file') as mock_read_desc, \
+             patch('thrds.platforms.github.commands.create.write_description_with_link_ref') as mock_write, \
+             patch('thrds.platforms.github.commands.push.push'), \
+             patch('thrds.platforms.github.commands.create.err'), \
              patch('os.rename'):
 
             # Setup mocks for successful flow
@@ -473,11 +473,11 @@ class TestCreatePR:
         Path('DESCRIPTION.md').write_text('# Draft PR\n\nDraft body\n')
         Path('.git').mkdir()
 
-        with patch('ghpr.commands.create.proc') as mock_proc, \
-             patch('ghpr.commands.create.read_description_file') as mock_read_desc, \
-             patch('ghpr.commands.create.write_description_with_link_ref'), \
-             patch('ghpr.commands.push.push'), \
-             patch('ghpr.commands.create.err'), \
+        with patch('thrds.platforms.github.commands.create.proc') as mock_proc, \
+             patch('thrds.platforms.github.commands.create.read_description_file') as mock_read_desc, \
+             patch('thrds.platforms.github.commands.create.write_description_with_link_ref'), \
+             patch('thrds.platforms.github.commands.push.push'), \
+             patch('thrds.platforms.github.commands.create.err'), \
              patch('os.rename'):
 
             def line_side_effect(*args, **kwargs):

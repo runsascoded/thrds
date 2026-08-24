@@ -64,7 +64,7 @@ class TestGetCurrentGithubUser:
         """Test getting current GitHub user."""
         mock_get_github_user.return_value = 'ryan-williams'
 
-        from ghpr.api import get_current_github_user
+        from thrds.platforms.github.api import get_current_github_user
         user = get_current_github_user()
 
         assert user == 'ryan-williams'
@@ -75,7 +75,7 @@ class TestGetCurrentGithubUser:
         """Test when current user cannot be determined."""
         mock_get_github_user.return_value = None
 
-        from ghpr.api import get_current_github_user
+        from thrds.platforms.github.api import get_current_github_user
         user = get_current_github_user()
 
         assert user is None
