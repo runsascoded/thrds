@@ -770,6 +770,45 @@ def _merged_observations(
     return merged
 
 
+def _mark_incorporated_if_synced(
+    session_dir: Path,
+    remote: Remote,
+    observed: dict[str, str],
+    sha: str,
+) -> bool:
+    """Advance the remote's gate base iff the observation already matches local.
+
+    An observation that comes back identical to what we hold *is* incorporation
+    — there is nothing left to pull — so it may move the base. An observation
+    that differs may not, however many times it is repeated; that asymmetry is
+    the entire mechanism keeping `push`'s gate from clearing itself, so this is
+    the only place other than a reconcile or a completed push allowed to move
+    a base ref. See `tracking.base_ref_name`.
+
+    Compared against the working tree rather than HEAD because the gate runs
+    before push's auto-commit, so the tree is what a push would send.
+    """
+    for name, text in observed.items():
+        path = session_dir / name
+        if (path.read_text() if path.exists() else '') != text:
+            return False
+    tracking.set_base(session_dir, remote.name, sha)
+    return True
+
+
+def _mark_pull_incorporated(session_dir: Path, state: SessionState) -> None:
+    """After a successful reconcile, HEAD holds what each remote was observed
+    to hold, so every gate base advances to its observation ref.
+
+    This is the one thing that legitimately clears a `push` refusal — which is
+    why it lives at the end of `pull`, after the reconcile has actually landed,
+    and not next to the fetch that merely saw the divergence.
+    """
+    for name, rmt in remotes.resolve(state).items():
+        if (sha := tracking.read_ref(session_dir, rmt.ref)) is not None:
+            tracking.set_base(session_dir, name, sha)
+
+
 def _gate_push(
     client: SlackClient,
     state: SessionState,
@@ -787,27 +826,39 @@ def _gate_push(
     partial push can publish a link whose target doesn't yet say what the link
     promises. `slck push <slug>` scoping and `--force` are the explicit outs.
 
-    With no prior fetch there is nothing to gate against, and pushing *is* the
-    explicit "local wins" bootstrap resolution, so it proceeds. The observed
-    state advances the ref either way: it's an observation, and it's what
-    lets `diff`/`pull` classify correctly after a refusal.
+    The comparison is against what HEAD has **incorporated** from this remote
+    (`base_ref`), never against what we last *saw* there. Those differ exactly
+    when it matters: a refusal advances the observation ref, so gating on
+    "changed since I last looked" would make the refusal itself the thing the
+    retry compares against — the second push would sail through and overwrite
+    the edit the first one refused to touch, with nothing about the danger
+    having changed. Only a reconcile (or a push of our own) moves the base, so
+    only those clear the gate. See `specs/push-gate-ancestry.md`.
+
+    With nothing incorporated yet there is nothing to gate against, and pushing
+    *is* the explicit "local wins" bootstrap resolution, so it proceeds. The
+    observed state advances the observation ref either way: it's an
+    observation, and it's what lets `diff`/`pull` classify after a refusal.
     """
-    ref = remote.ref
-    old = tracking.read_ref(session_dir, ref)
+    base = tracking.read_ref(session_dir, remote.base_ref)
     observed = remotes.observe(remote, client, state, session_dir)
     snap = tracking.snapshot(
-        session_dir, ref, remote.name,
+        session_dir, remote.ref, remote.name,
         tracking.build_tree(session_dir, observed),
         f'thrds: fetch {remote.name}',
     )
-    if old is None or not snap.paths:
+    _mark_incorporated_if_synced(session_dir, remote, observed, snap.sha)
+    if base is None:
+        return
+    paths = tracking.changed_paths(session_dir, f'{base}^{{tree}}', snap.tree)
+    if not paths:
         return
     would_write = set()
     for name, remote_text in observed.items():
         path = session_dir / name
         if (path.read_text() if path.exists() else '') != remote_text:
             would_write.add(name)
-    hit = sorted(set(snap.paths) & would_write)
+    hit = sorted(set(paths) & would_write)
     if not hit:
         return
     if not force:
@@ -851,12 +902,16 @@ def _verify_push(
             f"note: Slack's stored copy differs from what was sent "
             f"({', '.join(drift)}); refs record the observed state"
         )
-    tracking.snapshot(
+    snap = tracking.snapshot(
         session_dir,
         remote.ref, remote.name,
         tracking.build_tree(session_dir, observed),
         f'thrds: fetch {remote.name}',
     )
+    # A completed push is incorporation by construction: this state is the one
+    # we just sent (plus whatever Slack normalized, reported above), so the
+    # gate must not fire on it next time.
+    tracking.set_base(session_dir, remote.name, snap.sha)
     _refresh_composite(
         session_dir, state,
         _merged_observations(session_dir, state, {remote.name: observed}),
@@ -1274,6 +1329,7 @@ def slack_pull(channel: str | None, mode: str | None, dry_run: bool, prod: bool,
                     session_dir, state,
                     {tracking.STAGING: staging_files, tracking.PROD: render(prod_threads)},
                 ))
+                _mark_pull_incorporated(session_dir, state)
             return
 
         # rebase / merge: reconcile committed state onto the fetched base.
@@ -1290,6 +1346,7 @@ def slack_pull(channel: str | None, mode: str | None, dry_run: bool, prod: bool,
             session_dir, state,
             {tracking.STAGING: staging_files, tracking.PROD: render(prod_threads)},
         ))
+        _mark_pull_incorporated(session_dir, state)
         return
 
     doc = (
@@ -1511,6 +1568,13 @@ def _fetch_refs(
                 f'thrds: fetch {name}',
                 write=write,
             )
+            if write:
+                # A fetch that comes back matching local is the one kind of
+                # observation that also incorporates: it says HEAD already
+                # holds what the remote does. A fetch that comes back
+                # *different* deliberately leaves the gate's base where it
+                # is — looking at a divergence is not resolving it.
+                _mark_incorporated_if_synced(session_dir, rmt, files, snap.sha)
             err(f'{dry if snap.changed else ""}{snap.label}: {snap.summary()}')
         merged.update(files)
 

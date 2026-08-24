@@ -150,6 +150,53 @@ def test_push_refuses_when_staging_moved_since_last_pull(session, spy):
     assert _git(session, 'rev-parse', 'HEAD') == head_before
 
 
+def test_re_running_push_still_refuses(session, spy):
+    """The gate must not disarm itself by firing.
+
+    A refusal advances the tracking ref deliberately — it's an observation,
+    and it's what makes the post-refusal diff readable. So a gate phrased as
+    "did anything change since I last looked?" writes down the very thing the
+    retry compares against: the second push sees nothing new and overwrites
+    the edit the first one refused to touch, though nothing about the danger
+    changed between the two commands. A gate that clears by firing is worse
+    than none, because the operator reads the refusal as protection and the
+    retry as proof they fixed it. Only a reconcile may clear it.
+    """
+    _seed(spy)
+    spy.returns['alpha'] = thread('alpha', 'Alpha OP, edited in Slack.')
+    (session / '01-alpha.md').write_text('Alpha OP, edited locally.\n')
+    assert _push(ok=False).exit_code == 1
+    second = _push(ok=False)
+    assert second.exit_code == 1
+    assert second.stderr.splitlines()[-1] == (
+        'Error: changed in staging since your last pull: 01-alpha.md. '
+        '`slck pull` to reconcile, or `-f`/`--force` to overwrite.'
+    )
+    assert spy.synced == []
+
+
+@pytest.mark.parametrize('mode', ['rebase', 'merge', 'overwrite'])
+def test_reconciling_is_what_clears_the_gate(session, spy, mode):
+    """The complement of the test above: a refusal is cleared by incorporating
+    the remote's state and by nothing else. Every reconcile mode qualifies,
+    since each one leaves HEAD holding what the remote holds.
+
+    The two sides touch *different* files, so `rebase`/`merge` have something
+    to reconcile rather than a conflict to report — the gate still refuses,
+    because Slack moved a file this push would rewrite.
+    """
+    _seed(spy)
+    spy.returns['alpha'] = thread('alpha', 'Alpha OP, edited in Slack.')
+    (session / '02-beta.md').write_text('Beta OP, edited locally.\n')
+    _git(session, 'commit', '-qam', 'local edit')
+    assert _push(ok=False).exit_code == 1
+
+    pull = CliRunner().invoke(cli, ['slack', 'pull', '-m', mode], catch_exceptions=False)
+    assert pull.exit_code == 0, pull.stderr
+    _push()
+    assert spy.synced == [['alpha', 'beta']]
+
+
 def test_refusal_still_records_the_observation(session, spy):
     """The gate's fetch advances `staging` even when it refuses — it's
     an observation, and it's what lets `diff`/`pull` classify next."""

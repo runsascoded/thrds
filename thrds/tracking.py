@@ -71,6 +71,38 @@ def ref_name(name: str) -> str:
     return f'refs/remotes/{name}'
 
 
+def base_ref_name(name: str) -> str:
+    """The full ref for a remote's *gate base*: ``refs/heads/base/<name>``.
+
+    Distinct from :func:`ref_name`, and the distinction is the whole point.
+    ``refs/remotes/<name>`` records what we last **observed** at the remote and
+    advances on every look, including a look that ends in a refusal — that's
+    what keeps `git diff <name> HEAD` readable after one. This ref records the
+    remote state HEAD has **incorporated**, and advances only when that becomes
+    true: a reconcile, a successful push, or an observation that comes back
+    already matching HEAD (nothing to incorporate).
+
+    Splitting them is what stops `push`'s gate from disarming itself. A gate
+    asking "did anything change since I last looked?" writes its own answer
+    when it refuses, so the retry sees nothing new and overwrites the very edit
+    the refusal protected. Asking "does HEAD contain what the remote holds
+    now?" has no term that the act of asking moves, so it survives being asked
+    twice and clears only when someone actually reconciles. Full trace and the
+    ghpr-side history in `specs/push-gate-ancestry.md`.
+
+    Under ``refs/heads/`` for the reflog (git auto-enables it there, not under
+    an invented namespace), as a computed pointer that is never checked out —
+    the same footing as the ``upstream`` composite.
+    """
+    return f'refs/heads/base/{name}'
+
+
+def set_base(session_dir: Path, name: str, sha: str) -> None:
+    """Record ``sha`` as the remote state HEAD incorporates. See
+    :func:`base_ref_name` for when a caller is entitled to do this."""
+    _git(session_dir, 'update-ref', base_ref_name(name), sha)
+
+
 def migrate_refs(session_dir: Path, platform: str) -> list[tuple[str, str]]:
     """Move a session's refs from the legacy layout to the current one.
 

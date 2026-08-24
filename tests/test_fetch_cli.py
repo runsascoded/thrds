@@ -391,8 +391,11 @@ def test_partial_fetch_proceeds_when_the_skipped_remote_holds_nothing(session, s
     assert _git(session, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/') == (
         'staging'
     )
+    # `base/staging` and no `base/prod`: this fetch came back matching local,
+    # which is an incorporation for staging and says nothing about the remote
+    # that was skipped. (The gate base; see `tracking.base_ref_name`.)
     assert _git(session, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/') == (
-        'main\nupstream'
+        'base/staging\nmain\nupstream'
     )
 
 

@@ -47,6 +47,12 @@ class Remote:
     def ref(self) -> str:
         return tracking.ref_name(self.name)
 
+    @property
+    def base_ref(self) -> str:
+        """What HEAD has incorporated from this remote — the push gate's
+        operand, distinct from `ref`'s "what we last saw"."""
+        return tracking.base_ref_name(self.name)
+
 
 ROLES = (tracking.STAGING, tracking.PROD)
 CHROME_PRESETS = ('footer', 'none')
