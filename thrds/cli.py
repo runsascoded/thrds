@@ -72,6 +72,7 @@ import subprocess
 import sys
 import time
 import webbrowser
+from importlib import import_module
 from pathlib import Path
 
 import click
@@ -634,11 +635,56 @@ def _crud_render_messages(msgs: list[dict]) -> str:
     return "\n".join(lines)
 
 
-@click.group()
-def cli():
-    """`thrds`: draft multi-thread posts locally; sync to Slack, or capture-only.
+_LAZY_SUBGROUPS = {
+    # name → (module, attribute, short help for `thrds --help`)
+    'github': (
+        '.platforms.github.cli', 'cli',
+        'GitHub PR/issue clones (the former `ghpr`).',
+    ),
+}
 
-    Subgroups: ``slack`` (Slack session + CRUD verbs), ``capture`` (gist-only
+
+class _LazyGroup(click.Group):
+    """Top-level group whose heavier subgroups import on first use.
+
+    `thrds github` reaches ghpr's code, which imports `utz` — ~400ms, nearly
+    all of it pandas and IPython pulled in by `utz/__init__`. Eagerly mounting
+    the group would bill that to every `slck` invocation for verbs it never
+    touches, so the import is deferred to the point a `github` verb actually
+    runs. The cost of deferring is the short help duplicated in
+    `_LAZY_SUBGROUPS`: `thrds --help` has to list the group without importing
+    it, so that one string is the thing to keep in sync.
+    """
+
+    def list_commands(self, ctx):
+        return sorted([*super().list_commands(ctx), *_LAZY_SUBGROUPS])
+
+    def get_command(self, ctx, name):
+        if (lazy := _LAZY_SUBGROUPS.get(name)) is not None:
+            module, attr, _ = lazy
+            return getattr(import_module(module, __package__), attr)
+        return super().get_command(ctx, name)
+
+    def format_commands(self, ctx, formatter):
+        rows = []
+        for name in self.list_commands(ctx):
+            if (lazy := _LAZY_SUBGROUPS.get(name)) is not None:
+                rows.append((name, lazy[2]))
+                continue
+            cmd = super().get_command(ctx, name)
+            if cmd is not None and not cmd.hidden:
+                rows.append((name, cmd.get_short_help_str(45)))
+        if rows:
+            with formatter.section('Commands'):
+                formatter.write_dl(rows)
+
+
+@click.group(cls=_LazyGroup)
+def cli():
+    """`thrds`: draft threaded posts locally; sync to a platform, or capture-only.
+
+    Subgroups: ``slack`` (Slack session + CRUD verbs), ``discord``, ``bsky``,
+    ``github`` (PR/issue clones — the former `ghpr`), ``capture`` (gist-only
     trajectory, no platform target). Every session's platform is stamped
     into `thrds.yml` at init and enforced on subsequent verbs.
     """
@@ -2742,6 +2788,19 @@ def bsky_open(no_open: bool):
 
 def main():
     cli()
+
+
+def github_main():
+    """Entry point for `ghpr` — `thrds github …` without the prefix.
+
+    Same arrangement as :func:`slack_main`: one group object, reached by two
+    names. Keeps `ghpr` (and the `ghprc`/`ghprd`/`ghprp` aliases built on it)
+    working unchanged now that the package it used to ship from is merged in
+    here — the command name is the tool's user-facing surface and outlives
+    the distribution that carried it.
+    """
+    from .platforms.github.cli import cli as github_cli
+    github_cli(prog_name='ghpr')
 
 
 def slack_main():

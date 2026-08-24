@@ -1,11 +1,11 @@
 [project]
 name = "thrds"
 version = "0.5.0"
-description = "Declarative thread sync for Slack, Discord, and Bluesky"
+description = "Declarative thread sync for Slack, Discord, Bluesky, and GitHub"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = ["click>=8.0", "emoji>=2.0", "pyyaml>=6.0"]
+dependencies = ["click>=8.0", "emoji>=2.0", "pyyaml>=6.0", "utz>=0.21.3"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -17,6 +17,9 @@ classifiers = [
 thrds = "thrds.cli:main"
 # `slck <verb>` == `thrds slack <verb>`; same click group, nothing duplicated.
 slck = "thrds.cli:slack_main"
+# `ghpr <verb>` == `thrds github <verb>`; same pattern, and the name ghpr's
+# users (and `ghprc`/`ghprd`/`ghprp`) already type.
+ghpr = "thrds.cli:github_main"
 
 [project.urls]
 Homepage = "https://github.com/runsascoded/thrds"
@@ -34,3 +37,8 @@ test = ["pytest"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: end-to-end tests requiring gh CLI auth and network access",
+]

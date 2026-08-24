@@ -119,7 +119,9 @@ Foreign (non-editable) messages — e.g. human replies in a bot thread — are a
 
 ## CLI
 
-`thrds` ships a CLI split into platform subgroups. Today: `thrds slack …` (the primary workflow) and `thrds capture …` (gist-only trajectory, no platform target — for drafting posts you'll paste manually while still capturing iteration history). One session per `.md` file lives in `<git-root-or-cwd>/thrds/<slug>/` with its own private git repo and (default) a secret gist mirror.
+`thrds` ships a CLI split into platform subgroups: `thrds slack …` (the primary workflow), `thrds discord …` / `thrds bsky …` (draft + lint + render for manual posting), `thrds github …` (PR/issue clones — formerly the separate `ghpr` tool, merged in and still reachable as `ghpr`), and `thrds capture …` (gist-only trajectory, no platform target — for drafting posts you'll paste manually while still capturing iteration history). One session per `.md` file lives in `<git-root-or-cwd>/<platform>/<slug>/` with its own private git repo and (default) a secret gist mirror.
+
+Every platform group shares one sync model, borrowed wholesale from git: a remote-tracking ref per remote under `refs/remotes/<name>`, `fetch` to observe it, `pull -m rebase|merge|overwrite` to reconcile, and a `push` that refuses a non-fast-forward. See [`specs/remotes-model.md`](specs/remotes-model.md).
 
 **`thrds slack …`** — draft multi-thread Slack posts locally, sync to a staging private channel, promote to a real prod channel:
 
@@ -243,6 +245,20 @@ thrds bsky open                  # browse the gist
 
 Every session's `platform` is stamped into `thrds.yml` at init and guarded on every subsequent verb — running `thrds slack push` inside a capture-inited session errors immediately with a clear message rather than trying and failing halfway through.
 
+**`thrds github …`** — clone a GitHub PR/issue (description + comments + review threads) to local markdown, edit it in your editor, push it back, mirrored to a gist. This was [`ghpr`][ghpr], a separate tool that converged on the same sync model from the other direction; it now lives here as a platform adapter. Installing `thrds` installs **`ghpr`**, which *is* the `thrds github` group — same arrangement as `slck`, so every existing `ghpr` invocation and the `ghprc`/`ghprd`/`ghprp` aliases keep working:
+
+```bash
+ghpr clone owner/repo#123        # or a PR URL, or bare inside a repo on a PR branch
+ghpr diff                        # local vs GitHub, with ownership warnings for others' comments
+ghpr fetch                       # snapshot GitHub into `refs/remotes/github`
+ghpr pull [-m rebase|merge|overwrite]
+ghpr push                        # refuses a non-fast-forward; `-G` to force
+ghpr sync                        # pull, then push
+```
+
+Clones live in `gh/<number>/` rather than `github/<slug>/` — the session dir is named for the platform, and `gh` is GitHub's conventional short form (`ghpr` names the tool, which is why the directory isn't `ghpr/`).
+
+[ghpr]: https://github.com/runsascoded/ghpr
 [raw-spec]: specs/done/raw-mrkdwn-passthrough.md
 
 ### Slack tokens + scopes
