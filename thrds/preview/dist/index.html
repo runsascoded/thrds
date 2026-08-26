@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>thrds preview</title>
+<style>
+  /* Discord dark-theme tokens (matching discord-agent's App.css palette) so
+     the eventual renderer bundle drops into familiar chrome. */
+  :root {
+    --bg-primary: #313338;
+    --bg-secondary: #2b2d31;
+    --bg-tertiary: #1e1f22;
+    --text-primary: #f2f3f5;
+    --text-secondary: #b5bac1;
+    --text-muted: #949ba4;
+    --accent: #5865f2;
+    --warn: #f0b232;
+    --danger: #f23f43;
+    --border: #3f4147;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: var(--bg-primary); color: var(--text-primary);
+    font: 14px/1.4 -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+    background: var(--bg-tertiary); border-bottom: 1px solid var(--border);
+  }
+  header .path { font-weight: 600; }
+  header .status { color: var(--text-muted); font-size: 12px; flex: 1; }
+  header .status.dirty { color: var(--warn); }
+  header .status.conflict { color: var(--danger); }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 4px;
+    padding: 6px 14px; font-size: 13px; cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; cursor: default; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #source, #render {
+    flex: 1; min-width: 0; padding: 14px; overflow: auto;
+  }
+  #source {
+    background: var(--bg-secondary); color: var(--text-primary);
+    border: 0; border-right: 1px solid var(--border); resize: none;
+    font: 13px/1.5 ui-monospace, monospace; outline: none;
+  }
+  #render .stub-note {
+    color: var(--text-muted); font-size: 12px; border: 1px dashed var(--border);
+    border-radius: 4px; padding: 8px 10px; margin-bottom: 12px;
+  }
+  #render pre.raw { white-space: pre-wrap; font: inherit; margin: 0; }
+  #lint { border-top: 1px solid var(--border); background: var(--bg-tertiary);
+    max-height: 30%; overflow: auto; padding: 8px 14px; }
+  #lint .issue { color: var(--warn); font: 12px/1.6 ui-monospace, monospace; }
+  #lint .clean { color: var(--text-muted); font-size: 12px; }
+  #conflict {
+    background: var(--bg-tertiary); color: var(--danger);
+    border-bottom: 1px solid var(--border); padding: 8px 14px; font-size: 13px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  /* `display: flex` above outweighs the UA's `[hidden] { display: none }`,
+     so restate it — without this the banner shows unconditionally. */
+  #conflict[hidden] { display: none; }
+  #conflict button { background: var(--danger); }
+  #conflict #conflict-reload { background: var(--bg-secondary); border: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<header>
+  <span class="path" id="doc-path"></span>
+  <span class="status" id="status"></span>
+  <button id="save" disabled>Save</button>
+</header>
+<div id="conflict" hidden>
+  The file changed on disk since this page loaded it. Pick a side (copy your text out first if unsure):
+  <button id="conflict-reload">Reload from disk (discard my edits)</button>
+  <button id="conflict-overwrite">Overwrite disk with my version</button>
+</div>
+<main>
+  <textarea id="source" spellcheck="false"></textarea>
+  <div id="render">
+    <div class="stub-note">
+      Render pane: stub. The Discord-faithful renderer bundle
+      (discord-agent's <code>specs/discord-md-parser.md</code>) replaces this
+      page; until then the doc is shown raw and the lint panel below carries
+      the known-degradation warnings.
+    </div>
+    <pre class="raw" id="raw"></pre>
+  </div>
+</main>
+<div id="lint"></div>
+<script>
+const $ = id => document.getElementById(id);
+let baseMtime = null;   // write-back base: the mtime our content came from
+let dirty = false;
+let conflict = null;    // {content, mtime} from a 409 — the disk side of a conflict
+
+function setStatus(text, cls) {
+  const el = $('status');
+  el.textContent = text;
+  el.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+function show(doc) {
+  baseMtime = doc.mtime;
+  $('doc-path').textContent = doc.path;
+  $('source').value = doc.content;
+  $('raw').textContent = doc.content;
+  dirty = false;
+  $('save').disabled = true;
+  clearConflict();
+  setStatus('in sync with disk');
+}
+
+function clearConflict() {
+  conflict = null;
+  $('conflict').hidden = true;
+}
+
+async function loadDoc() {
+  const doc = await (await fetch('/doc')).json();
+  show(doc);
+  refreshLint();
+}
+
+async function refreshLint() {
+  const {issues} = await (await fetch('/lint')).json();
+  $('lint').innerHTML = issues.length
+    ? issues.map(i =>
+        `<div class="issue">${i.line}:${i.column} [${i.rule}] ${i.message}</div>`
+      ).join('')
+    : '<div class="clean">lint: no issues</div>';
+}
+
+$('source').addEventListener('input', () => {
+  dirty = true;
+  $('save').disabled = false;
+  $('raw').textContent = $('source').value;
+  setStatus('unsaved changes', 'dirty');
+});
+
+async function save(base) {
+  const res = await fetch('/doc', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content: $('source').value, base_mtime: base}),
+  });
+  if (res.status === 409) {
+    // The file changed on disk since we loaded it. Don't clobber; surface
+    // the conflict inline and let the user pick a side. (No confirm()/
+    // alert() — modal dialogs block browser automation and are worse UX.)
+    conflict = await res.json();
+    $('conflict').hidden = false;
+    setStatus('conflict: file changed on disk', 'conflict');
+    return;
+  }
+  const {mtime} = await res.json();
+  baseMtime = mtime;
+  dirty = false;
+  $('save').disabled = true;
+  clearConflict();
+  setStatus('saved');
+  refreshLint();
+}
+
+$('save').addEventListener('click', () => save(baseMtime));
+
+$('conflict-reload').addEventListener('click', () => {
+  show(conflict);
+  refreshLint();
+  setStatus('reloaded from disk');
+});
+
+$('conflict-overwrite').addEventListener('click', () => save(conflict.mtime));
+
+// Pick up editor-side saves: poll the doc mtime; reload when it moves and
+// the pane has no unsaved edits (with edits, flag it instead of clobbering).
+setInterval(async () => {
+  const doc = await (await fetch('/doc')).json();
+  if (doc.mtime === baseMtime) return;
+  if (!dirty) {
+    show(doc);
+    refreshLint();
+    setStatus('reloaded from disk');
+  } else {
+    setStatus('file changed on disk (Save will conflict)', 'conflict');
+  }
+}, 1000);
+
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+    e.preventDefault();
+    if (!$('save').disabled) $('save').click();
+  }
+});
+
+loadDoc();
+</script>
+</body>
+</html>

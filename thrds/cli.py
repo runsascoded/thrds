@@ -2752,6 +2752,57 @@ def discord_open(no_open: bool):
         webbrowser.open(url)
 
 
+@discord_cli.command("preview")
+@click.option('-c', '--commit', is_flag=True, help='Commit the doc to the session repo on each page save.')
+@click.option('-p', '--port', type=int, default=None, help='Port to serve on (default: 3077; 0 picks an ephemeral port).')
+@click.option('-U', '--no-open', is_flag=True, help='Print the URL, do not launch browser.')
+def discord_preview(commit: bool, port: int | None, no_open: bool):
+    """Serve a local preview of the doc, with edit-write-back.
+
+    Renders the session's doc in a local page (no tokens, no network): edit
+    in the page and Save writes the `.md` back (refused if the file changed
+    on disk since the page loaded it — no clobbering); edit in your editor
+    and the page reloads. Lint warnings update live. With ``-c`` each page
+    save also commits to the session repo, so iterations land in the gist
+    trajectory.
+
+    Until the Discord-faithful renderer bundle lands (see
+    `specs/discord-preview.md`), the render pane is a labeled stub — the
+    edit/save/lint loop is live now, the faithful render drops in later.
+    """
+    from .lint import DiscordLinter
+    from .preview import DEFAULT_PORT, serve
+
+    state = _load_state(expected_platform='discord')
+    doc_path = Path(_resolve_doc_path(state, None)).resolve()
+    session_dir = Path.cwd()
+
+    on_save = None
+    if commit:
+        def on_save(content: str) -> None:
+            sha = mirror.commit(session_dir, [str(doc_path)], f'preview: save {doc_path.name}')
+            if sha:
+                err(f'committed {sha[:7]}')
+
+    if port is None:
+        port = DEFAULT_PORT
+    try:
+        httpd = serve(doc_path, port, lint=lambda text: DiscordLinter().lint(text).issues, on_save=on_save)
+    except OSError as e:
+        raise click.ClickException(
+            f'port {port} unavailable ({e.strerror}) — another server running? '
+            f'`kill-port {port}` or pass -p.'
+        )
+    url = f'http://localhost:{httpd.server_address[1]}/'
+    err(f'Previewing {doc_path.name} at {url} (ctrl-c to stop)')
+    if not no_open:
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        err('stopped')
+
+
 # ============================================================================
 # `thrds bsky …` subgroup — capture + Bluesky-specific lint, no live push.
 # ============================================================================

@@ -52,6 +52,18 @@ The preview page shows the render *and* the degradations ("this table renders as
 
 The deferred `discord-platform.md` phase 2b — `DiscordClient.sync()` into a private server via `THRDS_DISCORD_TOKEN` — stays deferred. Revisit only if the calibrated previewer proves insufficient (e.g. embeds/link-preview behavior, which a local renderer can't reproduce faithfully). The previewer likely obsoletes it; don't build both speculatively.
 
+## Implemented 2026-08-26: phases 1+3 (server + write-back), stub UI
+
+Landed as `thrds/preview/` + the `discord preview` verb (`08c1a03`) while discord-agent builds the parser — these phases don't depend on it, and the bundle drops into `thrds/preview/dist/` when ready. Deltas from the plan above:
+
+- **No SSE** — the page polls `/doc` at 1s and reloads when clean, flags when dirty. Plenty for a localhost file.
+- **Conflict check uses an opaque string token**, not a numeric mtime: `st_mtime_ns` exceeds JS `Number.MAX_SAFE_INTEGER`, so a numeric token is rounded by the page's `JSON.parse` and every save 409s. Found by driving the real page (the Python suite can't see it — Python json keeps ints exact); the page-side conflict UI is an inline banner with explicit reload/overwrite buttons, deliberately not `confirm()` (modal dialogs block browser automation).
+- **Port 3077** (= 3000 + crc32("thrds") % 1000), `-p 0` for ephemeral.
+- **`-c/--commit`** commits the doc per page-save; default off, per the plan.
+- The vendored `dist/` needs two ignore-system carve-outs, now in place: `thrds/preview/.gitignore` un-ignores it past the global `dist` rule, and `[tool.hatch.build.targets.wheel] artifacts` keeps it in the wheel (verified in the built wheel).
+
+Still open here: phase 2 (real renderer bundle + corpus-alignment test) once discord-agent's parser ships a preview build, and the `sync-preview-bundle` provenance script.
+
 ## Non-goals
 
 - Slack preview: wanted eventually (mrkdwn diverges from markdown worse than Discord does), but a separate grammar and a separate spec. The `preview` verb's server/bundle plumbing should be platform-parameterizable so Slack drops in, but no Slack renderer work here.

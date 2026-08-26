@@ -1,0 +1,4 @@
+# The global excludesfile ignores `dist` (build output), but this dist/ is
+# vendored package data — the prebuilt preview UI bundle — and must be tracked.
+!dist/
+!dist/**
