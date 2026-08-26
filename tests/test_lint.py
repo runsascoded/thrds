@@ -50,6 +50,37 @@ def test_table_inside_code_fence_ignored():
     assert _lint(text) == []
 
 
+def test_thematic_break_not_flagged():
+    """A bare `---` is a horizontal rule, not a table separator. It carries no
+    pipes and no adjacent table body, so nothing about it is table-shaped —
+    and it's how thrds docs divide sections, so flagging it warns on every doc."""
+    text = "Intro paragraph.\n\n---\n\nNext section.\n"
+    assert _lint(text) == []
+
+
+def test_setext_heading_not_flagged():
+    """`text` + `---` is a setext H2, the other common bare-dashes construct."""
+    text = "A Heading\n---\n\nBody text.\n"
+    assert _lint(text) == []
+
+
+def test_single_column_table_still_flagged():
+    """The pipe is what makes dashes a table separator — `|---|` keeps warning."""
+    text = "| Col |\n|---|\n| a |\n"
+    issues = _lint(text)
+    assert [i.line for i in issues] == [1, 2, 3]
+    assert all(i.rule == "discord/table" for i in issues)
+
+
+def test_pipeless_separator_flagged_when_a_table_body_adjoins_it():
+    """Dashes with no pipes still read as a table when a pipe-delimited row sits
+    against them — the sloppy-but-real `| a | b |` over a bare `---`."""
+    text = "| Col A | Col B |\n---\n"
+    issues = _lint(text)
+    assert [i.line for i in issues] == [1, 2]
+    assert all(i.rule == "discord/table" for i in issues)
+
+
 # --- raw @mentions ---
 
 def test_raw_mention_flagged():

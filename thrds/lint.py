@@ -130,7 +130,7 @@ class DiscordLinter:
                 continue
 
             # Tables: separator line + adjacent body lines.
-            if _TABLE_SEP_RE.match(line):
+            if _TABLE_SEP_RE.match(line) and self._is_table_sep_in_context(lines, i - 1):
                 report.append(LintIssue(
                     line=i,
                     column=1,
@@ -160,6 +160,22 @@ class DiscordLinter:
                 ))
 
         return report
+
+    @staticmethod
+    def _is_table_sep_in_context(lines: list[str], idx: int) -> bool:
+        """True iff the dashes at ``lines[idx]`` are a *table* separator rather
+        than a thematic break (``---``) or setext heading underline.
+
+        A pipe settles it on its own (``|---|``, ``---|---``). Without one, the
+        dashes only read as a table when a pipe-delimited row adjoins them.
+        Bare ``---`` is neither, and it's how thrds docs divide sections — so
+        flagging it unconditionally warned on essentially every doc."""
+        if "|" in lines[idx]:
+            return True
+        for j in (idx - 1, idx + 1):
+            if 0 <= j < len(lines) and _TABLE_BODY_RE.match(lines[j]):
+                return True
+        return False
 
     @staticmethod
     def _prev_or_next_is_table_sep(lines: list[str], idx: int) -> bool:
