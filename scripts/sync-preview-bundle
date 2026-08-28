@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Vendor the preview-UI bundle (and the discord-md fixture corpus) from a
+# discord-agent checkout into this repo, recording provenance.
+#
+#   scripts/sync-preview-bundle [<discord-agent-path>]
+#
+# Default source: ~/c/oa/discord-agent. Builds the bundle there
+# (`pnpm preview:build`), replaces `thrds/preview/dist/` wholesale, snapshots
+# `fixtures/discord-md/corpus.json` to `tests/fixtures/discord-md-corpus.json`,
+# and writes `thrds/preview/BUNDLE_PROVENANCE` (source repo, commit, dirty
+# flag, build date). Re-vendoring is re-running this script — never a by-hand
+# copy, so the provenance can be trusted.
+set -euo pipefail
+
+src="${1:-$HOME/c/oa/discord-agent}"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+
+[ -d "$src/app/preview" ] || { echo "no preview target at $src/app/preview" >&2; exit 1; }
+
+echo "building preview bundle in $src/app" >&2
+(cd "$src/app" && pnpm preview:build >&2)
+
+dist="$src/app/preview/dist"
+[ -f "$dist/index.html" ] || { echo "build produced no $dist/index.html" >&2; exit 1; }
+
+rm -rf "$root/thrds/preview/dist"
+cp -R "$dist" "$root/thrds/preview/dist"
+
+mkdir -p "$root/tests/fixtures"
+cp "$src/fixtures/discord-md/corpus.json" "$root/tests/fixtures/discord-md-corpus.json"
+
+sha="$(git -C "$src" rev-parse HEAD)"
+dirty=""
+[ -n "$(git -C "$src" status --porcelain -- app/src/md app/preview fixtures/discord-md)" ] && dirty=" (dirty)"
+{
+  echo "source: $src"
+  echo "commit: $sha$dirty"
+  echo "built:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$root/thrds/preview/BUNDLE_PROVENANCE"
+
+echo "vendored:" >&2
+cat "$root/thrds/preview/BUNDLE_PROVENANCE" >&2

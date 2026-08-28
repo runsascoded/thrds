@@ -101,7 +101,10 @@ _TABLE_BODY_RE = re.compile(r"^\s*\|.*\|\s*$")
 # match) and not the well-formed `<@id>` Discord mention. Embedded `.` allowed
 # (Discord usernames can contain dots — `alice.smith`) but trailing punctuation
 # is excluded via the `(?:\.\w+)*` shape (no bare trailing `.`).
-_RAW_MENTION_RE = re.compile(r"(?<![\w<])@([A-Za-z][\w-]*(?:\.\w+)*)")
+# `@everyone`/`@here` are excluded: those are the two name-form mentions Discord
+# *does* resolve on paste (corpus cases `everyone`/`here`), so warning on them
+# is a false positive.
+_RAW_MENTION_RE = re.compile(r"(?<![\w<])@(?!(?:everyone|here)\b)([A-Za-z][\w-]*(?:\.\w+)*)")
 
 
 def _is_fence(line: str) -> bool:

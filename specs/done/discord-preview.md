@@ -64,6 +64,35 @@ Landed as `thrds/preview/` + the `discord preview` verb (`08c1a03`) while discor
 
 Still open here: phase 2 (real renderer bundle + corpus-alignment test) once discord-agent's parser ships a preview build, and the `sync-preview-bundle` provenance script.
 
+## The bundle is ready (discord-agent, 2026-08-28)
+
+discord-agent shipped the preview build target (`8d2a8e9`), so phase 2's blocker is gone. See its `specs/discord-md-parser.md` → "The preview build target" for the full account.
+
+To vendor it:
+
+```bash
+cd ~/c/oa/discord-agent/app && pnpm install && pnpm preview:build   # -> app/preview/dist/
+```
+
+`app/preview/dist/` is named to mirror `thrds/preview/dist/`; copy its contents in wholesale (`index.html` + `assets/`, 336 KB, entry 241 KB / 73 KB gzipped). No rewriting: assets are emitted with relative URLs (`base: './'`) precisely because this server is a stdlib static one that can't rewrite paths.
+
+**Already verified against this repo's `server.py`**, not merely built — index, CSS and all 16 highlight.js chunks serve with zero 4xx, and the lint panel renders whatever `/lint` returns. That test loaded `thrds/preview/server.py` *by file path*, bypassing `thrds/__init__.py` (which imports the whole package, `emoji` included); worth knowing that the module's "no non-stdlib dependencies" claim holds for the module but not via a normal package import.
+
+The page implements this repo's contract as specified, including the two decisions recorded above: `mtime` treated as an opaque string, and an inline conflict banner rather than `confirm()`. discord-agent's dev server (`pnpm preview:dev`, port 5274) reimplements `/doc` + `/lint` with the same semantics, 409 included, so the bundle can be iterated on there without a thrds checkout.
+
+Interaction paths driven in a real browser there: spoiler reveal; edit → dirty → save → disk write; external edit while clean → reload; external edit while dirty → no clobber, then 409 → banner → overwrite.
+
+Still open on this side, unchanged: `sync-preview-bundle` + `BUNDLE_PROVENANCE`, and the corpus-alignment test against `fixtures/discord-md/corpus.json` (56 cases).
+
+## Completed 2026-08-28: bundle vendored, corpus aligned — acceptance met
+
+- **`scripts/sync-preview-bundle`** builds the bundle in a discord-agent checkout (`pnpm preview:build`), replaces `thrds/preview/dist/` wholesale, snapshots the corpus to `tests/fixtures/discord-md-corpus.json`, and writes `thrds/preview/BUNDLE_PROVENANCE` (source, commit + dirty flag, build date). Vendored at discord-agent `8d2a8e9`; the full bundle (17 asset files) verified present in the built wheel.
+- **Corpus-alignment test** (`tests/test_discord_corpus.py`): 51 cases (the "56" above was discord-agent's vitest count). `IMPLEMENTED = {discord/table, discord/raw-mention}`; `discord/heading-depth` and `discord/thematic-break` are declared renderer-side-only — a doc-level thematic-break lint would warn on thrds' own `---` separators (the 2026-08-26 table-rule bug, reintroduced on purpose).
+- **The corpus caught a real linter bug on first contact**: `@everyone`/`@here` are the two name-form mentions Discord *does* resolve on paste, and `DiscordLinter`'s raw-mention rule flagged them. Fixed (regex exclusion), pinned in both `test_lint.py` and the corpus cases `everyone`/`here` — the fixture-corpus model doing exactly what it was built for, on day one.
+- **Acceptance run**: mgu's real draft (`~/c/oa/marin-gcs-usage/dscrd/moojin-dm/`, the session formerly drafted as `moojin-kim.md`) served offline through the vendored bundle and CIC-verified — Discord-faithful render (code chips, bullets, bold, auto-linked URL), lint panel clean, `mtime` a string. Read-only against the real session; the edit/conflict paths were verified earlier on both sides (thrds stub CIC 2026-08-26; discord-agent's e2e + built-bundle run against this repo's `server.py` 2026-08-28).
+
+Phase 4 (bot staging push) stays deferred per its own terms. Slack preview remains a future spec.
+
 ## Non-goals
 
 - Slack preview: wanted eventually (mrkdwn diverges from markdown worse than Discord does), but a separate grammar and a separate spec. The `preview` verb's server/bundle plumbing should be platform-parameterizable so Slack drops in, but no Slack renderer work here.

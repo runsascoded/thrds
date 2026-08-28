@@ -98,6 +98,16 @@ def test_valid_discord_mention_not_flagged():
     assert _lint(text) == []
 
 
+def test_everyone_and_here_not_flagged():
+    """`@everyone`/`@here` are the two name-form mentions Discord resolves on
+    paste — they ping, so they're not raw-mention mistakes. (Pinned by corpus
+    cases `everyone`/`here`.) A username that merely starts with those words
+    still warns."""
+    assert _lint("Heads up @everyone and @here!\n") == []
+    issues = _lint("Ping @heretic.\n")
+    assert [(i.rule, i.column) for i in issues] == [('discord/raw-mention', 6)]
+
+
 def test_email_address_not_flagged():
     """`x@y` (word char before `@`) is presumably an email, not a mention."""
     text = "Contact alice@example.com about it.\n"

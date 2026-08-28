@@ -1,0 +1,1048 @@
+[
+  {
+    "name": "heading-h1",
+    "input": "# Big",
+    "ast": [
+      {
+        "level": 1,
+        "content": [
+          {
+            "content": "Big",
+            "type": "text"
+          }
+        ],
+        "type": "heading"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "heading-h2",
+    "input": "## Medium",
+    "ast": [
+      {
+        "level": 2,
+        "content": [
+          {
+            "content": "Medium",
+            "type": "text"
+          }
+        ],
+        "type": "heading"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "heading-h3",
+    "input": "### Small",
+    "ast": [
+      {
+        "level": 3,
+        "content": [
+          {
+            "content": "Small",
+            "type": "text"
+          }
+        ],
+        "type": "heading"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "heading-h4-is-literal",
+    "input": "#### not a heading",
+    "ast": [
+      {
+        "content": "#",
+        "type": "text"
+      },
+      {
+        "content": "#",
+        "type": "text"
+      },
+      {
+        "content": "#",
+        "type": "text"
+      },
+      {
+        "content": "# not a heading",
+        "type": "text"
+      }
+    ],
+    "warnings": [
+      "discord/heading-depth"
+    ],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "heading-needs-a-space",
+    "input": "#nospace",
+    "ast": [
+      {
+        "content": "#nospace",
+        "type": "text"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "heading-only-at-line-start",
+    "input": "text ## not a heading",
+    "ast": [
+      {
+        "content": "text ",
+        "type": "text"
+      },
+      {
+        "content": "#",
+        "type": "text"
+      },
+      {
+        "content": "# not a heading",
+        "type": "text"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "subtext",
+    "input": "-# small print",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "small print",
+            "type": "text"
+          }
+        ],
+        "type": "subtext"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "blockquote-single-line",
+    "input": "> quoted",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "quoted",
+            "type": "text"
+          }
+        ],
+        "type": "blockQuote"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "blockquote-multi-line",
+    "input": "> one\n> two",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "one",
+            "type": "text"
+          },
+          {
+            "type": "br"
+          },
+          {
+            "content": "two",
+            "type": "text"
+          }
+        ],
+        "type": "blockQuote"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "blockquote-triple-runs-to-end",
+    "input": ">>> everything\nafter here",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "everything",
+            "type": "text"
+          },
+          {
+            "type": "br"
+          },
+          {
+            "content": "after here",
+            "type": "text"
+          }
+        ],
+        "type": "blockQuote"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "list-unordered-dash",
+    "input": "- one\n- two\n",
+    "ast": [
+      {
+        "ordered": false,
+        "items": [
+          [
+            {
+              "content": "one",
+              "type": "text"
+            }
+          ],
+          [
+            {
+              "content": "two",
+              "type": "text"
+            }
+          ]
+        ],
+        "type": "list"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "list-unordered-star",
+    "input": "* one\n* two\n",
+    "ast": [
+      {
+        "ordered": false,
+        "items": [
+          [
+            {
+              "content": "one",
+              "type": "text"
+            }
+          ],
+          [
+            {
+              "content": "two",
+              "type": "text"
+            }
+          ]
+        ],
+        "type": "list"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "list-ordered",
+    "input": "1. first\n2. second\n",
+    "ast": [
+      {
+        "ordered": true,
+        "start": 1,
+        "items": [
+          [
+            {
+              "content": "first",
+              "type": "text"
+            }
+          ],
+          [
+            {
+              "content": "second",
+              "type": "text"
+            }
+          ]
+        ],
+        "type": "list"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "list-nested-one-level",
+    "input": "- outer\n  - inner\n",
+    "ast": [
+      {
+        "ordered": false,
+        "items": [
+          [
+            {
+              "content": "outer",
+              "type": "text"
+            },
+            {
+              "type": "br"
+            },
+            {
+              "ordered": false,
+              "items": [
+                [
+                  {
+                    "content": "inner",
+                    "type": "text"
+                  }
+                ]
+              ],
+              "type": "list"
+            }
+          ]
+        ],
+        "type": "list"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "list-item-holds-inline-rules",
+    "input": "- **bold** and <@123456789012345678>\n",
+    "ast": [
+      {
+        "ordered": false,
+        "items": [
+          [
+            {
+              "content": [
+                {
+                  "content": "bold",
+                  "type": "text"
+                }
+              ],
+              "type": "strong"
+            },
+            {
+              "content": " and ",
+              "type": "text"
+            },
+            {
+              "id": "123456789012345678",
+              "type": "user"
+            }
+          ]
+        ],
+        "type": "list"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "dash-mid-line-is-not-a-list",
+    "input": "a - b",
+    "ast": [
+      {
+        "content": "a ",
+        "type": "text"
+      },
+      {
+        "content": "- b",
+        "type": "text"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "heading-after-a-list",
+    "input": "- a\n\n## Head",
+    "ast": [
+      {
+        "ordered": false,
+        "items": [
+          [
+            {
+              "content": "a",
+              "type": "text"
+            }
+          ]
+        ],
+        "type": "list"
+      },
+      {
+        "level": 2,
+        "content": [
+          {
+            "content": "Head",
+            "type": "text"
+          }
+        ],
+        "type": "heading"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "subtext-after-a-list",
+    "input": "- a\n\n-# note",
+    "ast": [
+      {
+        "ordered": false,
+        "items": [
+          [
+            {
+              "content": "a",
+              "type": "text"
+            }
+          ]
+        ],
+        "type": "list"
+      },
+      {
+        "content": [
+          {
+            "content": "note",
+            "type": "text"
+          }
+        ],
+        "type": "subtext"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "code-fence-with-lang",
+    "input": "```python\nprint(1)\n```",
+    "ast": [
+      {
+        "lang": "python",
+        "content": "print(1)",
+        "inQuote": false,
+        "type": "codeBlock"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "code-fence-no-lang",
+    "input": "```\nplain\n```",
+    "ast": [
+      {
+        "lang": "",
+        "content": "plain",
+        "inQuote": false,
+        "type": "codeBlock"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "inline-code",
+    "input": "run `make`",
+    "ast": [
+      {
+        "content": "run ",
+        "type": "text"
+      },
+      {
+        "content": "make",
+        "type": "inlineCode"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "markdown-inside-code-is-literal",
+    "input": "`**a**`",
+    "ast": [
+      {
+        "content": "**a**",
+        "type": "inlineCode"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "table-is-literal",
+    "input": "| a | b |\n|---|---|\n| 1 | 2 |",
+    "ast": [
+      {
+        "content": "| a ",
+        "type": "text"
+      },
+      {
+        "content": "| b ",
+        "type": "text"
+      },
+      {
+        "content": "|",
+        "type": "text"
+      },
+      {
+        "type": "br"
+      },
+      {
+        "content": "|",
+        "type": "text"
+      },
+      {
+        "content": "-",
+        "type": "text"
+      },
+      {
+        "content": "-",
+        "type": "text"
+      },
+      {
+        "content": "-",
+        "type": "text"
+      },
+      {
+        "content": "|",
+        "type": "text"
+      },
+      {
+        "content": "-",
+        "type": "text"
+      },
+      {
+        "content": "-",
+        "type": "text"
+      },
+      {
+        "content": "-",
+        "type": "text"
+      },
+      {
+        "content": "|",
+        "type": "text"
+      },
+      {
+        "type": "br"
+      },
+      {
+        "content": "| 1 ",
+        "type": "text"
+      },
+      {
+        "content": "| 2 ",
+        "type": "text"
+      },
+      {
+        "content": "|",
+        "type": "text"
+      }
+    ],
+    "warnings": [
+      "discord/table"
+    ],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "thematic-break-is-literal",
+    "input": "above\n\n---\n\nbelow",
+    "ast": [
+      {
+        "content": "above",
+        "type": "text"
+      },
+      {
+        "type": "br"
+      },
+      {
+        "type": "br"
+      },
+      {
+        "content": "-",
+        "type": "text"
+      },
+      {
+        "content": "-",
+        "type": "text"
+      },
+      {
+        "content": "-",
+        "type": "text"
+      },
+      {
+        "type": "br"
+      },
+      {
+        "type": "br"
+      },
+      {
+        "content": "below",
+        "type": "text"
+      }
+    ],
+    "warnings": [
+      "discord/thematic-break"
+    ],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "bold",
+    "input": "**b**",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "b",
+            "type": "text"
+          }
+        ],
+        "type": "strong"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "italic-star",
+    "input": "*i*",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "i",
+            "type": "text"
+          }
+        ],
+        "type": "em"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "italic-underscore",
+    "input": "_i_",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "i",
+            "type": "text"
+          }
+        ],
+        "type": "em"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "bold-italic",
+    "input": "***bi***",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": [
+              {
+                "content": "bi",
+                "type": "text"
+              }
+            ],
+            "type": "strong"
+          }
+        ],
+        "type": "em"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "underline",
+    "input": "__u__",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "u",
+            "type": "text"
+          }
+        ],
+        "type": "underline"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "strikethrough",
+    "input": "~~s~~",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "s",
+            "type": "text"
+          }
+        ],
+        "type": "strikethrough"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "spoiler",
+    "input": "||secret||",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "secret",
+            "type": "text"
+          }
+        ],
+        "type": "spoiler"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "bold-containing-code",
+    "input": "**bold `code` here**",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "bold ",
+            "type": "text"
+          },
+          {
+            "content": "code",
+            "type": "inlineCode"
+          },
+          {
+            "content": " here",
+            "type": "text"
+          }
+        ],
+        "type": "strong"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "spoiler-inside-blockquote",
+    "input": "> a ||secret|| here",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "a ",
+            "type": "text"
+          },
+          {
+            "content": [
+              {
+                "content": "secret",
+                "type": "text"
+              }
+            ],
+            "type": "spoiler"
+          },
+          {
+            "content": " here",
+            "type": "text"
+          }
+        ],
+        "type": "blockQuote"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "escaped-asterisks-are-literal",
+    "input": "\\*not bold\\*",
+    "ast": [
+      {
+        "type": "text",
+        "content": "*"
+      },
+      {
+        "content": "not bold",
+        "type": "text"
+      },
+      {
+        "type": "text",
+        "content": "*"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "masked-link-untrusted",
+    "input": "[#117](https://github.com/marin-community/marin/pull/117)",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "#117",
+            "type": "text"
+          }
+        ],
+        "target": "https://github.com/marin-community/marin/pull/117",
+        "untrusted": true,
+        "type": "link"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "masked-link-trusted",
+    "input": "[server](https://discord.com/channels/1/2)",
+    "ast": [
+      {
+        "content": [
+          {
+            "content": "server",
+            "type": "text"
+          }
+        ],
+        "target": "https://discord.com/channels/1/2",
+        "untrusted": false,
+        "type": "link"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "bare-url-autolinks",
+    "input": "see https://example.com/x for more",
+    "ast": [
+      {
+        "content": "see ",
+        "type": "text"
+      },
+      {
+        "content": [
+          {
+            "type": "text",
+            "content": "https://example.com/x"
+          }
+        ],
+        "target": "https://example.com/x",
+        "type": "url"
+      },
+      {
+        "content": " for more",
+        "type": "text"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "user-mention",
+    "input": "<@123456789012345678>",
+    "ast": [
+      {
+        "id": "123456789012345678",
+        "type": "user"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "user-mention-legacy-bang",
+    "input": "<@!123456789012345678>",
+    "ast": [
+      {
+        "id": "123456789012345678",
+        "type": "user"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "role-mention",
+    "input": "<@&123456789012345678>",
+    "ast": [
+      {
+        "id": "123456789012345678",
+        "type": "role"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "channel-mention",
+    "input": "<#123456789012345678>",
+    "ast": [
+      {
+        "id": "123456789012345678",
+        "type": "channel"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "everyone",
+    "input": "@everyone",
+    "ast": [
+      {
+        "type": "everyone"
+      }
+    ],
+    "warnings": [],
+    "verified": null,
+    "unverified_reason": "not posted — would notify everyone with access to the channel"
+  },
+  {
+    "name": "here",
+    "input": "@here",
+    "ast": [
+      {
+        "type": "here"
+      }
+    ],
+    "warnings": [],
+    "verified": null,
+    "unverified_reason": "not posted — would notify everyone with access to the channel"
+  },
+  {
+    "name": "raw-at-name-does-not-ping",
+    "input": "cc @alice",
+    "ast": [
+      {
+        "content": "cc ",
+        "type": "text"
+      },
+      {
+        "content": "@alice",
+        "type": "text"
+      }
+    ],
+    "warnings": [
+      "discord/raw-mention"
+    ],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "slash-command",
+    "input": "</deploy prod:123456789012345678>",
+    "ast": [
+      {
+        "fullName": "deploy prod",
+        "name": "deploy",
+        "subcommand": "prod",
+        "subcommandGroup": null,
+        "id": "123456789012345678",
+        "type": "slashCommand"
+      }
+    ],
+    "warnings": [],
+    "verified": null,
+    "unverified_reason": "posted, but a non-existent command id renders as plain text, so the resolved pill was not observed"
+  },
+  {
+    "name": "custom-emoji",
+    "input": "<:smile:123456789012345678>",
+    "ast": [
+      {
+        "animated": false,
+        "name": "smile",
+        "id": "123456789012345678",
+        "type": "emoji"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "custom-emoji-animated",
+    "input": "<a:spin:123456789012345678>",
+    "ast": [
+      {
+        "animated": true,
+        "name": "spin",
+        "id": "123456789012345678",
+        "type": "emoji"
+      }
+    ],
+    "warnings": [],
+    "verified": null,
+    "unverified_reason": "the guild has no animated emoji to substitute"
+  },
+  {
+    "name": "unicode-emoji",
+    "input": "hi 🎉",
+    "ast": [
+      {
+        "content": "hi ",
+        "type": "text"
+      },
+      {
+        "name": "🎉",
+        "type": "twemoji"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "emoji-only-message",
+    "input": "🎉🎉",
+    "ast": [
+      {
+        "name": "🎉",
+        "type": "twemoji"
+      },
+      {
+        "name": "🎉",
+        "type": "twemoji"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "timestamp-with-style",
+    "input": "<t:1700000000:R>",
+    "ast": [
+      {
+        "timestamp": "1700000000",
+        "format": "R",
+        "type": "timestamp"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  },
+  {
+    "name": "timestamp-default-style",
+    "input": "<t:1700000000>",
+    "ast": [
+      {
+        "timestamp": "1700000000",
+        "type": "timestamp"
+      }
+    ],
+    "warnings": [],
+    "verified": "2026-08-26"
+  }
+]
