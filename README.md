@@ -1,6 +1,6 @@
 # thrds (Python)
 
-Declarative thread sync for Slack, Discord, and Bluesky.
+Declarative thread sync for Slack, Discord, Bluesky, and GitHub (PRs/issues).
 
 Given a desired thread state (list of message contents), diffs against existing messages and applies minimal edits/posts/deletes to converge.
 
@@ -116,6 +116,8 @@ Foreign (non-editable) messages — e.g. human replies in a bot thread — are a
 - **Discord system message filtering**: Thread starter messages filtered from `list_messages`
 - **Bot token prefix**: Discord `Bot ` prefix auto-prepended
 - **Metadata support**: Slack message metadata passthrough
+- **Editable image blocks (Slack)**: a trailing `![alt](url)` line becomes a Block Kit `image` block whose URL swaps on `chat.update` — a chart/card that refreshes in place. `{bust}` adds a cache-busting param for images whose bytes change under a stable URL
+- **Sender-override guard**: `username`/`icon_*` customization only works on bot tokens; `post` fails closed with a clear error under a user (`xoxp-`) token instead of letting Slack silently drop the fields
 
 ## CLI
 
@@ -215,6 +217,8 @@ thrds slack edit    #foo 1783.1 'new'    # edit; raw by default
 thrds slack permalink #foo 1783.1        # get workspace permalink URL
 ```
 
+**Image blocks.** A trailing standalone `![alt](url)` line in any message becomes a Block Kit `image` block after the message body — and because an image *block*'s URL (unlike an attached file) can be edited, a job can converge the same OP with a new card URL and the image refreshes in place. If the bytes change under a stable URL, suffix the line `{bust}`: each post/edit appends a fresh `?thrds_bust=<minute>` param so Slack's URL-keyed image cache refetches, and a no-op converge never touches it. See [`specs/done/editable-image-blocks.md`](specs/done/editable-image-blocks.md).
+
 **`thrds capture …`** — capture-only sessions: same on-disk shape (git repo + gist mirror), no platform posting. Useful when the destination is somewhere `thrds` doesn't (yet) integrate with, but you still want the doc's iteration history captured to a gist:
 
 ```bash
@@ -232,7 +236,10 @@ thrds discord init draft.md      # scaffold session dir + gist (no channel/bot)
 thrds discord lint               # just the MD-compat warnings
 thrds discord render | pbcopy    # MD → clipboard (warnings → stderr)
 thrds discord open               # browse the gist
+thrds discord preview            # Discord-faithful live preview + edit loop
 ```
+
+`preview` serves the doc at `localhost:3077`, rendered through Discord's real markdown semantics (a vendored, prebuilt bundle of the `discord-agent` parser/renderer — no node needed at install time; `scripts/sync-preview-bundle` refreshes it, and `thrds/preview/BUNDLE_PROVENANCE` records the source commit). Edits in the page save back to the `.md` (mtime-guarded against concurrent local edits, conflict banner in the page), and `-c` commits each save to the session repo — UI iterations land in the gist trajectory like any other edit.
 
 **`thrds bsky …`** — same shape for Bluesky. Different lints: bsky's chief drafting pain is the **300-char post limit** (per paragraph), so `bsky lint` flags paragraphs that exceed it. Also warns on masked links (bsky auto-linkifies bare URLs via facets, so `[text](url)` renders as literal text):
 
@@ -278,7 +285,7 @@ Add scopes under **OAuth & Permissions** — under **User Token Scopes** for a u
 | `channels:read` | Resolve `#name` for public channels | ✓ (if pushing/pulling public) | ✓ (public channels) |
 | `users:read` | Resolve foreign-author names on `pull` | ✓ (`pull`) | — |
 | `emoji:read` | Download custom workspace emoji on `pull` | ✓ (`pull`) | — |
-| `chat:write.customize` | Per-message `username` / `icon_url` / `icon_emoji` | If used | If used (`slack post -u`/`-i`/`-e`) |
+| `chat:write.customize` | Per-message `username` / `icon_url` / `icon_emoji` (bot token only — `post` errors under a user token) | If used | If used (`slack post -u`/`-i`/`-e`) |
 | `reactions:read` | `SenderChangePolicy` pre-flight (library) | — | If using aggressive-mode `sync` |
 
 Metadata visibility is app-scoped (Slack only returns your app's metadata to your app), so `slack recover` needs **no** additional scope beyond the ones above.
