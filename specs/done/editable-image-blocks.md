@@ -111,3 +111,47 @@ guard is specifically about sender overrides, which Shape-C-style digests rely o
   round-trips the line; a no-op converge writes nothing.
 - `{bust}` refreshes `?v=` only on updates that already touch the message.
 - Requesting a `username`/`icon` override under a user token errors clearly.
+
+## Implemented (2026-08-31)
+
+Everything above, with these deltas:
+
+- **`md.py` untouched.** Message content is an opaque string at the doc layer;
+  `![alt](url)` lines round-trip through `parse_thread`/`serialize_thread`
+  verbatim with no new node type. The real work is at the wire boundary:
+  `thrds/imageblock.py` (pure helpers: `ImageRef`, `split_trailing_images`,
+  `to_block`/`from_block`, bust-URL handling) + `SlackClient.post`/`edit`
+  (lift) + `SlackClient._message_markdown` (read-back).
+- **Trailing-only lifting.** Only the trailing run of standalone image lines
+  (blank lines allowed between) is lifted into blocks; a mid-message image
+  line stays literal text. Read-back appends reconstructed lines at the end
+  of the body, so trailing-only is what makes converge idempotent — a
+  mid-message image would round-trip to a different doc and re-edit forever.
+- **`{bust}` uses `?thrds_bust=<token>`, not `?v=`.** Read-back has to strip
+  the param and re-emit the `{bust}` suffix (else every converge would see a
+  diff); a plain `v` param would be indistinguishable from a caller-versioned
+  URL and stripping it would corrupt case-1 usage. Token is unix-minutes,
+  re-derived per post/edit — no `thrds.yml` state (the re-derivable option).
+  A SKIP never mints a token, so no-op converges stay no-ops (pinned by
+  `test_post_then_readback_round_trips_content`).
+- **Empty alt**: sent as-is (substituting a placeholder would break read-back
+  convergence) with a `UserWarning` at block-build time, rather than a lint
+  rule — there's no Slack linter surface yet.
+- **Image-only messages raise** (Slack rejects an empty `section`); body over
+  the 3000-char section limit alongside images also raises.
+- **Staging-chrome interplay**: no chrome → `[section, *images]`; draft
+  chrome → footer stays folded in the section text (pull strips it via
+  `split_chrome`, and the flat-text fallback keeps `_live_chrome` reporting
+  draft); finalized chrome → images slot between the section and its
+  `context` footer.
+- **Declarative blocks on edit**: a markdown-mode `chat.update` with no
+  images sends `blocks: []`, so removing a doc's image line removes the live
+  block (`chat.update` otherwise preserves existing blocks). Raw-mode
+  (`raw=True`) posts/edits are untouched — no lifting, no clearing.
+- **Bot-token guard** is in `SlackClient.post`: any resolved
+  `username`/`icon_url`/`icon_emoji` (message override or client default)
+  under an `xoxp-` token raises a `ValueError` naming the fields; other
+  token shapes are unaffected.
+
+Tests: `tests/test_imageblock.py` (pure helpers), `tests/test_image_blocks.py`
+(wire payloads, chrome interplay, read-back round-trips, guard).

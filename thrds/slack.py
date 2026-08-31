@@ -24,6 +24,14 @@ from .chrome import (
 )
 from .core import Message, OrphanedRepliesError, SyncOptions, SyncResult, Thread, sync
 from .doc import Doc, DocMessage, DocSyncResult, DocThread
+from .imageblock import (
+    ImageRef,
+    bust_token,
+    from_block as image_from_block,
+    image_line,
+    split_trailing_images,
+    to_block as image_to_block,
+)
 from .linked import (
     LinkedSyncResult,
     LinkedThread,
@@ -301,22 +309,43 @@ class SlackClient:
         already been rendered to markdown, so the line is dropped by the
         *position* `chrome.locate` found in the raw text — which is always an
         extremity, and doesn't require a second grammar for rendered chrome.
+        In (1) the section text gets `split_chrome` applied: a draft that
+        carries image blocks folds its chrome line into the section (see
+        `_lift_image_blocks`); for finalized posts (chrome in a sibling
+        context block) the split is a no-op.
+
+        `image` blocks are translated back to `![alt](url)` lines appended
+        after the body (a `thrds_bust` param comes off as a `{bust}` suffix),
+        so pulled content round-trips `specs/editable-image-blocks.md` syntax.
         """
+        blocks = m.get("blocks") or []
+        image_lines = [
+            image_line(ref)
+            for ref in (image_from_block(b) for b in blocks)
+            if ref is not None
+        ]
         sections = [
-            b for b in (m.get("blocks") or [])
+            b for b in blocks
             if b.get("type") == "section" and (b.get("text") or {}).get("text")
         ]
+        body: str | None = None
         if len(sections) == 1:
-            return _slack_to_md(sections[0]["text"]["text"])
-        raw = m.get("text", "")
-        if rich_text_enabled():
-            rendered = render_rich_text(m.get("blocks"))
-            if rendered is not None:
-                found = locate_chrome(raw)
-                if found is not None:
-                    return drop_chrome_line(rendered, found[0])
-                return rendered
-        return _slack_to_md(split_chrome(raw)[0])
+            body = _slack_to_md(split_chrome(sections[0]["text"]["text"])[0])
+        else:
+            raw = m.get("text", "")
+            if rich_text_enabled():
+                rendered = render_rich_text(m.get("blocks"))
+                if rendered is not None:
+                    found = locate_chrome(raw)
+                    body = (
+                        drop_chrome_line(rendered, found[0])
+                        if found is not None else rendered
+                    )
+            if body is None:
+                body = _slack_to_md(split_chrome(raw)[0])
+        if image_lines:
+            return '\n\n'.join(([body] if body else []) + image_lines)
+        return body
 
     def list_messages(self, thread_id: str) -> list[Message]:
         result = self._request("conversations.replies", {
@@ -396,7 +425,9 @@ class SlackClient:
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
             )
         resolved_raw = raw if raw is not None else self.raw
-        wire = content if resolved_raw else _md_to_slack(content)
+        # Raw consumers send wire mrkdwn verbatim — no image lifting either.
+        body, images = (content, []) if resolved_raw else split_trailing_images(content)
+        wire = content if resolved_raw else _md_to_slack(body)
         data: dict = {
             "channel": self.channel,
             "text": wire,
@@ -424,6 +455,19 @@ class SlackClient:
                 data["icon_url"] = self.icon_url
             else:
                 data["icon_emoji"] = self.icon_emoji
+        overrides = [k for k in ("username", "icon_url", "icon_emoji") if k in data]
+        if overrides and self.token.startswith("xoxp-"):
+            # Slack honors sender customization only on bot tokens; on a user
+            # token the fields are silently dropped, so a digest relying on a
+            # custom name/avatar would quietly post as the human. Fail closed
+            # (`specs/editable-image-blocks.md`, bot-token guard).
+            raise ValueError(
+                f"Sender override ({', '.join(overrides)}) requires a bot token "
+                f"(xoxb-…): Slack ignores `chat.postMessage` sender customization "
+                f"on user (xoxp-…) tokens. Use a bot token, or drop the override."
+            )
+        if images:
+            self._lift_image_blocks(data, images)
         if thread_id is not None:
             data["thread_ts"] = thread_id
         md = self._metadata_for(content)
@@ -453,7 +497,8 @@ class SlackClient:
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
             )
         resolved_raw = raw if raw is not None else self.raw
-        wire = content if resolved_raw else _md_to_slack(content)
+        body, images = (content, []) if resolved_raw else split_trailing_images(content)
+        wire = content if resolved_raw else _md_to_slack(body)
         data: dict = {
             "channel": self.channel,
             "ts": message_id,
@@ -462,6 +507,13 @@ class SlackClient:
             "unfurl_media": not self._suppress_unfurls,
         }
         self._attach_chrome(data, content, wire)
+        if images:
+            self._lift_image_blocks(data, images)
+        elif not resolved_raw and "blocks" not in data:
+            # Declarative blocks: `chat.update` leaves existing blocks in
+            # place unless told otherwise, so an edit that drops the doc's
+            # image lines must explicitly clear the live image blocks.
+            data["blocks"] = []
         md = self._metadata_for(content)
         if md is not None:
             data["metadata"] = md
@@ -506,6 +558,48 @@ class SlackClient:
         if len(wire) + len(footer) + 2 > SLACK_MESSAGE_LIMIT:
             return
         data["text"] = f"{wire}\n\n{footer}"
+
+    def _lift_image_blocks(self, data: dict, images: list[ImageRef]) -> None:
+        """Render trailing `![alt](url)` doc lines as Block Kit `image` blocks.
+
+        The message goes out as blocks (`section` body + `image`s) because an
+        attached file can't be edited but an image block's URL can — see
+        `specs/editable-image-blocks.md`. Placement interplay with staging
+        chrome (`_attach_chrome` ran first):
+
+        * no chrome → ``[section(text), *images]`` (the flat ``text`` stays as
+          the notification fallback).
+        * draft chrome → the footer is already folded into ``data["text"]``;
+          the section carries that folded text so the chrome stays visible,
+          and the flat-text fallback keeps `_live_chrome` reporting draft.
+          (`_message_markdown` strips it back out of the section on pull.)
+        * finalized chrome → images slot between the existing section and its
+          `context` footer.
+        """
+        text = data["text"]
+        if not text.strip():
+            raise ValueError(
+                "Message is only image lines; Slack needs body text alongside "
+                "image blocks — add at least one line"
+            )
+        if len(text) > SLACK_SECTION_LIMIT:
+            raise ValueError(
+                f"Message body with image blocks exceeds Slack's "
+                f"{SLACK_SECTION_LIMIT}-char section limit ({len(text)} chars); "
+                f"shorten the body or drop the image lines"
+            )
+        token = bust_token()
+        img_blocks = [image_to_block(ref, token) for ref in images]
+        existing = data.get("blocks")
+        if existing:
+            head = [b for b in existing if b.get("type") != "context"]
+            tail = [b for b in existing if b.get("type") == "context"]
+            data["blocks"] = [*head, *img_blocks, *tail]
+        else:
+            data["blocks"] = [
+                {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+                *img_blocks,
+            ]
 
     def permalink(self, message_ts: str, channel: str | None = None) -> str:
         """Get a permalink URL for a Slack message."""
