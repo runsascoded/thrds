@@ -2,10 +2,12 @@
 
 Written to ``thrds.yml`` at the session root, tracked and gist-mirrored via
 the git repo so multi-machine sees the same authoritative slug → thread_ts map
-without needing to scan Slack. The Slack ``metadata`` field on each posted message
-carries the same info (session_id, slug, kind) as belt-and-suspenders: if the
-local state is lost or corrupted, ``thrds slack recover`` scans Slack filtered by
-session_id and rebuilds this file.
+without needing to scan Slack. (Capture sessions are the exception: they have
+no thread_ts maps to sync, so their ``thrds.yml`` is a local-only, git-excluded
+file and the gist carries just the doc.) The Slack ``metadata`` field on each
+posted message carries the same info (session_id, slug, kind) as
+belt-and-suspenders: if the local state is lost or corrupted,
+``thrds slack recover`` scans Slack filtered by session_id and rebuilds this file.
 
 Per-thread model (``specs/per-thread-model.md``)
 ------------------------------------------------

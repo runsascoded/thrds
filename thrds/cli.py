@@ -1,15 +1,20 @@
 """Command-line interface for `thrds` sessions.
 
-Two platform subgroups today:
+Platform subgroups:
 
 - ``thrds slack …`` — the primary workflow: draft locally in `.md`, sync to
   a Slack staging PC, tweak in-Slack, pull back. Session verbs
   (`init`/`push`/`pull`/`diff`/`archive`/`open`/`list-sessions`/`recover`)
   plus low-level CRUD verbs
   (`history`/`thread`/`rm`/`post`/`edit`/`permalink`).
+- ``thrds github …`` — PR/issue clones (the former `ghpr`; also mounted as
+  the ``ghpr`` console script).
+- ``thrds discord …`` / ``thrds bsky …`` — capture + platform-specific
+  MD-compat lint; prod delivery is copy-paste (`render`).
 - ``thrds capture …`` — capture-only sessions: git + gist trajectory, no
-  platform target. For drafting posts you'll paste into a channel manually
-  (Discord, elsewhere) while still capturing iteration history to a gist.
+  platform target. The minimal flow is two commands for a 2-revision gist:
+  ``dir=$(echo "$draft" | thrds capture init)``, then
+  ``echo "$final" | thrds capture update "$dir"``.
 
 Each session lives in its own directory (ghpr-style:
 ``<git-root-or-cwd>/slck/<slug>/``) with its own private git repo (nested
