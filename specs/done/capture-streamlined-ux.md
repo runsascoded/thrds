@@ -66,3 +66,14 @@ echo 'final v2' | thrds capture update "$dir"    # no-op, exit 0
 ```
 
 Gist contains exactly one file (`<slug>.md`) with two revisions; local `thrds.yml` is ~5 lines and untracked.
+
+## Implemented (2026-09-04)
+
+All four design points landed as specced, with these notes:
+
+- Slug derivation reuses `threadfile.slugify` (first line, md emphasis stripped, ≤6 words) — `# My Draft` and `**My Draft**` both yield `my-draft`.
+- The slim serialization is generic — `SessionState.save()` prunes default-equal fields for **every** platform (a fresh slack session's `thrds.yml` is also just the identity trio now). Comparison is against the pruned default, and required fields without defaults are never pruned.
+- `capture init` prints the session dir to stdout in all modes (path mode, stdin mode, resume); hints stay on stderr.
+- `_capture_state_paths` centralizes the "stage the doc; stage `thrds.yml` only if a legacy session already tracks it" rule, shared by `push` and `update`.
+- The state exclusion is written to `.git/info/exclude` (not a tracked `.gitignore`) so the exclusion itself never reaches the gist.
+- `capture update` with identical content exits 0 with `(no changes — nothing to push)` and no commit; `--no-gist` sessions print the existing `(no gist configured — commit only)` note.

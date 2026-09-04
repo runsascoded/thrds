@@ -312,12 +312,14 @@ def test_init_creates_empty_doc_when_source_absent(in_tmp):
 
 
 def test_init_state_file_is_valid_yaml(in_tmp):
+    """Fresh state holds only non-default fields (identity trio) — the rest
+    are omitted and restored as defaults on load."""
     _write_doc(in_tmp)
     CliRunner().invoke(cli, ['slack', 'init', '--no-gist', 'trainium.md'])
     text = (in_tmp / 'slck' / 'trainium' / STATE_PATH).read_text()
     data = yaml.safe_load(text)
-    assert data['doc_path'] == 'trainium.md'
-    assert data['staging_archived'] is False
+    assert data.pop('session_id')  # non-empty uuid
+    assert data == {'doc_path': 'trainium.md', 'platform': 'slack'}
     assert text.endswith('\n') and not text.endswith('\n\n')
 
 

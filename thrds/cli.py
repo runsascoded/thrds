@@ -92,6 +92,7 @@ from .threadfile import (
     find_thread,
     parse_thread_filename,
     read_threads,
+    slugify,
     thread_filename,
     thread_files,
 )
@@ -177,8 +178,11 @@ def _notify_promoted(client: SlackClient, slug: str, channel: str, message_ts: s
         err(f"  warning: promote succeeded but DM failed: {e}")
 
 
-def _load_state(expected_platform: str | None = None) -> SessionState:
-    """Load ``thrds.yml`` from CWD or exit clearly.
+def _load_state(
+    expected_platform: str | None = None,
+    root: Path | str = '.',
+) -> SessionState:
+    """Load ``thrds.yml`` from ``root`` (default CWD) or exit clearly.
 
     ``expected_platform`` (set by every platform-group verb to its own name)
     catches mis-platforming — running ``thrds slack push`` inside a session
@@ -186,7 +190,7 @@ def _load_state(expected_platform: str | None = None) -> SessionState:
     clear message, instead of blowing up deep inside slack-specific code.
     """
     try:
-        state = SessionState.load()
+        state = SessionState.load(root)
     except FileNotFoundError as e:
         raise click.UsageError(str(e))
     if expected_platform is not None and state.platform != expected_platform:
@@ -301,6 +305,20 @@ def _autocommit(session_root: Path, paths: list[str], message: str) -> None:
         err(f"warning: mirror commit/push failed: {e}")
 
 
+def _exclude_state_from_git(session_dir: Path) -> None:
+    """Mark the session state files git-excluded (``.git/info/exclude``).
+
+    Used by capture inits: the state stays a local-only file, so the gist
+    mirror is purely the doc and its revisions. ``.git/info/exclude`` (not a
+    tracked ``.gitignore``) because the exclusion itself shouldn't appear in
+    the gist either.
+    """
+    exclude = session_dir / '.git' / 'info' / 'exclude'
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open('a') as f:
+        f.write(f'/{STATE_PATH}\n/{LEGACY_STATE_PATH}\n')
+
+
 def _do_gist_init(target: Path, state: SessionState, slug: str) -> str:
     """Create gist, add remote, align local HEAD, commit + push state.json.
 
@@ -323,20 +341,25 @@ def _do_gist_init(target: Path, state: SessionState, slug: str) -> str:
     mirror.align_to_remote(target, remote=state.gist_remote)
     state.gist_id = gist_id
     state.save(target)
-    mirror.commit_and_push(
-        target,
-        [str(STATE_PATH)],
-        f'thrds: init {slug} (gist {gist_id})',
-        remote=state.gist_remote,
-    )
+    if state.platform != 'capture':
+        mirror.commit_and_push(
+            target,
+            [str(STATE_PATH)],
+            f'thrds: init {slug} (gist {gist_id})',
+            remote=state.gist_remote,
+        )
+    # capture: state is a local-only, git-excluded file — the gist's seed
+    # commit (just `<slug>.md`) is already the shared history.
     return gist_id
 
 
 def _do_init(
-    doc_path: str,
+    doc_path: str | None,
     no_gist: bool,
     channel_prefix: str | None,
     platform: str,
+    content: str | None = None,
+    slug: str | None = None,
 ) -> tuple[Path, SessionState, bool]:
     """Shared init flow for every platform's `init` verb.
 
@@ -344,12 +367,17 @@ def _do_init(
     init (matching platform required), fresh-init doc copy/create, `git init`,
     state save, and gist creation (unless ``no_gist``).
 
+    ``content`` seeds the doc directly (capture's stdin mode) instead of
+    copying ``doc_path``; ``slug`` overrides derivation from the path stem
+    (required when ``doc_path`` is None).
+
     Returns ``(target, state, was_resume)`` — callers use ``was_resume`` to
     decide which completion hints to print. The resume path itself prints
     only ``Gist created: …`` to stderr and does no other output.
     """
-    doc_p = Path(doc_path)
-    slug = doc_p.stem
+    doc_p = Path(doc_path) if doc_path is not None else None
+    if slug is None and doc_p is not None:
+        slug = doc_p.stem
     if not slug:
         raise click.UsageError(f"cannot derive a slug from DOC_PATH: {doc_path!r}")
     target = mirror.resolve_session_dir(Path.cwd(), slug, platform)
@@ -386,7 +414,9 @@ def _do_init(
     target.mkdir(parents=True)
 
     dest_md = target / f'{slug}.md'
-    if doc_p.exists() and doc_p.is_file():
+    if content is not None:
+        dest_md.write_text(content)
+    elif doc_p is not None and doc_p.exists() and doc_p.is_file():
         dest_md.write_text(doc_p.read_text())
     else:
         # Empty placeholder — user edits before first push.
@@ -398,6 +428,11 @@ def _do_init(
         platform=platform,
     )
     mirror.init_repo(target)
+    if platform == 'capture':
+        # Capture gists exist to publish the doc's revision arc; the state
+        # file has no cross-machine payload here (no slug→thread_ts maps to
+        # sync), so keep it out of git history — and thus out of the gist.
+        _exclude_state_from_git(target)
     # Save state.json BEFORE anything that can fail (gist creation, network,
     # `gh` auth). If a subsequent step blows up, the target dir has a
     # detectable "partial init" marker (state.json with gist_id=None) that
@@ -405,7 +440,8 @@ def _do_init(
     state.save(target)
 
     if no_gist:
-        mirror.commit(target, [f'{slug}.md', str(STATE_PATH)], f'thrds: init {slug}')
+        paths = [f'{slug}.md'] if platform == 'capture' else [f'{slug}.md', str(STATE_PATH)]
+        mirror.commit(target, paths, f'thrds: init {slug}')
     else:
         # Gist-mirrored path: create gist FIRST (it seeds an initial commit
         # from the doc), align local HEAD to that commit, then re-save
@@ -2595,17 +2631,52 @@ def capture_cli():
     pass
 
 
+def _capture_state_paths(session_dir: Path, doc_path: str) -> list[str]:
+    """Paths to stage for a capture commit: the doc, plus ``thrds.yml`` only
+    in legacy sessions that already track it (new-style capture sessions
+    git-exclude it — see `_exclude_state_from_git`)."""
+    paths = [doc_path]
+    if mirror.is_git_repo(session_dir) and mirror.is_tracked(session_dir, str(STATE_PATH)):
+        paths.append(str(STATE_PATH))
+    return paths
+
+
 @capture_cli.command("init")
 @click.option('-G', '--no-gist', is_flag=True, help='Skip gist creation; local git repo only.')
-@click.argument('doc_path')
-def capture_init(no_gist: bool, doc_path: str):
-    """Initialize a capture-only session for DOC_PATH (no platform target).
+@click.option('-s', '--slug', help='Session slug (default: DOC_PATH stem, or derived from the content\'s first line).')
+@click.argument('doc_path', required=False)
+def capture_init(no_gist: bool, slug: str | None, doc_path: str | None):
+    """Initialize a capture-only session (no platform target).
 
-    Same auto-resume semantics as `slack init`: if the target dir has a
-    partial init (matching platform, gist_id=None), the gist step is
-    completed on re-run.
+    With DOC_PATH: copy that file in, with the same auto-resume semantics as
+    `slack init` (a partial init — matching platform, gist_id=None — has its
+    gist step completed on re-run). Without DOC_PATH (or with `-`): read the
+    doc content from stdin. Either way the session dir prints to stdout, so
+    the two-command flow is::
+
+        dir=$(echo "$draft" | thrds capture init)
+        echo "$final" | thrds capture update "$dir"
     """
-    target, state, was_resume = _do_init(doc_path, no_gist, channel_prefix=None, platform='capture')
+    content = None
+    if doc_path in (None, '-'):
+        if sys.stdin.isatty():
+            raise click.UsageError(
+                "Pass DOC_PATH, or pipe the doc content on stdin "
+                "(e.g. `echo \"$draft\" | thrds capture init`)."
+            )
+        content = sys.stdin.read()
+        doc_path = None
+        if slug is None:
+            slug = slugify(content)
+            if not slug:
+                raise click.UsageError(
+                    "Cannot derive a slug from the content's first line; pass -s/--slug."
+                )
+    target, state, was_resume = _do_init(
+        doc_path, no_gist, channel_prefix=None, platform='capture',
+        content=content, slug=slug,
+    )
+    click.echo(target)
     if was_resume:
         return
     hint = None if state.gist_id is None else f"Gist: https://gist.github.com/{state.gist_id}"
@@ -2623,7 +2694,41 @@ def capture_push():
     state = _load_state(expected_platform='capture')
     session_dir = Path.cwd()
     doc_path = _resolve_doc_path(state, None)
-    _autocommit(session_dir, [doc_path, str(STATE_PATH)], f'thrds: capture push')
+    _autocommit(session_dir, _capture_state_paths(session_dir, doc_path), f'thrds: capture push')
+    if state.gist_id is None:
+        err("(no gist configured — commit only)")
+
+
+@capture_cli.command("update")
+@click.argument('session_dir', required=False)
+def capture_update(session_dir: str | None):
+    """Replace the doc with stdin; commit + push one gist revision.
+
+    The second half of the two-command capture flow::
+
+        dir=$(echo "$draft" | thrds capture init)
+        echo "$final" | thrds capture update "$dir"
+
+    SESSION_DIR defaults to the CWD (which must be a capture session).
+    Content identical to the current doc is a no-op (no commit, no push).
+    To push edits made directly to the file, use `thrds capture push`.
+    """
+    if sys.stdin.isatty():
+        raise click.UsageError(
+            "capture update reads the new doc content from stdin "
+            "(e.g. `echo \"$msg\" | thrds capture update <dir>`); "
+            "to push edits made directly to the file, use `thrds capture push`."
+        )
+    root = Path(session_dir) if session_dir is not None else Path.cwd()
+    state = _load_state(expected_platform='capture', root=root)
+    doc_rel = _resolve_doc_path(state, None)
+    doc_file = root / doc_rel
+    new = sys.stdin.read()
+    if doc_file.exists() and doc_file.read_text() == new:
+        err("(no changes — nothing to push)")
+        return
+    doc_file.write_text(new)
+    _autocommit(root, _capture_state_paths(root, doc_rel), f'thrds: capture update')
     if state.gist_id is None:
         err("(no gist configured — commit only)")
 

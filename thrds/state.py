@@ -48,7 +48,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -411,18 +411,39 @@ class SessionState:
             f"No thrds session state at {path}; run `thrds <platform> init` first."
         )
 
+    _ALWAYS_SERIALIZED = ('session_id', 'doc_path', 'platform')
+
     def save(self, root: Path | str = '.') -> None:
         """Persist to ``<root>/thrds.yml``, creating the parent dir if needed.
 
-        ``None`` values are pruned (load restores them as defaults) so the
-        YAML stays readable; empty containers are kept — ``channel_prefix: ''``
-        and ``channel_prefix: null`` mean different things. Removes the legacy
-        ``thrds.json`` — callers' commits record the swap (`_stage_paths`).
+        Fields still at their dataclass default are omitted — ``load``
+        restores them, so the round trip is identical state and the YAML
+        holds only what this session has actually set (a capture session's
+        file is ~5 lines, not a page of empty Slack maps). Identity fields
+        (``session_id``, ``doc_path``, ``platform``) are always written.
+        Note ``channel_prefix: ''`` and ``channel_prefix: null`` mean
+        different things: only the latter equals the default, so the
+        empty-string form survives. Removes the legacy ``thrds.json`` —
+        callers' commits record the swap (`_stage_paths`).
         """
+        data = _prune_none(asdict(self))
+        for f in fields(self):
+            if f.name in self._ALWAYS_SERIALIZED or f.name not in data:
+                continue
+            if f.default is not MISSING:
+                default = f.default
+            elif f.default_factory is not MISSING:
+                default = f.default_factory()
+            else:
+                continue
+            if is_dataclass(default):
+                default = asdict(default)
+            if data[f.name] == _prune_none(default):
+                del data[f.name]
         path = Path(root) / STATE_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(yaml.safe_dump(
-            _prune_none(asdict(self)), sort_keys=False, allow_unicode=True,
+            data, sort_keys=False, allow_unicode=True,
         ))
         legacy = Path(root) / LEGACY_STATE_PATH
         legacy.unlink(missing_ok=True)

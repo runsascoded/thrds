@@ -4,9 +4,13 @@ Capture-only sessions have no platform target — just a git-tracked doc dir
 optionally mirrored to a gist. Covers:
 
 - `capture init` writes `platform='capture'` into `thrds.yml`
-- `capture init` with gist enabled: mocked `create_gist` / `align` / `push`
-  boundary, gist_id ends up in state (same shape as `slack init`)
-- `capture push` autocommits the doc + state
+- `capture init` with gist enabled: mocked `create_gist` / `align` boundary,
+  gist_id ends up in state; no state commit (capture state is local-only)
+- `capture init` stdin mode (no DOC_PATH): content from stdin, slug derived
+  or via -s, session dir on stdout
+- `capture push` autocommits the doc (state is git-excluded)
+- `capture update`: replace doc from stdin, commit + push; no-op when unchanged
+- Slim state: a capture `thrds.yml` holds only non-default fields
 - `capture open` prints / opens the gist URL (or errors if no gist)
 - Platform-mismatch guard: `capture <verb>` on a slack-inited session (and
   vice versa) errors with a clear message, no half-execution
@@ -19,6 +23,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
 from thrds import SessionState
@@ -114,8 +119,9 @@ def test_capture_init_reports_generic_hint_no_staging_pc(in_tmp):
 
 
 def test_capture_init_gist_flow_calls_create_gist_and_records_gist_id(in_tmp, monkeypatch):
-    """Init without --no-gist under `capture`: same mirror.create_gist / align /
-    push sequence as `slack init` (shared `_do_init`). Gist_id lands in state."""
+    """Init without --no-gist under `capture`: mirror.create_gist / align, but
+    — unlike `slack init` — NO state commit/push afterward: capture state is
+    local-only, so the gist stays purely the doc's seed commit."""
     _write_doc(in_tmp)
     calls: list[tuple] = []
 
@@ -143,7 +149,7 @@ def test_capture_init_gist_flow_calls_create_gist_and_records_gist_id(in_tmp, mo
     assert state.platform == 'capture'
     assert state.gist_id == 'abc123'
 
-    assert [c[0] for c in calls] == ['create_gist', 'align_to_remote', 'push']
+    assert [c[0] for c in calls] == ['create_gist', 'align_to_remote']
     assert calls[0] == ('create_gist', str(session_dir), 'thrds: notes', ['notes.md'])
 
 
@@ -168,7 +174,7 @@ def test_capture_init_with_gist_reports_gist_url_hint(in_tmp, monkeypatch):
 # --- capture push ---
 
 
-def test_capture_push_autocommits_doc_and_state(in_tmp, monkeypatch):
+def test_capture_push_autocommits_doc(in_tmp, monkeypatch):
     session_dir = _init_capture(in_tmp, monkeypatch)
     # Modify the doc to give autocommit something new to snapshot.
     (session_dir / 'notes.md').write_text("=== a\n\nUpdated.\n")
@@ -288,3 +294,145 @@ def test_init_rejects_a_dir_inited_for_another_platform(in_tmp):
         "Error: Target session dir was inited for platform 'capture'; "
         "use `thrds capture init` (or delete the dir to reset)."
     )
+
+# --- stdin init + `update` (the two-command flow) ---
+
+
+def _gist_mocks(monkeypatch):
+    """Stub the gist boundary: create_gist returns a fixed id; align/push no-op."""
+    from thrds import mirror as mirror_mod
+    monkeypatch.setattr(mirror_mod, 'create_gist',
+                        lambda *a, **k: ('abc123', 'git@gist.github.com:abc123.git'))
+    monkeypatch.setattr(mirror_mod, 'align_to_remote', lambda *a, **k: None)
+    monkeypatch.setattr(mirror_mod, 'push', lambda *a, **k: None)
+
+
+def test_capture_init_stdin_derives_slug_and_prints_dir(in_tmp, monkeypatch):
+    _gist_mocks(monkeypatch)
+    content = "**My Draft** Title\n\nbody text\n"
+    result = CliRunner().invoke(cli, ['capture', 'init'], input=content)
+    assert result.exit_code == 0, (result.output, result.stderr)
+    session_dir = in_tmp / 'capture' / 'my-draft-title'
+    assert result.stdout == f"{session_dir}\n"
+    assert (session_dir / 'my-draft-title.md').read_text() == content
+    state = SessionState.load(session_dir)
+    assert state.platform == 'capture'
+    assert state.doc_path == 'my-draft-title.md'
+    assert state.gist_id == 'abc123'
+
+
+def test_capture_init_stdin_slug_flag(in_tmp, monkeypatch):
+    _gist_mocks(monkeypatch)
+    result = CliRunner().invoke(cli, ['capture', 'init', '-s', 'custom-name'], input='body\n')
+    assert result.exit_code == 0, (result.output, result.stderr)
+    session_dir = in_tmp / 'capture' / 'custom-name'
+    assert result.stdout == f"{session_dir}\n"
+    assert (session_dir / 'custom-name.md').read_text() == 'body\n'
+
+
+def test_capture_init_stdin_empty_content_requires_slug(in_tmp):
+    result = CliRunner().invoke(cli, ['capture', 'init'], input='')
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        "Error: Cannot derive a slug from the content's first line; pass -s/--slug."
+    )
+
+
+def test_capture_init_doc_path_prints_dir_on_stdout(in_tmp):
+    _write_doc(in_tmp)
+    result = CliRunner().invoke(cli, ['capture', 'init', '--no-gist', 'notes.md'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert result.stdout == f"{in_tmp / 'capture' / 'notes'}\n"
+
+
+def test_capture_state_untracked_in_new_sessions(in_tmp, monkeypatch):
+    """thrds.yml is git-excluded: not tracked, and not "untracked noise" either."""
+    session_dir = _init_capture(in_tmp, monkeypatch)
+    tracked = subprocess.run(
+        ['git', 'ls-files'],
+        cwd=session_dir, capture_output=True, text=True, check=True,
+    ).stdout.split()
+    assert tracked == ['notes.md']
+    status = subprocess.run(
+        ['git', 'status', '--porcelain'],
+        cwd=session_dir, capture_output=True, text=True, check=True,
+    ).stdout
+    assert status == ''
+
+
+def test_capture_yml_is_slim(in_tmp, monkeypatch):
+    """A capture session's thrds.yml holds only non-default fields."""
+    session_dir = _init_capture(in_tmp, monkeypatch)
+    data = yaml.safe_load((session_dir / 'thrds.yml').read_text())
+    assert data.pop('session_id')  # non-empty uuid
+    assert data == {'doc_path': 'notes.md', 'platform': 'capture'}
+
+
+def test_capture_update_replaces_doc_and_commits(in_tmp, monkeypatch):
+    session_dir = _init_capture(in_tmp, monkeypatch)
+    monkeypatch.chdir(in_tmp)  # exercise the SESSION_DIR arg, not CWD
+    result = CliRunner().invoke(
+        cli, ['capture', 'update', str(session_dir)], input='v2 content\n',
+    )
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert (session_dir / 'notes.md').read_text() == 'v2 content\n'
+    log = subprocess.run(
+        ['git', 'log', '--format=%s'],
+        cwd=session_dir, capture_output=True, text=True, check=True,
+    ).stdout.strip().splitlines()
+    assert log == ['thrds: capture update', 'thrds: init notes']
+    assert result.stderr.rstrip().splitlines() == ['(no gist configured — commit only)']
+
+
+def test_capture_update_unchanged_is_noop(in_tmp, monkeypatch):
+    session_dir = _init_capture(in_tmp, monkeypatch)
+    original = (session_dir / 'notes.md').read_text()
+    result = CliRunner().invoke(cli, ['capture', 'update'], input=original)
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert result.stderr.rstrip().splitlines() == ['(no changes — nothing to push)']
+    log = subprocess.run(
+        ['git', 'log', '--format=%s'],
+        cwd=session_dir, capture_output=True, text=True, check=True,
+    ).stdout.strip().splitlines()
+    assert log == ['thrds: init notes']
+
+
+def test_capture_update_defaults_to_cwd(in_tmp, monkeypatch):
+    session_dir = _init_capture(in_tmp, monkeypatch)  # chdirs into session_dir
+    result = CliRunner().invoke(cli, ['capture', 'update'], input='v2\n')
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert (session_dir / 'notes.md').read_text() == 'v2\n'
+
+
+def test_capture_update_on_slack_session_errors_clearly(in_tmp, monkeypatch):
+    _init_slack(in_tmp, monkeypatch)
+    result = CliRunner().invoke(cli, ['capture', 'update'], input='v2\n')
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        "Error: This session was inited for platform 'slack'; "
+        "use `thrds slack <verb>` instead of `thrds capture <verb>`."
+    )
+
+
+def test_capture_update_outside_session_errors(in_tmp):
+    result = CliRunner().invoke(cli, ['capture', 'update'], input='v2\n')
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        f"Error: No thrds session state at {in_tmp / 'thrds.yml'}; "
+        "run `thrds <platform> init` first."
+    )
+
+
+def test_capture_two_command_flow(in_tmp, monkeypatch):
+    """The acceptance flow from the spec: init from stdin, update by dir, no-op re-update."""
+    _gist_mocks(monkeypatch)
+    r1 = CliRunner().invoke(cli, ['capture', 'init'], input='draft v1\n')
+    assert r1.exit_code == 0, (r1.output, r1.stderr)
+    session_dir = Path(r1.stdout.rstrip('\n'))
+    assert session_dir == in_tmp / 'capture' / 'draft-v1'
+    r2 = CliRunner().invoke(cli, ['capture', 'update', str(session_dir)], input='final v2\n')
+    assert r2.exit_code == 0, (r2.output, r2.stderr)
+    assert (session_dir / 'draft-v1.md').read_text() == 'final v2\n'
+    r3 = CliRunner().invoke(cli, ['capture', 'update', str(session_dir)], input='final v2\n')
+    assert r3.exit_code == 0
+    assert r3.stderr.rstrip().splitlines() == ['(no changes — nothing to push)']
