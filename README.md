@@ -167,13 +167,22 @@ thrds bsky open                  # browse the gist
 
 ### Capture — `thrds capture`
 
-Capture-only sessions: same on-disk shape (git repo + gist mirror), no platform target — for drafting posts you'll paste somewhere `thrds` doesn't (yet) integrate with, while still capturing iteration history:
+Capture-only sessions: same on-disk shape (git repo + gist mirror), no platform target — for capturing the iteration history of a post you'll paste somewhere `thrds` doesn't (yet) integrate with. The minimal flow is two commands → a secret, one-file, two-revision gist:
+
+```bash
+dir=$(echo "$claude_draft" | thrds capture init)   # secret gist, revision 1; session dir → stdout
+echo "$final_msg" | thrds capture update "$dir"    # revision 2 (unchanged content = no-op)
+```
+
+`init` takes stdin (slug derived from the first line, or `-s`) or a `DOC_PATH`; `update` replaces the doc from stdin and pushes one revision (`SESSION_DIR` defaults to the CWD). For hand-editing sessions:
 
 ```bash
 thrds capture init draft.md      # scaffold session dir + gist mirror (no channel)
 thrds capture push               # commit doc changes and push to the gist
 thrds capture open               # browse the gist
 ```
+
+Capture gists hold **only the doc**: `thrds.yml` is a local, git-excluded file (and, like every fresh `thrds.yml`, holds only non-default fields — ~4 lines).
 
 ### `THRDS_NO_PUSH`
 
