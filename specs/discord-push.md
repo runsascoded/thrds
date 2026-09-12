@@ -89,5 +89,21 @@ Once the bot client *raises* on sender overrides (Part 1), the webhook client be
 
 Non-goals: reactions push, DM support, and the discord-agent archive/summarize/D1 logic (stays in that repo regardless of subsumption outcome).
 
+## Implemented (2026-09-11)
+
+Part 1 landed in two commits (`e48eeed` seam + raise; `d3daff8` CLI):
+
+- **`_reply_target` seam** in `core.sync` — the one-line change described above. Slack/Bsky reply to the OP id (unchanged, pinned by `test_reply_target_default_threads_replies_to_op_id`); `DiscordClient.open_thread` opens a child thread; a lone OP opens none. `sync`/`sync_linked` now do Discord's OP→thread→replies flow.
+- **Raise, don't drop**: `DiscordClient.post` and `BskyClient.post` raise `NotImplementedError` on a non-None sender override; the Discord warn-once latch is gone.
+- **CLI**: `thrds discord push` (fresh: OP→channel, replies→thread; `-n` dry-run needs no token; config flag → env → state via `THRDS_DISCORD_BOT_TOKEN`/`_CHANNEL`/`_GUILD`) and `thrds discord thread` (dump). New None-default `discord_*` `SessionState` fields record where the push landed; slim serializer omits them elsewhere. README + group docstrings updated.
+- Full suite green (1408 passed); tests stub `_curl` so `sync` runs for real with no network.
+
+**Still open (this spec stays out of `specs/done/`):**
+
+1. **Re-push / edit.** `push` refuses a session that already has a recorded OP. A real reconcile must span the parent-channel OP and the child-thread replies (`list_messages(thread)` returns the thread's messages, *not* the starter OP in the parent) — this needs the Discord starter-message semantics verified against a live token before implementing. The `discord_op_id`/`discord_thread_id`/message-id state to drive it is already persisted.
+2. **`list_messages` foreign-author gap** (logged above): every type-0 message is marked `editable=True`, so mixed-author Discord threads aren't safe to reconcile yet.
+3. **Part 2** (webhook transport) — unstarted; needs the user to provision the `#marin-bot-dbg` webhook.
+4. **discord-agent inversion** — decided (invert), unstarted; a separate PR in that repo once re-push/edit lands (the digest edits its OP in place, so it needs #1).
+
 [discord.py]: ../thrds/discord.py
 [discord-agent]: https://github.com/Open-Athena/discord-agent
