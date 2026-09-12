@@ -132,6 +132,23 @@ def _post_kwargs(entry: str | Msg) -> dict:
     return {}
 
 
+def _reply_target(client: 'ThreadClient', op_id: str, thread_name: str | None) -> str:
+    """The id that replies to a just-posted OP should be posted under.
+
+    Slack and Bluesky thread by addressing the OP's own id (its ``thread_ts`` /
+    reply root), so the default is ``op_id`` — identical to the behavior before
+    this seam existed. Discord's replies live in a *separate child thread
+    channel* opened off the OP; ``DiscordClient`` implements the optional
+    ``open_thread(op_id, name) -> str`` capability to create it and return its
+    id. A client without ``open_thread`` gets the OP-id default, so no existing
+    platform's behavior changes.
+    """
+    opener = getattr(client, 'open_thread', None)
+    if opener is None:
+        return op_id
+    return opener(op_id, thread_name)
+
+
 def _resolve_sender(
     msg: Msg,
     client_username: str | None,
@@ -549,8 +566,16 @@ def sync(
                     desired_contents[0],
                     **_post_kwargs(desired.messages[0]),
                 )
-                thread_id = result_msg.id
                 message_ids.append(result_msg.id)
+                # Replies go under the OP id (Slack/Bsky) or a child thread
+                # opened off it (Discord) — see `_reply_target`. Only open a
+                # thread when replies will actually follow; a lone OP needs
+                # none (and Discord would otherwise create an empty thread).
+                thread_id = (
+                    _reply_target(client, result_msg.id, opts.thread_name)
+                    if M > 1
+                    else result_msg.id
+                )
             start = 1
 
         for i in range(start, M):

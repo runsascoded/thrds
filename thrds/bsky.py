@@ -69,9 +69,15 @@ class BskyClient:
     ) -> Message:
         """Create a post. If thread_id is given, reply to the root post.
 
-        Sender-override fields (username/icon_url/icon_emoji) accepted for
-        signature parity with the `ThreadClient` protocol but ignored —
-        Bluesky has no per-message sender concept."""
+        Sender-override fields (username/icon_url/icon_emoji) exist for
+        `ThreadClient` protocol parity, but Bluesky has no per-message sender
+        concept — so any non-None value **raises** rather than being silently
+        dropped (a caller asking for a sender it can't get should know)."""
+        if username is not None or icon_url is not None or icon_emoji is not None:
+            raise NotImplementedError(
+                "Bluesky has no per-message sender concept "
+                "(username/icon_url/icon_emoji cannot be honored)."
+            )
         if len(content) > POST_LIMIT:
             raise ValueError(f"Post exceeds Bluesky's {POST_LIMIT} char limit ({len(content)} chars)")
 

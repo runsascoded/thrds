@@ -133,3 +133,21 @@ def test_bsky_edit_raises():
     atproto = pytest.importorskip("atproto")
     from thrds.bsky import BskyClient
     assert hasattr(BskyClient, 'edit')
+
+
+@pytest.mark.parametrize('kwargs', [
+    {'username': 'Custom'},
+    {'icon_url': 'https://cdn.example/x.png'},
+    {'icon_emoji': ':wave:'},
+])
+def test_bsky_post_raises_on_sender_override(kwargs):
+    """A sender override Bluesky can't honor raises, not silently dropped.
+
+    The guard runs before any network use, so an uninitialized instance
+    exercises it without a login.
+    """
+    atproto = pytest.importorskip("atproto")
+    from thrds.bsky import BskyClient
+    client = BskyClient.__new__(BskyClient)
+    with pytest.raises(NotImplementedError, match='per-message sender'):
+        client.post('hello', **kwargs)

@@ -66,6 +66,20 @@ class MockClient:
         raise ValueError(f"Message {message_id} not found")
 
 
+class OpenThreadMockClient(MockClient):
+    """`MockClient` that implements the optional `open_thread` capability
+    (the Discord model: replies live in a child thread opened off the OP).
+    Records each `open_thread` call and returns a distinct child-channel id."""
+    def __init__(self, threads=None, child_id: str = 'child-thread'):
+        super().__init__(threads)
+        self.child_id = child_id
+        self.open_thread_calls: list[tuple[str, str | None]] = []
+
+    def open_thread(self, op_id: str, name: str | None) -> str:
+        self.open_thread_calls.append((op_id, name))
+        return self.child_id
+
+
 def test_dry_run():
     client = MockClient({"t1": [
         Message(id="m1", content="OP"),
@@ -271,3 +285,49 @@ def test_sync_msg_content_powers_positional_diff():
     result = sync(client, desired, thread_id="t1")
     assert [a.type for a in result.actions] == [ActionType.SKIP]
     assert client.post_calls == []
+
+
+# --- `_reply_target` seam: where replies to a fresh OP get posted ---
+
+def test_reply_target_default_threads_replies_to_op_id():
+    """A client without `open_thread` (Slack/Bsky) threads replies under the
+    OP's own id — the behavior before the seam existed, unchanged."""
+    client = MockClient()
+    desired = Thread(messages=["OP", "r1", "r2"])
+    result = sync(client, desired, options=SyncOptions(thread_name="ignored"))
+    assert client.post_calls == [
+        {'content': 'OP', 'thread_id': None, 'username': None, 'icon_url': None, 'icon_emoji': None},
+        {'content': 'r1', 'thread_id': '1', 'username': None, 'icon_url': None, 'icon_emoji': None},
+        {'content': 'r2', 'thread_id': '1', 'username': None, 'icon_url': None, 'icon_emoji': None},
+    ]
+    assert result.thread_id == '1'
+    assert result.message_ids == ['1', '2', '3']
+
+
+def test_reply_target_open_thread_capability_posts_replies_into_child_thread():
+    """A client with `open_thread` (Discord) posts the OP to the channel, opens
+    a child thread off it, and posts replies into that thread channel."""
+    client = OpenThreadMockClient(child_id='child-99')
+    desired = Thread(messages=["OP", "r1", "r2"])
+    result = sync(client, desired, options=SyncOptions(thread_name="My Thread"))
+    assert client.open_thread_calls == [('1', 'My Thread')]
+    assert client.post_calls == [
+        {'content': 'OP', 'thread_id': None, 'username': None, 'icon_url': None, 'icon_emoji': None},
+        {'content': 'r1', 'thread_id': 'child-99', 'username': None, 'icon_url': None, 'icon_emoji': None},
+        {'content': 'r2', 'thread_id': 'child-99', 'username': None, 'icon_url': None, 'icon_emoji': None},
+    ]
+    assert result.thread_id == 'child-99'
+    assert result.message_ids == ['1', '2', '3']
+
+
+def test_reply_target_not_invoked_for_lone_op():
+    """A lone OP (no replies) never opens a thread — Discord would otherwise
+    create an empty one."""
+    client = OpenThreadMockClient(child_id='child-99')
+    result = sync(client, Thread(messages=["just the OP"]), options=SyncOptions(thread_name="My Thread"))
+    assert client.open_thread_calls == []
+    assert client.post_calls == [
+        {'content': 'just the OP', 'thread_id': None, 'username': None, 'icon_url': None, 'icon_emoji': None},
+    ]
+    assert result.thread_id == '1'
+    assert result.message_ids == ['1']

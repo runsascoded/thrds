@@ -2,12 +2,10 @@
 
 Cover the wire-level payloads emitted by `SlackClient.post()` under the
 various resolution paths (message override → client default → unset;
-icon_url beats icon_emoji when both resolve), and the Discord-side
-one-time warning behavior.
+icon_url beats icon_emoji when both resolve), and that Discord/Bluesky
+raise on a sender override they cannot honor.
 """
 from __future__ import annotations
-
-import warnings
 
 import pytest
 
@@ -129,7 +127,7 @@ def test_slack_edit_payload_has_no_sender_fields():
     assert 'icon_emoji' not in data
 
 
-# --- Discord: warn once, ignore ---
+# --- Discord: sender overrides raise (the bot API can't set a per-message sender) ---
 
 class _FakeDiscordClient(DiscordClient):
     """DiscordClient with `_curl` stubbed — no network."""
@@ -142,42 +140,25 @@ class _FakeDiscordClient(DiscordClient):
         return {'id': 'm-1'}
 
 
-def test_discord_post_warns_once_on_sender_override_then_stays_silent():
-    """First Msg with sender fields → UserWarning; subsequent ones stay silent."""
+@pytest.mark.parametrize('kwargs', [
+    {'username': 'Custom'},
+    {'icon_url': 'https://cdn.example/x.png'},
+    {'icon_emoji': ':wave:'},
+    {'username': 'Custom', 'icon_url': 'https://cdn.example/x.png'},
+])
+def test_discord_post_raises_on_sender_override(kwargs):
+    """Any non-None sender override raises before any API call — no silent drop."""
     client = _FakeDiscordClient()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
-        client.post('hello 1', username='Custom')
-        client.post('hello 2', icon_url='https://cdn.example/x.png')
-        client.post('hello 3', icon_emoji=':wave:')
-    # Exactly one warning fires (the first call); subsequent are silenced by the latch.
-    sender_warnings = [w for w in caught if 'per-message sender' in str(w.message)]
-    assert len(sender_warnings) == 1
+    with pytest.raises(NotImplementedError, match='per-message sender'):
+        client.post('hello', **kwargs)
+    assert client.curl_calls == []
 
 
-def test_discord_post_sender_fields_not_sent_to_api():
-    """Ignored means IGNORED: the sender kwargs don't leak into the Discord payload."""
+def test_discord_post_bare_sends_only_content():
+    """Bare `post(content)` posts to the channel with just the content."""
     client = _FakeDiscordClient()
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        client.post('hello', username='Custom', icon_url='https://cdn.example/x.png')
-    method, path, data = client.curl_calls[-1]
-    assert 'username' not in data
-    assert 'icon_url' not in data
-    assert 'icon_emoji' not in data
-    # Content still forwarded.
-    assert data['content'] == 'hello'
-
-
-def test_discord_post_no_warning_when_no_sender_overrides():
-    """Bare `post(content)` — no warning, no latch flip."""
-    client = _FakeDiscordClient()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
-        client.post('hello')
-        client.post('goodbye')
-    sender_warnings = [w for w in caught if 'per-message sender' in str(w.message)]
-    assert sender_warnings == []
+    client.post('hello')
+    assert client.curl_calls == [('POST', '/channels/999/messages', {'content': 'hello'})]
 
 
 # --- Slack list_messages populates sender fields for cascade detection ---
