@@ -375,6 +375,16 @@ class SessionState:
     threads: dict[str, ThreadEntry] = field(default_factory=dict)                    # slug → per-thread state (per-thread model; see `threads_legacy`)
     staging_chrome: StagingChrome = field(default_factory=StagingChrome)             # the default staging remote's chrome (session-level knob)
     remotes: dict[str, dict] = field(default_factory=dict)                           # remotes config: name → {role, channel, chrome}; see `thrds.remotes.resolve`
+    # Discord session config (platform == 'discord'). All None-default, so the
+    # slim serializer omits them from every non-Discord session's thrds.yml.
+    # `channel_id`/`guild_id` say where to post; `op_id`/`thread_id` are filled
+    # in by the first `thrds discord push` (the OP lives in the channel, its
+    # replies in the child thread) so a re-push reconciles the same thread.
+    discord_channel_id: str | None = None
+    discord_guild_id: str | None = None
+    discord_op_id: str | None = None
+    discord_thread_id: str | None = None
+    discord_thread_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.platform not in VALID_PLATFORMS:

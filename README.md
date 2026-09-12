@@ -142,7 +142,7 @@ ghpr ingest-attachments          # rewrite user-attachment URLs to durable gist 
 
 ### Discord — `thrds discord`
 
-Capture + MD-compat lint for Discord. Prod delivery is copy-paste (self-bots are ToS-prohibited), so there's no `push`; `render` prints the doc to stdout and auto-runs `lint` (flags tables and raw `@name` — constructs Discord's user-message renderer drops; masked `[text](url)` links do render):
+Two delivery models. **Paste** (`render`/`preview`) posts *as you* — Discord bans user-token automation, so there's no "post as me" — while **bot push** (`push`/`thread`) posts *as a bot*. `render` prints the doc to stdout and auto-runs `lint` (flags tables and raw `@name` — constructs Discord's user-message renderer drops; masked `[text](url)` links do render):
 
 ```bash
 thrds discord init draft.md      # scaffold session dir + gist (no channel/bot)
@@ -150,9 +150,13 @@ thrds discord lint               # just the MD-compat warnings
 thrds discord render | pbcopy    # MD → clipboard (warnings → stderr)
 thrds discord open               # browse the gist
 thrds discord preview            # Discord-faithful live preview + edit loop
+thrds discord push -N "Title"    # post as a bot: OP → channel, replies → thread
+thrds discord thread             # dump the pushed thread's messages (id + content)
 ```
 
 `preview` serves the doc at `localhost:3077`, rendered through Discord's real markdown semantics (a vendored, prebuilt bundle of the `discord-agent` parser/renderer — no node needed at install time; `scripts/sync-preview-bundle` refreshes it, `thrds/preview/BUNDLE_PROVENANCE` records the source commit). Edits in the page save back to the `.md` (mtime-guarded, conflict banner on races); `-c` commits each save, so UI iterations land in the gist trajectory like any other edit.
+
+`push` posts the doc as a bot: the OP (before the first `+++`) goes to the channel and each reply into a thread opened off it (`thread` dumps that thread back). Config comes from `THRDS_DISCORD_BOT_TOKEN` (never a flag) plus `--channel`/`THRDS_DISCORD_CHANNEL` and `--guild`/`THRDS_DISCORD_GUILD`; `-n` previews the plan with no token. A bot posts under one identity — per-message sender (avatars/names, like the Slack digest's mosaic) needs a webhook transport, which is [`specs/discord-push.md`](specs/discord-push.md)'s Part 2. v1 is fresh-push only (re-push/edit is a follow-up).
 
 ### Bluesky — `thrds bsky`
 

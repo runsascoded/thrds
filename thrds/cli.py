@@ -2754,15 +2754,16 @@ def capture_open(no_open: bool):
 
 
 # ============================================================================
-# `thrds discord …` subgroup — capture + MD-compat lint, no live push.
+# `thrds discord …` subgroup — capture + MD-compat lint + bot push.
 # ============================================================================
 #
 # Discord phase 2c (from specs/done/discord-platform.md): the render-preview
-# loop without any bot-token / staging-channel plumbing. Prod delivery on
-# Discord is copy-paste (self-bots violate ToS); `render` outputs the doc's
-# MD to stdout for `| pbcopy`, `lint` flags the constructs that don't render
-# in normal Discord user messages (tables, raw @name). Masked links used to
-# be flagged too; see specs/done/discord-masked-links-render.md for the fix.
+# loop for paste-as-you delivery. `render` outputs the doc's MD to stdout for
+# `| pbcopy`, `lint` flags the constructs that don't render in normal Discord
+# user messages (tables, raw @name; masked links, see
+# specs/done/discord-masked-links-render.md). `push`/`thread` (from
+# specs/discord-push.md) add bot-token delivery: post the doc as a bot with
+# the OP in the channel and replies in a thread.
 
 
 def _run_discord_lint(doc_text: str, doc_path: str) -> int:
@@ -2780,14 +2781,16 @@ def _run_discord_lint(doc_text: str, doc_path: str) -> int:
 
 @cli.group("discord")
 def discord_cli():
-    """Discord workflow: init, render (for paste), lint (MD-compat warnings).
+    """Discord workflow: init, render/preview (for paste), lint, and bot push.
 
-    Discord asymmetry: prod delivery is copy-paste (self-bots are ToS-
-    prohibited), so there's no `push`. The subgroup captures iteration
-    history to a gist (via `init`) and surfaces the final MD (via `render`)
-    with warnings about constructs Discord's user-message renderer drops
-    on the floor (tables, raw `@name`). See
-    `specs/done/discord-platform.md`.
+    Two delivery models. **Paste** (`render`/`preview`) is for posting *as
+    you* — Discord bans user-token automation, so there's no "post as me."
+    **Bot push** (`push`) posts *as a bot*: the doc's OP goes to the channel,
+    replies into a thread opened off it (`thread` dumps that thread back). The
+    subgroup also captures iteration history to a gist (`init`) and lints for
+    constructs Discord's renderer drops (tables, raw `@name`). Per-message
+    sender identity (avatars/names) needs a webhook transport, not the bot API
+    — see `specs/discord-push.md`; `specs/done/discord-platform.md`.
     """
     pass
 
@@ -2911,6 +2914,134 @@ def discord_preview(commit: bool, port: int | None, no_open: bool):
         httpd.serve_forever()
     except KeyboardInterrupt:
         err('stopped')
+
+
+DISCORD_BOT_TOKEN_ENV = 'THRDS_DISCORD_BOT_TOKEN'
+DISCORD_CHANNEL_ENV = 'THRDS_DISCORD_CHANNEL'
+DISCORD_GUILD_ENV = 'THRDS_DISCORD_GUILD'
+
+
+def _discord_client(
+    state: SessionState,
+    channel: str | None = None,
+    guild: str | None = None,
+    *,
+    require_token: bool = True,
+):
+    """Resolve a `DiscordClient` for this session (flag → env → session state).
+
+    Bot token from ``THRDS_DISCORD_BOT_TOKEN`` (never a flag — the token-
+    handling rule). ``require_token=False`` allows a dry run to build the plan
+    with no credentials (a dry run makes no API calls, so the token is never
+    sent).
+    """
+    from .discord import DiscordClient
+
+    token = os.environ.get(DISCORD_BOT_TOKEN_ENV)
+    if not token:
+        if require_token:
+            raise click.UsageError(
+                f'Set {DISCORD_BOT_TOKEN_ENV} to a Discord bot token to push.'
+            )
+        token = 'dry-run'  # never sent — a dry run posts nothing
+    channel_id = channel or os.environ.get(DISCORD_CHANNEL_ENV) or state.discord_channel_id
+    if not channel_id:
+        raise click.UsageError(
+            f'No Discord channel; pass --channel, set {DISCORD_CHANNEL_ENV}, '
+            'or record one in the session.'
+        )
+    guild_id = guild or os.environ.get(DISCORD_GUILD_ENV) or state.discord_guild_id
+    return DiscordClient(token=token, channel_id=channel_id, guild_id=guild_id)
+
+
+@discord_cli.command("push")
+@click.option('-c', '--channel', help=f'Discord channel id (overrides {DISCORD_CHANNEL_ENV} / session).')
+@click.option('-g', '--guild', help=f'Discord guild id, for permalinks (overrides {DISCORD_GUILD_ENV} / session).')
+@click.option('-j', '--jitter', type=float, default=0.0, help='Extra random 0..jitter seconds added to --pace.')
+@click.option('-n', '--dry-run', is_flag=True, help='Show the plan; post nothing.')
+@click.option('-N', '--thread-name', help='Name for the created thread (default: the doc slug).')
+@click.option('-p', '--pace', type=float, default=0.0, help='Seconds to wait between posts.')
+@click.argument('doc_path', required=False)
+def discord_push(
+    channel: str | None,
+    guild: str | None,
+    jitter: float,
+    dry_run: bool,
+    thread_name: str | None,
+    pace: float,
+    doc_path: str | None,
+):
+    """Post this session's doc to Discord as the bot: OP in the channel, replies in a thread.
+
+    The doc's OP (before the first ``+++``) posts to the channel; a child
+    thread is opened off it and the replies post into that thread. v1 pushes a
+    *fresh* thread only — re-pushing a session that already has a recorded OP
+    is refused (the parent-channel/child-thread reconcile is a follow-up; see
+    ``specs/discord-push.md``).
+    """
+    from .core import Thread
+    from .md import parse_thread
+
+    state = _load_state(expected_platform='discord')
+    if state.discord_op_id is not None and not dry_run:
+        raise click.UsageError(
+            f'Session already pushed (OP {state.discord_op_id}); re-push/edit is '
+            'not yet implemented — see specs/discord-push.md.'
+        )
+    path = _resolve_doc_path(state, doc_path)
+    text = Path(path).read_text()
+    messages = [m.content for m in parse_thread(text).thread.messages]
+    name = thread_name or state.discord_thread_name or Path(state.doc_path).stem
+
+    client = _discord_client(state, channel, guild, require_token=not dry_run)
+    result = client.sync(
+        Thread(messages=messages),
+        dry_run=dry_run,
+        pace=pace,
+        jitter=jitter,
+        thread_name=name,
+    )
+
+    if dry_run:
+        err(result.format_preview())
+        err(f'(dry run — {len(messages)} message(s), thread name {name!r})')
+        return
+
+    state.discord_channel_id = client.channel_id
+    state.discord_guild_id = client.guild_id
+    state.discord_op_id = result.message_ids[0]
+    state.discord_thread_id = result.thread_id if len(messages) > 1 else None
+    state.discord_thread_name = name
+    state.save()
+
+    op_id = state.discord_op_id
+    if state.discord_thread_id:
+        err(f'Posted OP {op_id} + {len(messages) - 1} repl(y/ies) in thread {state.discord_thread_id}.')
+    else:
+        err(f'Posted OP {op_id} (no replies).')
+    if client.guild_id:
+        click.echo(f'https://discord.com/channels/{client.guild_id}/{client.channel_id}/{op_id}')
+
+
+@discord_cli.command("thread")
+@click.option('-c', '--channel', help=f'Discord channel id (overrides {DISCORD_CHANNEL_ENV} / session).')
+@click.option('-g', '--guild', help=f'Discord guild id (overrides {DISCORD_GUILD_ENV} / session).')
+@click.argument('thread_id', required=False)
+def discord_thread(channel: str | None, guild: str | None, thread_id: str | None):
+    """Dump a live Discord thread's messages (id + content per line).
+
+    THREAD_ID defaults to this session's recorded thread, falling back to its
+    OP when there are no replies. A verification / debugging aid.
+    """
+    state = _load_state(expected_platform='discord')
+    tid = thread_id or state.discord_thread_id or state.discord_op_id
+    if not tid:
+        raise click.UsageError(
+            'No thread id (session not pushed yet); pass one explicitly.'
+        )
+    client = _discord_client(state, channel, guild)
+    for m in client.list_messages(tid):
+        click.echo(f'{m.id}\t{m.content}')
 
 
 # ============================================================================
