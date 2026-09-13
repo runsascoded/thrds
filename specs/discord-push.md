@@ -104,6 +104,9 @@ Part 1 landed in two commits (`e48eeed` seam + raise; `d3daff8` CLI):
 2. **`list_messages` foreign-author gap** (logged above): every type-0 message is marked `editable=True`, so mixed-author Discord threads aren't safe to reconcile yet.
 3. ~~**Part 2** (webhook transport).~~ **Done (2026-09-13)** — `DiscordWebhookClient` built + verified live; see "Implemented: DiscordWebhookClient" below.
 4. **discord-agent inversion** — decided (invert), unstarted; a separate PR in that repo now that re-push/edit has landed (the digest edits its OP in place, so it needed #1).
+5. **Hybrid orchestration + transport policy.** The two clients exist; a *declarative per-sender threaded digest* still can't be `sync`'d in one call, and the CLI has no webhook config. **Decided policy: always require a bot; the webhook is a pure additive per-sender layer on top of it — no webhook-only state.** The bot is needed for `list`/reconcile regardless (the premise of declarative sync), and custom sender is the only thing the webhook adds, so making it optional-on-top keeps two states, not three, and sidesteps an id-tracked webhook-only reconcile model entirely. Custom sender without a webhook raises descriptively (already true at the primitive level: `DiscordClient.post` raises on a sender override and points at the webhook). To realize the hybrid end-to-end still needs:
+   - A composite `sync` where the **bot** opens the thread + owns the OP + lists/reconciles structure, and the **webhook** writes the per-sender replies into it — today the hybrid is manual (see the README library example).
+   - CLI config-resolution: bot is required; if any message carries a per-sender override, require `THRDS_DISCORD_WEBHOOK` too and route those replies through it, else raise naming what's missing. Bare-`str` pushes stay bot-only, unchanged.
 
 ## Live findings (2026-09-13): thread-hybrid + reconcile semantics
 
