@@ -156,7 +156,7 @@ thrds discord thread             # dump the pushed thread's messages (id + conte
 
 `preview` serves the doc at `localhost:3077`, rendered through Discord's real markdown semantics (a vendored, prebuilt bundle of the `discord-agent` parser/renderer — no node needed at install time; `scripts/sync-preview-bundle` refreshes it, `thrds/preview/BUNDLE_PROVENANCE` records the source commit). Edits in the page save back to the `.md` (mtime-guarded, conflict banner on races); `-c` commits each save, so UI iterations land in the gist trajectory like any other edit.
 
-`push` posts the doc as a bot: the OP (before the first `+++`) goes to the channel and each reply into a thread opened off it (`thread` dumps that thread back). Config comes from `THRDS_DISCORD_BOT_TOKEN` (never a flag) plus `--channel`/`THRDS_DISCORD_CHANNEL` and `--guild`/`THRDS_DISCORD_GUILD`; `-n` previews the plan with no token. A bot posts under one identity — per-message sender (avatars/names, like the Slack digest's mosaic) needs a webhook transport, which is [`specs/discord-push.md`](specs/discord-push.md)'s Part 2. v1 is fresh-push only (re-push/edit is a follow-up).
+`push` posts the doc as a bot: the OP (before the first `+++`) goes to the channel and each reply into a thread opened off it (`thread` dumps that thread back). Re-pushing a session reconciles the live thread to the doc (edit changed messages, add new replies, delete removed ones); the one unsupported transition is growing a lone OP into a thread on re-push (re-init for that). Config comes from `THRDS_DISCORD_BOT_TOKEN` (never a flag) plus `--channel`/`THRDS_DISCORD_CHANNEL` and `--guild`/`THRDS_DISCORD_GUILD`; `-n` previews the plan with no token. A bot posts under one identity — per-message sender (avatars/names, like the Slack digest's mosaic) needs the webhook transport (`DiscordWebhookClient`; see [Platform capabilities](#platform-capabilities) and [`specs/discord-push.md`](specs/discord-push.md)).
 
 ### Bluesky — `thrds bsky`
 
@@ -192,6 +192,34 @@ Capture gists hold **only the doc**: `thrds.yml` is a local, git-excluded file (
 
 Every state-mutating verb auto-commits **and pushes** to the session's gist. `THRDS_NO_PUSH=1` keeps the local commits and skips every push (announced on stderr, never silent) — useful when exercising a real session's code paths without writing to its gist, including from a *copy* of a session dir, which carries `.git` and its remotes along and so is not by itself an isolated sandbox.
 
+## Platform capabilities
+
+What each transport can do. The columns are the four sync clients — Slack (`SlackClient`), Discord under a bot token (`DiscordClient`) vs. via a channel webhook (`DiscordWebhookClient`), and Bluesky (`BskyClient`). GitHub is a different model (see below the table).
+
+| | Slack | Discord (bot) | Discord (webhook) | Bluesky |
+|---|:---:|:---:|:---:|:---:|
+| Post a message | ✅ | ✅ | ✅ | ✅ |
+| Edit a message | ✅ | ✅ | ✅ | ❌ → delete+repost |
+| Delete a message | ✅ | ✅ | ✅ (own) | ✅ |
+| Read / list a thread (needed to reconcile) | ✅ | ✅ | ❌ (pair with a bot) | ✅ |
+| Post with a custom sender (name + avatar) | ✅ | ❌ | ✅ | ❌ |
+| Turn a message into a thread | auto¹ | ✅ (explicit) | ❌ (can't open one) | auto¹ |
+| Reply into a thread | ✅ | ✅ | ✅ (`?thread_id=`) | ✅ |
+| Edit a reply | ✅ | ✅ | ✅ | ❌ → delete+repost |
+| Post a reply with a custom sender | ✅ | ❌ | ✅ | ❌ |
+| **Edit an existing message's sender** | ❌ | ❌ | ❌ | ❌ |
+| Per-message char limit | 4000 | 2000 | 2000 | 300 / paragraph |
+
+¹ Slack and Bluesky thread *implicitly*: a reply addresses the OP's own id (Slack's `thread_ts`, Bluesky's reply refs), so any message is already a thread root — there is no separate "create thread" call. Discord's thread is a distinct channel that must be `create_thread`'d off the OP (a message id isn't a channel), which is why `sync` has the `open_thread` seam that only `DiscordClient` implements.
+
+Reading the table:
+
+- **Editing a sender is impossible everywhere.** The sender (display name + avatar) is fixed when a message is posted. Slack's `chat.update` and Discord's webhook edit both silently ignore `username`/`avatar` on edit; the Discord bot API and Bluesky have no per-message sender at all. So a per-sender mosaic can be *built* incrementally but never *re-attributed*.
+- **Custom senders:** Slack does it under one bot token (`chat:write.customize`). Discord's bot token is a *single* identity — per-message name/avatar needs the **webhook** transport. For a threaded per-contributor digest, pair the two: a `DiscordClient` opens the thread and owns the OP + reconcile, and a `DiscordWebhookClient` fans the per-sender replies into it via `?thread_id=` (`DiscordClient.post` *raises* on a sender override rather than silently dropping it, pointing you here). Bluesky posts only as the logged-in account.
+- **Reconcile (declarative edit-in-place) needs read + edit.** Slack and Discord converge a live thread to the doc (edit changed messages, add/delete the rest). Bluesky has no edit API, so any content change degrades to delete+repost — losing reactions, permalinks, and position — and it can't reconcile a mixed-author thread.
+
+**GitHub** (`thrds github` / `ghpr`) is deliberately not in the table: it edits issue/PR **bodies and comments** as the authenticated user — no bots, no per-message senders, no thread creation. Its "thread" is the issue or PR and its comment list, and its verbs are clone → edit locally → push, not a live declarative sync.
+
 ## Library
 
 ```python
@@ -212,6 +240,20 @@ result = discord.sync(thread, thread_id="1490821926288097503")
 
 bsky = BskyClient(handle="you.bsky.social", password="app-password")
 result = bsky.sync(thread)   # no edit API: falls back to delete+repost on change
+```
+
+Per-message senders on Discord need the webhook transport — the bot opens the thread and owns the OP, the webhook fans per-sender replies into it (`DiscordClient.post` *raises* on a sender override rather than silently dropping it):
+
+```python
+from thrds import DiscordClient, DiscordWebhookClient
+
+bot = DiscordClient(token="bot-token", channel_id="1489279547689140505")
+op = bot.post("Weekly digest")
+tid = bot.create_thread(op.id, "Weekly digest")
+
+hook = DiscordWebhookClient("https://discord.com/api/webhooks/…", thread_id=tid)
+hook.post("Alice shipped X", username="Alice", icon_url="https://…/alice.png")
+hook.post("Bob shipped Y", username="Bob", icon_url="https://…/bob.png")
 ```
 
 ### Sync algorithm

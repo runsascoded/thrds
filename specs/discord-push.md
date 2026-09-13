@@ -102,7 +102,7 @@ Part 1 landed in two commits (`e48eeed` seam + raise; `d3daff8` CLI):
 
 1. ~~**Re-push / edit.**~~ **Done (2026-09-13)** — see "Implemented" below. `push` now reconciles a session that already has a recorded OP.
 2. **`list_messages` foreign-author gap** (logged above): every type-0 message is marked `editable=True`, so mixed-author Discord threads aren't safe to reconcile yet.
-3. **Part 2** (webhook transport) — core behavior + thread hybrid now **verified live** (see below); ready to build `DiscordWebhookClient`.
+3. ~~**Part 2** (webhook transport).~~ **Done (2026-09-13)** — `DiscordWebhookClient` built + verified live; see "Implemented: DiscordWebhookClient" below.
 4. **discord-agent inversion** — decided (invert), unstarted; a separate PR in that repo now that re-push/edit has landed (the digest edits its OP in place, so it needed #1).
 
 ## Live findings (2026-09-13): thread-hybrid + reconcile semantics
@@ -138,7 +138,19 @@ Verified against a dedicated dev bot (`thrds-dev`) in a private server (`rbw dev
 - CLI: re-push points `sync` at `discord_thread_id` (thread case) or, for a lone OP, at the base channel scoped by `only_ids={op_id}` (in-place OP edit; growing a lone OP into a thread mid-life is refused with a clear message). A re-push dry-run reads the live thread to build the plan, so it requires a token (a fresh dry-run still doesn't).
 - Verified live end-to-end against `#bot-test` (`tmp/discord_reconcile_probe.py`): fresh → edit-OP-via-parent + edit-reply + skip → add → delete, each read back exactly. 8 new CLI tests assert exact `_curl` call sequences (OP edit → parent, reply edit/post/delete → thread); full suite 1416 passed.
 
-Remaining: #2 (foreign-author gap), #3 (`DiscordWebhookClient`, next), #4 (discord-agent inversion, now unblocked).
+Remaining: #2 (foreign-author gap), #4 (discord-agent inversion, now unblocked).
+
+## Implemented (2026-09-13): `DiscordWebhookClient` (open item #3)
+
+The webhook transport — the honest way to do per-message sender on Discord, now that the bot client *raises* on overrides. The shared HTTP core (`_curl` retry/backoff, 429 + `EditRateLimited`, status parsing) is factored into a `_DiscordHTTP` base; `DiscordClient` (bot token) and `DiscordWebhookClient` (webhook execution) are two identity models over it — a refactor of the existing `_curl`, no behavior change to the bot client (its error strings still read `Discord {method} {path}`; a `label` param lets the webhook client keep its secret URL out of every error).
+
+- `DiscordWebhookClient(webhook_url, thread_id=None, *, username=None, avatar_url=None, suppress_embeds=False)`. Write-only by design — `post` / `edit` / `delete`, **no** `create_thread` / `list_messages` (a webhook can't open a thread or read messages; `list_messages` raises pointing at the bot client). It pairs with a `DiscordClient` that owns threading + reconcile.
+- `post` → `POST {webhook_url}?wait=true[&thread_id=…]` with `content` + per-message `username`/`avatar_url` (protocol `icon_url` → `avatar_url`; `icon_emoji` raises — webhooks have no emoji avatar) + `flags=4` when `suppress_embeds`. Per-message sender overrides the client-wide default (mirrors `SlackClient.post`). `edit`/`delete` → `PATCH`/`DELETE {webhook_url}/messages/{id}[?thread_id=…]`.
+- The webhook URL embeds a secret token, so it is never logged: error labels carry only the method + message id.
+- Verified live against `#bot-test` (`tmp/discord_webhook_client_probe.py`): the real class posts two per-sender replies into a bot-opened thread and edits one; the bot's `list_messages(thread)` reads them back (OP prepended) with exact content. 13 new unit tests assert exact request shapes + the secret-safe labels; full suite 1429 passed.
+- README gained a **Platform capabilities** matrix (Slack vs. Discord-bot vs. Discord-webhook vs. Bluesky) covering post/edit/delete/read, custom sender, threading, and the "sender is fixed at post time everywhere" fact.
+
+Remaining: #2 (foreign-author gap), #4 (discord-agent inversion, now unblocked).
 
 [discord.py]: ../thrds/discord.py
 [discord-agent]: https://github.com/Open-Athena/discord-agent

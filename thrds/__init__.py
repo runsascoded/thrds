@@ -1,5 +1,5 @@
 from .core import Action, ActionType, EditRateLimited, Message, Msg, OrphanedRepliesError, SenderChangeForbidden, SenderChangePolicy, SyncOptions, SyncResult, Thread, sync
-from .discord import DiscordClient
+from .discord import DiscordClient, DiscordWebhookClient
 from .doc import Doc, DocMessage, DocSyncResult, DocThread, Frontmatter
 from .linked import LinkedSyncResult, LinkedThread, Section
 from .lint import BskyLinter, DiscordLinter, LintIssue, LintReport
@@ -13,6 +13,7 @@ __all__ = [
     "ActionType",
     "BskyLinter",
     "DiscordClient",
+    "DiscordWebhookClient",
     "DiscordLinter",
     "Doc",
     "DocMessage",

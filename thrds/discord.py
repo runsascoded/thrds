@@ -18,13 +18,17 @@ DISCORD_API = "https://discord.com/api/v10"
 MESSAGE_LIMIT = 2000
 
 
-class DiscordClient:
-    def __init__(self, token: str, channel_id: str, guild_id: str | None = None):
-        self.token = token if token.startswith("Bot ") else f"Bot {token}"
-        self.channel_id = channel_id
-        self.guild_id = guild_id
-        self._active_thread_id: str | None = None
-        self._suppress_embeds: bool = False
+class _DiscordHTTP:
+    """Shared curl-based HTTP core for the two Discord transports.
+
+    `DiscordClient` (bot token) and `DiscordWebhookClient` (webhook execution)
+    are two identity models over one transport — same retry/backoff, 429 +
+    `EditRateLimited` handling, and status parsing. Subclasses build the URL and
+    auth headers; this holds the request loop.
+
+    Error strings carry a caller-supplied ``label`` rather than the raw URL, so
+    a webhook client (whose URL embeds a secret token) never leaks it.
+    """
 
     _MAX_ATTEMPTS = 4
     _BACKOFF_BASE = 1.0
@@ -34,22 +38,21 @@ class DiscordClient:
     def _backoff(self, attempt: int) -> float:
         return min(self._BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 1.0), self._BACKOFF_CAP)
 
-    def _curl(
+    def _curl_raw(
         self,
         method: str,
-        path: str,
+        url: str,
         data: dict | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+        label: str | None = None,
     ) -> dict | list | None:
-        url = f"{DISCORD_API}{path}"
+        label = label or f"{method} {url}"
         last_err = ""
         for attempt in range(self._MAX_ATTEMPTS):
-            cmd = [
-                "curl", "-s",
-                "-w", "\n%{http_code}",
-                "-X", method,
-                "-H", f"Authorization: {self.token}",
-                "-H", "Content-Type: application/json",
-            ]
+            cmd = ["curl", "-s", "-w", "\n%{http_code}", "-X", method]
+            for key, value in (headers or {}).items():
+                cmd += ["-H", f"{key}: {value}"]
             if data is not None:
                 cmd += ["-d", json.dumps(data)]
             cmd.append(url)
@@ -60,7 +63,7 @@ class DiscordClient:
                 if attempt + 1 < self._MAX_ATTEMPTS:
                     time.sleep(self._backoff(attempt))
                     continue
-                raise RuntimeError(f"Discord {method} {path}: {last_err}")
+                raise RuntimeError(f"Discord {label}: {last_err}")
 
             body, _, status_str = result.stdout.rpartition("\n")
             try:
@@ -70,7 +73,7 @@ class DiscordClient:
                 if attempt + 1 < self._MAX_ATTEMPTS:
                     time.sleep(self._backoff(attempt))
                     continue
-                raise RuntimeError(f"Discord {method} {path}: {last_err}")
+                raise RuntimeError(f"Discord {label}: {last_err}")
 
             body = body.strip()
 
@@ -82,7 +85,7 @@ class DiscordClient:
                 if attempt + 1 < self._MAX_ATTEMPTS:
                     time.sleep(self._backoff(attempt))
                     continue
-                raise RuntimeError(f"Discord {method} {path}: {last_err}")
+                raise RuntimeError(f"Discord {label}: {last_err}")
 
             try:
                 resp = json.loads(body) if body else None
@@ -91,7 +94,7 @@ class DiscordClient:
                 if attempt + 1 < self._MAX_ATTEMPTS:
                     time.sleep(self._backoff(attempt))
                     continue
-                raise RuntimeError(f"Discord {method} {path}: {last_err}")
+                raise RuntimeError(f"Discord {label}: {last_err}")
 
             # Structured Discord error dict — handle before generic 4xx so
             # `EditRateLimited` (code 30046, HTTP 429) is preserved and other
@@ -106,7 +109,7 @@ class DiscordClient:
                     if attempt + 1 < self._MAX_ATTEMPTS:
                         time.sleep(min(delay, self._BACKOFF_CAP))
                         continue
-                    raise RuntimeError(f"Discord {method} {path}: rate-limited after {attempt+1} attempts: {last_err}")
+                    raise RuntimeError(f"Discord {label}: rate-limited after {attempt+1} attempts: {last_err}")
                 raise RuntimeError(f"Discord API error: {resp['message']} (code {resp['code']})")
 
             if status == 429:
@@ -114,21 +117,44 @@ class DiscordClient:
                 if attempt + 1 < self._MAX_ATTEMPTS:
                     time.sleep(self._backoff(attempt))
                     continue
-                raise RuntimeError(f"Discord {method} {path}: rate-limited after {attempt+1} attempts: {last_err}")
+                raise RuntimeError(f"Discord {label}: rate-limited after {attempt+1} attempts: {last_err}")
 
             if 200 <= status < 300 and resp is None:
                 last_err = f"HTTP {status}, empty body (expected entity)"
                 if attempt + 1 < self._MAX_ATTEMPTS:
                     time.sleep(self._backoff(attempt))
                     continue
-                raise RuntimeError(f"Discord {method} {path}: {last_err}")
+                raise RuntimeError(f"Discord {label}: {last_err}")
 
             if 400 <= status < 500:
-                raise RuntimeError(f"Discord {method} {path}: HTTP {status}: {body[:self._BODY_SNIPPET]}")
+                raise RuntimeError(f"Discord {label}: HTTP {status}: {body[:self._BODY_SNIPPET]}")
 
             return resp
 
-        raise RuntimeError(f"Discord {method} {path}: retries exhausted: {last_err}")
+        raise RuntimeError(f"Discord {label}: retries exhausted: {last_err}")
+
+
+class DiscordClient(_DiscordHTTP):
+    def __init__(self, token: str, channel_id: str, guild_id: str | None = None):
+        self.token = token if token.startswith("Bot ") else f"Bot {token}"
+        self.channel_id = channel_id
+        self.guild_id = guild_id
+        self._active_thread_id: str | None = None
+        self._suppress_embeds: bool = False
+
+    def _curl(
+        self,
+        method: str,
+        path: str,
+        data: dict | None = None,
+    ) -> dict | list | None:
+        return self._curl_raw(
+            method,
+            f"{DISCORD_API}{path}",
+            data,
+            headers={"Authorization": self.token, "Content-Type": "application/json"},
+            label=f"{method} {path}",
+        )
 
     @property
     def _channel(self) -> str:
@@ -367,4 +393,105 @@ class DiscordClient:
             summary_ids=summary_ids,
             detail_ids=detail_ids,
             section_detail_ids=section_detail_map,
+        )
+
+
+class DiscordWebhookClient(_DiscordHTTP):
+    """Per-message-sender Discord transport via webhook execution.
+
+    A webhook sets ``username`` + ``avatar_url`` **per message** — the bot API
+    can't, so `DiscordClient.post` raises on sender overrides and points here.
+    But a webhook can't open a thread and can't list/read messages, so this
+    client is deliberately write-only (``post`` / ``edit`` / ``delete``) and
+    pairs with a `DiscordClient` that owns thread creation, listing, and
+    reconcile: the bot opens the thread and owns the OP; this client fans
+    per-sender replies into it via ``?thread_id=``. See specs/discord-push.md.
+
+    The protocol's ``icon_url`` maps to the webhook's ``avatar_url`` (both a
+    hosted image URL); ``icon_emoji`` has no webhook equivalent and raises.
+    Per-message values override the client-wide ``username`` / ``avatar_url``
+    defaults (mirroring `SlackClient.post`).
+
+    ``webhook_url`` embeds the webhook's secret token, so it is never logged —
+    error labels carry only the method and message id, never the URL.
+    """
+
+    _HEADERS = {"Content-Type": "application/json"}
+
+    def __init__(
+        self,
+        webhook_url: str,
+        thread_id: str | None = None,
+        *,
+        username: str | None = None,
+        avatar_url: str | None = None,
+        suppress_embeds: bool = False,
+    ):
+        self.webhook_url = webhook_url
+        self.thread_id = thread_id
+        self.username = username
+        self.avatar_url = avatar_url
+        self.suppress_embeds = suppress_embeds
+
+    def _message_url(self, message_id: str) -> str:
+        url = f"{self.webhook_url}/messages/{message_id}"
+        if self.thread_id is not None:
+            url += f"?thread_id={self.thread_id}"
+        return url
+
+    def list_messages(self, thread_id: str) -> list[Message]:
+        raise NotImplementedError(
+            "A webhook can't read messages. Use a `DiscordClient` (bot token) to "
+            "list/reconcile the thread, and this client only to post/edit/delete "
+            "per-sender replies. See specs/discord-push.md."
+        )
+
+    def post(
+        self,
+        content: str,
+        thread_id: str | None = None,
+        *,
+        username: str | None = None,
+        icon_url: str | None = None,
+        icon_emoji: str | None = None,
+    ) -> Message:
+        if icon_emoji is not None:
+            raise NotImplementedError(
+                "Discord webhooks have no emoji avatar; pass a hosted image URL as "
+                "`icon_url` (mapped to the webhook's `avatar_url`)."
+            )
+        if len(content) > MESSAGE_LIMIT:
+            raise ValueError(f"Message exceeds Discord's {MESSAGE_LIMIT} char limit ({len(content)} chars)")
+        tid = thread_id if thread_id is not None else self.thread_id
+        url = f"{self.webhook_url}?wait=true"
+        if tid is not None:
+            url += f"&thread_id={tid}"
+        data: dict = {"content": content}
+        resolved_username = username if username is not None else self.username
+        if resolved_username is not None:
+            data["username"] = resolved_username
+        resolved_avatar = icon_url if icon_url is not None else self.avatar_url
+        if resolved_avatar is not None:
+            data["avatar_url"] = resolved_avatar
+        if self.suppress_embeds:
+            data["flags"] = 4
+        resp = self._curl_raw("POST", url, data, headers=self._HEADERS, label="POST webhook message")
+        return Message(id=resp["id"], content=content)
+
+    def edit(self, message_id: str, content: str) -> Message:
+        if len(content) > MESSAGE_LIMIT:
+            raise ValueError(f"Message exceeds Discord's {MESSAGE_LIMIT} char limit ({len(content)} chars)")
+        data: dict = {"content": content}
+        if self.suppress_embeds:
+            data["flags"] = 4
+        self._curl_raw(
+            "PATCH", self._message_url(message_id), data,
+            headers=self._HEADERS, label=f"PATCH webhook message {message_id}",
+        )
+        return Message(id=message_id, content=content)
+
+    def delete(self, message_id: str) -> None:
+        self._curl_raw(
+            "DELETE", self._message_url(message_id),
+            headers=self._HEADERS, label=f"DELETE webhook message {message_id}",
         )
