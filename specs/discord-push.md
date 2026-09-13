@@ -100,10 +100,45 @@ Part 1 landed in two commits (`e48eeed` seam + raise; `d3daff8` CLI):
 
 **Still open (this spec stays out of `specs/done/`):**
 
-1. **Re-push / edit.** `push` refuses a session that already has a recorded OP. A real reconcile must span the parent-channel OP and the child-thread replies (`list_messages(thread)` returns the thread's messages, *not* the starter OP in the parent) — this needs the Discord starter-message semantics verified against a live token before implementing. The `discord_op_id`/`discord_thread_id`/message-id state to drive it is already persisted.
+1. ~~**Re-push / edit.**~~ **Done (2026-09-13)** — see "Implemented" below. `push` now reconciles a session that already has a recorded OP.
 2. **`list_messages` foreign-author gap** (logged above): every type-0 message is marked `editable=True`, so mixed-author Discord threads aren't safe to reconcile yet.
-3. **Part 2** (webhook transport) — unstarted; needs the user to provision the `#marin-bot-dbg` webhook.
-4. **discord-agent inversion** — decided (invert), unstarted; a separate PR in that repo once re-push/edit lands (the digest edits its OP in place, so it needs #1).
+3. **Part 2** (webhook transport) — core behavior + thread hybrid now **verified live** (see below); ready to build `DiscordWebhookClient`.
+4. **discord-agent inversion** — decided (invert), unstarted; a separate PR in that repo now that re-push/edit has landed (the digest edits its OP in place, so it needed #1).
+
+## Live findings (2026-09-13): thread-hybrid + reconcile semantics
+
+Verified against a dedicated dev bot (`thrds-dev`) in a private server (`rbw dev` / `#bot-test`), driving the real `DiscordClient` plus raw webhook curl (`tmp/discord_thread_hybrid_probe.py`, `tmp/discord_op_edit_probe.py`). Two probes, all operations HTTP 200 except the one deliberate negative.
+
+**Structural fact that reshapes reconcile: `create_thread(op_id)` returns a thread whose channel id *equals* the OP message id.** A thread created *from* a message shares that message's snowflake. Consequences, all confirmed:
+
+- The **OP stays in the parent channel** as a normal `type=0` message with full content. `GET /channels/{thread_id}/messages` does **not** return it — it returns a `type=21` `THREAD_STARTER_MESSAGE` placeholder with empty content, which `list_messages`'s `type==0` filter drops. So `list_messages(thread_id)` yields **only the replies**, never the OP.
+- Because `op_id == thread_id`, the OP is directly addressable without a channel scan: `GET/PATCH /channels/{channel_id}/messages/{thread_id}`.
+- **The OP can be edited only via the parent channel.** `PATCH /channels/{channel_id}/messages/{op_id}` → OK; `PATCH /channels/{thread_id}/messages/{op_id}` → **`10008 Unknown Message`**. This is a latent bug in the current reconcile/`sync_linked` phase-4 path: `edit()` addresses `self._channel` (`_active_thread_id or channel_id`), so with `_active_thread_id` set to the thread, editing message[0] (the OP) would `10008`. Never triggered yet (Marin Bot runs discord-agent's own code), but it *will* break the first real thrds Discord re-push/`sync_linked`.
+
+**Reconcile design that follows** (message[0] is parent-addressed, messages[1:] are thread-addressed):
+
+- OP: read/edit via `channel_id`, id = the stored `thread_id`.
+- Replies: `list_messages(thread_id)` for the diff; post/edit/delete via `thread_id`.
+- To reconstruct the desired-vs-live diff, prepend the OP (fetched by id from the parent) to `list_messages(thread_id)`; otherwise the diff sees message[0] as missing and re-posts a duplicate OP.
+- The single `_channel` accessor must become position-aware (or the reconcile must edit the OP through the parent explicitly).
+
+**Part 2 — webhook × thread hybrid, all confirmed:**
+
+- Webhook **posts per-sender replies into a bot-opened thread** via `POST {webhook}?wait=true&thread_id={tid}` — HTTP 200, distinct `username`/`avatar_url` per message, all sharing one `webhook_id` (`author.bot=True`). The digest avatar-mosaic shape works end to end.
+- Webhook **edits a message inside the thread** via `PATCH {webhook}/messages/{id}?thread_id={tid}` — content updates, display sender preserved.
+- The bot **sees webhook messages** in `list_messages(thread)` (`type=0`, `webhook_id` set), so a bot-token reconcile pass can diff webhook-authored replies. (Foreign-author gap #2 still applies: they'd be marked editable.)
+- So the productionizable hybrid is: **bot opens the thread + owns the OP and reconcile; webhook fans per-sender replies into it via `?thread_id=`.** `DiscordWebhookClient` can share `DiscordClient`'s `_curl`/backoff base and needs only `post`/`edit`/`delete` (no `create_thread`, no `list_messages` — the bot side owns those).
+
+## Implemented (2026-09-13): re-push reconcile (open item #1)
+
+`thrds discord push` reconciles a session with a recorded OP instead of refusing it — the whole fix localizes to `DiscordClient`; `core.sync` is untouched (it was already platform-neutral). The discriminator needs no new state: **the OP's id equals the thread id**, and the OP lives in the parent.
+
+- `DiscordClient.list_messages(thread_id)` **prepends the parent-channel OP** (fetched by id, `op_id == thread_id`) when listing a child thread, so `sync`'s positional diff sees `existing[0]` as the OP. Listing the base channel itself (`thread_id == channel_id`) prepends nothing.
+- New `DiscordClient._channel_for(message_id)` routes edit/delete: the one message whose id equals the active thread id is the OP → address the **parent** channel; every other reply → the thread. This also fixes a latent bug in *fresh* `sync_linked` phase-4, whose OP edit would have hit `10008` (never run against Discord before).
+- CLI: re-push points `sync` at `discord_thread_id` (thread case) or, for a lone OP, at the base channel scoped by `only_ids={op_id}` (in-place OP edit; growing a lone OP into a thread mid-life is refused with a clear message). A re-push dry-run reads the live thread to build the plan, so it requires a token (a fresh dry-run still doesn't).
+- Verified live end-to-end against `#bot-test` (`tmp/discord_reconcile_probe.py`): fresh → edit-OP-via-parent + edit-reply + skip → add → delete, each read back exactly. 8 new CLI tests assert exact `_curl` call sequences (OP edit → parent, reply edit/post/delete → thread); full suite 1416 passed.
+
+Remaining: #2 (foreign-author gap), #3 (`DiscordWebhookClient`, next), #4 (discord-agent inversion, now unblocked).
 
 [discord.py]: ../thrds/discord.py
 [discord-agent]: https://github.com/Open-Athena/discord-agent

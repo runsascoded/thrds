@@ -194,17 +194,32 @@ def test_discord_verb_on_slack_session_errors_clearly(in_tmp, monkeypatch):
 
 class _CurlRecorder:
     """Stub for `DiscordClient._curl`: records every call and returns canned
-    responses. Message POSTs get sequential ids `m1`, `m2`, …; a thread-create
-    returns `thread-1`; GET returns a scripted message list."""
-    def __init__(self, get_response: list[dict] | None = None):
+    responses.
+
+    - message POSTs get sequential ids `m1`, `m2`, …
+    - a thread-create POST returns `thread-1`
+    - a list GET (``…/messages?limit=…``) returns ``thread_messages``
+    - a single-message GET (``…/messages/{id}``, used to fetch the parent-channel
+      OP during a thread reconcile) returns ``op_message``
+    - PATCH / DELETE return None (edit/delete ignore the response body)
+    """
+    def __init__(
+        self,
+        thread_messages: list[dict] | None = None,
+        op_message: dict | None = None,
+    ):
         self.calls: list[tuple[str, str, dict | None]] = []
         self._n = 0
-        self._get_response = get_response or []
+        self._thread_messages = thread_messages or []
+        self._op_message = op_message
 
     def __call__(self, method: str, path: str, data: dict | None = None):
         self.calls.append((method, path, data))
         if method == 'GET':
-            return self._get_response
+            # `/…/messages/{id}` (single fetch) vs `/…/messages?limit=…` (list).
+            if '/messages/' in path:
+                return self._op_message
+            return self._thread_messages
         if method == 'POST' and path.endswith('/threads'):
             return {'id': 'thread-1'}
         if method == 'POST' and path.endswith('/messages'):
@@ -277,24 +292,202 @@ def test_discord_push_dry_run_posts_nothing_and_needs_no_token(in_tmp, monkeypat
     assert rec.calls == []
     # Plan previewed on stderr; nothing on stdout.
     assert result.stdout == ""
-    assert result.stderr.rstrip().split('\n')[-1] == "(dry run — 2 message(s), thread name 'My Thread')"
+    assert result.stderr.rstrip().split('\n')[-1] == "(dry run — fresh, 2 message(s), thread name 'My Thread')"
     # State untouched — no OP recorded.
     assert SessionState.load(session).discord_op_id is None
 
 
-def test_discord_push_refuses_repush(in_tmp, monkeypatch):
-    session = _init_discord(in_tmp, monkeypatch, doc_text="OP body\n\n+++\n\nreply one\n")
+def _seed_pushed_thread(session: Path, *, thread: bool = True) -> None:
+    """Record state as if a prior push landed: OP ``op1`` (thread id == OP id
+    when ``thread``), thread name ``My Thread``."""
+    state = SessionState.load(session)
+    state.discord_op_id = 'op1'
+    state.discord_thread_id = 'op1' if thread else None
+    state.discord_channel_id = 'CHAN'
+    state.discord_guild_id = 'GUILD'
+    state.discord_thread_name = 'My Thread'
+    state.save(session)
+
+
+def test_discord_push_repush_edits_changed_reply_in_thread(in_tmp, monkeypatch):
+    session = _init_discord(in_tmp, monkeypatch, doc_text="OP body\n\n+++\n\nreply CHANGED\n")
     _set_discord_env(monkeypatch)
-    rec = _CurlRecorder()
+    _seed_pushed_thread(session)
+    rec = _CurlRecorder(
+        thread_messages=[{'id': 'r1', 'content': 'reply OLD', 'type': 0}],
+        op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
+    )
     monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
 
-    first = CliRunner().invoke(cli, ['discord', 'push', '-N', 'My Thread'])
-    assert first.exit_code == 0, (first.output, first.stderr)
-    second = CliRunner().invoke(cli, ['discord', 'push', '-N', 'My Thread'])
-    assert second.exit_code == 2
-    assert second.stderr.splitlines()[-1] == (
-        'Error: Session already pushed (OP m1); re-push/edit is not yet '
-        'implemented — see specs/discord-push.md.'
+    result = CliRunner().invoke(cli, ['discord', 'push'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # Reads the thread + the parent OP; OP unchanged (SKIP); reply edited in the
+    # thread channel.
+    assert rec.calls == [
+        ('GET', '/channels/op1/messages?limit=100', None),
+        ('GET', '/channels/CHAN/messages/op1', None),
+        ('PATCH', '/channels/op1/messages/r1', {'content': 'reply CHANGED'}),
+    ]
+    assert result.stdout == 'https://discord.com/channels/GUILD/CHAN/op1\n'
+    state = SessionState.load(session)
+    assert (state.discord_op_id, state.discord_thread_id) == ('op1', 'op1')
+
+
+def test_discord_push_repush_edits_op_via_parent_channel(in_tmp, monkeypatch):
+    # The bug the live probe found: the OP lives in the parent channel but
+    # shares the thread's id, so `PATCH /channels/{thread}/messages/{op}` is a
+    # 10008 — the OP edit must address the parent channel.
+    session = _init_discord(in_tmp, monkeypatch, doc_text="OP CHANGED\n\n+++\n\nreply one\n")
+    _set_discord_env(monkeypatch)
+    _seed_pushed_thread(session)
+    rec = _CurlRecorder(
+        thread_messages=[{'id': 'r1', 'content': 'reply one', 'type': 0}],
+        op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
+    )
+    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+
+    result = CliRunner().invoke(cli, ['discord', 'push'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert rec.calls == [
+        ('GET', '/channels/op1/messages?limit=100', None),
+        ('GET', '/channels/CHAN/messages/op1', None),
+        ('PATCH', '/channels/CHAN/messages/op1', {'content': 'OP CHANGED'}),
+    ]
+
+
+def test_discord_push_repush_posts_new_reply_into_thread(in_tmp, monkeypatch):
+    session = _init_discord(in_tmp, monkeypatch, doc_text="OP body\n\n+++\n\nreply one\n\n+++\n\nreply two\n")
+    _set_discord_env(monkeypatch)
+    _seed_pushed_thread(session)
+    rec = _CurlRecorder(
+        thread_messages=[{'id': 'r1', 'content': 'reply one', 'type': 0}],
+        op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
+    )
+    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+
+    result = CliRunner().invoke(cli, ['discord', 'push'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert rec.calls == [
+        ('GET', '/channels/op1/messages?limit=100', None),
+        ('GET', '/channels/CHAN/messages/op1', None),
+        ('POST', '/channels/op1/messages', {'content': 'reply two'}),
+    ]
+
+
+def test_discord_push_repush_deletes_removed_reply_from_thread(in_tmp, monkeypatch):
+    session = _init_discord(in_tmp, monkeypatch, doc_text="OP body\n\n+++\n\nreply one\n")
+    _set_discord_env(monkeypatch)
+    _seed_pushed_thread(session)
+    # Discord returns newest-first; `list_messages` reverses to r1, r2.
+    rec = _CurlRecorder(
+        thread_messages=[
+            {'id': 'r2', 'content': 'reply two', 'type': 0},
+            {'id': 'r1', 'content': 'reply one', 'type': 0},
+        ],
+        op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
+    )
+    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+
+    result = CliRunner().invoke(cli, ['discord', 'push'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert rec.calls == [
+        ('GET', '/channels/op1/messages?limit=100', None),
+        ('GET', '/channels/CHAN/messages/op1', None),
+        ('DELETE', '/channels/op1/messages/r2', None),
+    ]
+
+
+def test_discord_push_repush_noop_writes_nothing(in_tmp, monkeypatch):
+    session = _init_discord(in_tmp, monkeypatch, doc_text="OP body\n\n+++\n\nreply one\n")
+    _set_discord_env(monkeypatch)
+    _seed_pushed_thread(session)
+    rec = _CurlRecorder(
+        thread_messages=[{'id': 'r1', 'content': 'reply one', 'type': 0}],
+        op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
+    )
+    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+
+    result = CliRunner().invoke(cli, ['discord', 'push'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # Identical content → reads only, no writes.
+    assert rec.calls == [
+        ('GET', '/channels/op1/messages?limit=100', None),
+        ('GET', '/channels/CHAN/messages/op1', None),
+    ]
+
+
+def test_discord_push_repush_dry_run_reads_but_writes_nothing(in_tmp, monkeypatch):
+    session = _init_discord(in_tmp, monkeypatch, doc_text="OP body\n\n+++\n\nreply CHANGED\n")
+    _set_discord_env(monkeypatch)
+    _seed_pushed_thread(session)
+    rec = _CurlRecorder(
+        thread_messages=[{'id': 'r1', 'content': 'reply one', 'type': 0}],
+        op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
+    )
+    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+
+    result = CliRunner().invoke(cli, ['discord', 'push', '-n'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # A re-push dry-run still reads the live thread to build the plan, but writes
+    # nothing.
+    assert rec.calls == [
+        ('GET', '/channels/op1/messages?limit=100', None),
+        ('GET', '/channels/CHAN/messages/op1', None),
+    ]
+    assert result.stdout == ""
+    assert result.stderr.rstrip().split('\n')[-1] == (
+        "(dry run — re-push, 2 message(s), thread name 'My Thread')"
+    )
+    # State untouched by a dry run.
+    assert SessionState.load(session).discord_op_id == 'op1'
+
+
+def test_discord_push_repush_dry_run_requires_token(in_tmp, monkeypatch):
+    # Unlike a fresh dry-run, a re-push dry-run reads the live thread, so it
+    # needs a real token.
+    session = _init_discord(in_tmp, monkeypatch, doc_text="OP body\n\n+++\n\nreply CHANGED\n")
+    _set_discord_env(monkeypatch, token=None)
+    _seed_pushed_thread(session)
+    result = CliRunner().invoke(cli, ['discord', 'push', '-n'])
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        'Error: Set THRDS_DISCORD_BOT_TOKEN to a Discord bot token to push.'
+    )
+
+
+def test_discord_push_repush_lone_op_edits_in_place(in_tmp, monkeypatch):
+    session = _init_discord(in_tmp, monkeypatch, doc_text="OP CHANGED\n")
+    _set_discord_env(monkeypatch)
+    _seed_pushed_thread(session, thread=False)  # lone OP, no thread
+    # Base-channel listing (newest-first): the OP plus an unrelated message.
+    rec = _CurlRecorder(thread_messages=[
+        {'id': 'other', 'content': 'unrelated', 'type': 0},
+        {'id': 'op1', 'content': 'OP body', 'type': 0},
+    ])
+    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+
+    result = CliRunner().invoke(cli, ['discord', 'push'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # Reconcile scoped to the OP (no separate OP fetch — thread_id == channel);
+    # the unrelated message is left untouched.
+    assert rec.calls == [
+        ('GET', '/channels/CHAN/messages?limit=100', None),
+        ('PATCH', '/channels/CHAN/messages/op1', {'content': 'OP CHANGED'}),
+    ]
+    state = SessionState.load(session)
+    assert (state.discord_op_id, state.discord_thread_id) == ('op1', None)
+
+
+def test_discord_push_repush_lone_op_grow_refused(in_tmp, monkeypatch):
+    session = _init_discord(in_tmp, monkeypatch, doc_text="OP body\n\n+++\n\nnew reply\n")
+    _set_discord_env(monkeypatch)
+    _seed_pushed_thread(session, thread=False)  # lone OP, no thread
+    result = CliRunner().invoke(cli, ['discord', 'push'])
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        'Error: Session has a lone OP (op1) and the doc now has 2 messages; '
+        'growing a lone OP into a thread on re-push is not supported. '
+        'Re-init the session to push a fresh thread.'
     )
 
 
@@ -314,14 +507,21 @@ def test_discord_thread_dumps_messages(in_tmp, monkeypatch):
     state = SessionState.load(session)
     state.discord_thread_id = 'thread-1'
     state.save(session)
-    # Discord returns newest-first; `list_messages` reverses to chronological.
-    rec = _CurlRecorder(get_response=[
-        {'id': 'm2', 'content': 'second', 'type': 0},
-        {'id': 'm1', 'content': 'first', 'type': 0},
-    ])
+    # Discord returns newest-first; `list_messages` reverses to chronological and
+    # prepends the parent-channel OP (id == thread id) fetched via a single GET.
+    rec = _CurlRecorder(
+        thread_messages=[
+            {'id': 'r2', 'content': 'second', 'type': 0},
+            {'id': 'r1', 'content': 'first', 'type': 0},
+        ],
+        op_message={'id': 'thread-1', 'content': 'the OP', 'type': 0},
+    )
     monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
 
     result = CliRunner().invoke(cli, ['discord', 'thread'])
     assert result.exit_code == 0, (result.output, result.stderr)
-    assert rec.calls == [('GET', '/channels/thread-1/messages?limit=100', None)]
-    assert result.stdout == 'm1\tfirst\nm2\tsecond\n'
+    assert rec.calls == [
+        ('GET', '/channels/thread-1/messages?limit=100', None),
+        ('GET', '/channels/CHAN/messages/thread-1', None),
+    ]
+    assert result.stdout == 'thread-1\tthe OP\nr1\tfirst\nr2\tsecond\n'

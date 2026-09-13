@@ -134,16 +134,42 @@ class DiscordClient:
     def _channel(self) -> str:
         return self._active_thread_id or self.channel_id
 
+    def _channel_for(self, message_id: str) -> str:
+        """Channel id to address ``message_id`` for edit/delete.
+
+        A thrds thread's OP lives in the **parent** channel but shares the
+        thread's id (``create_thread`` returns a channel whose id equals the
+        starter message's id). So during a thread reconcile — ``_active_thread_id``
+        set to the thread — the one message whose id equals that thread id is
+        the OP, and must be addressed via the parent channel:
+        ``PATCH /channels/{thread}/messages/{op}`` is a ``10008 Unknown Message``.
+        Every other message is a real thread reply, addressed via the thread.
+        """
+        if self._active_thread_id is not None and message_id == self._active_thread_id:
+            return self.channel_id
+        return self._channel
+
     def list_messages(self, thread_id: str) -> list[Message]:
         # Discord returns messages newest-first; reverse to get chronological order
         resp = self._curl("GET", f"/channels/{thread_id}/messages?limit=100")
-        if not resp:
-            return []
-        return [
+        messages = [
             Message(id=m["id"], content=m.get("content", ""))
-            for m in reversed(resp)
+            for m in reversed(resp or [])
             if m.get("type", 0) == 0
         ]
+        # A thread created off a message shares that message's id, and the OP
+        # itself lives in the PARENT channel — `GET /channels/{thread}/messages`
+        # returns only the replies (plus an empty type-21 starter placeholder,
+        # already dropped by the type-0 filter above), never the OP. Prepend it
+        # so `sync`'s positional diff aligns (existing[0] is the OP). The OP's
+        # id is the thread id. Listing the base channel itself (thread_id ==
+        # channel_id, e.g. a lone-OP reconcile scoped by `only_ids`) has no such
+        # separate OP, so this only fires for an actual child thread.
+        if thread_id != self.channel_id:
+            op = self._curl("GET", f"/channels/{self.channel_id}/messages/{thread_id}")
+            if isinstance(op, dict) and op.get("type", 0) == 0:
+                messages.insert(0, Message(id=op["id"], content=op.get("content", "")))
+        return messages
 
     def post(
         self,
@@ -207,11 +233,11 @@ class DiscordClient:
         data: dict = {"content": content}
         if self._suppress_embeds:
             data["flags"] = 4
-        self._curl("PATCH", f"/channels/{self._channel}/messages/{message_id}", data)
+        self._curl("PATCH", f"/channels/{self._channel_for(message_id)}/messages/{message_id}", data)
         return Message(id=message_id, content=content)
 
     def delete(self, message_id: str) -> None:
-        self._curl("DELETE", f"/channels/{self._channel}/messages/{message_id}")
+        self._curl("DELETE", f"/channels/{self._channel_for(message_id)}/messages/{message_id}")
 
     def sync(
         self,
@@ -222,6 +248,7 @@ class DiscordClient:
         jitter: float = 0.0,
         suppress_embeds: bool = False,
         thread_name: str | None = None,
+        only_ids: set[str] | None = None,
     ) -> SyncResult:
         self._active_thread_id = thread_id
         self._suppress_embeds = suppress_embeds
@@ -236,6 +263,7 @@ class DiscordClient:
                     jitter=jitter,
                     suppress_embeds=suppress_embeds,
                     thread_name=thread_name,
+                    only_ids=only_ids,
                 ),
             )
         finally:

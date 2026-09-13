@@ -2974,51 +2974,83 @@ def discord_push(
     """Post this session's doc to Discord as the bot: OP in the channel, replies in a thread.
 
     The doc's OP (before the first ``+++``) posts to the channel; a child
-    thread is opened off it and the replies post into that thread. v1 pushes a
-    *fresh* thread only — re-pushing a session that already has a recorded OP
-    is refused (the parent-channel/child-thread reconcile is a follow-up; see
-    ``specs/discord-push.md``).
+    thread is opened off it and the replies post into that thread. Re-pushing a
+    session that already has a recorded OP **reconciles** the live thread to the
+    doc (edit changed messages, post new replies, delete removed ones), spanning
+    the parent-channel OP and the child-thread replies. The one unsupported
+    transition is growing a *lone* OP (no thread) into a thread on re-push —
+    re-init the session for that (see ``specs/discord-push.md``).
     """
     from .core import Thread
     from .md import parse_thread
 
     state = _load_state(expected_platform='discord')
-    if state.discord_op_id is not None and not dry_run:
-        raise click.UsageError(
-            f'Session already pushed (OP {state.discord_op_id}); re-push/edit is '
-            'not yet implemented — see specs/discord-push.md.'
-        )
     path = _resolve_doc_path(state, doc_path)
     text = Path(path).read_text()
     messages = [m.content for m in parse_thread(text).thread.messages]
     name = thread_name or state.discord_thread_name or Path(state.doc_path).stem
 
-    client = _discord_client(state, channel, guild, require_token=not dry_run)
+    repush = state.discord_op_id is not None
+    # A re-push always reads the live thread to compute the diff, so it needs a
+    # real token even under --dry-run (unlike a fresh dry-run, which posts and
+    # reads nothing).
+    client = _discord_client(state, channel, guild, require_token=repush or not dry_run)
+
+    # Reconcile target: fresh push creates the thread; a re-push points `sync`
+    # at where the OP/replies already live so its positional diff aligns.
+    reconcile_thread_id: str | None = None
+    only_ids: set[str] | None = None
+    if repush:
+        if state.discord_thread_id is not None:
+            # OP + replies: reconcile against the child thread; `list_messages`
+            # prepends the parent-channel OP so existing[0] is the OP.
+            reconcile_thread_id = state.discord_thread_id
+        else:
+            # Lone OP, no thread. Reconcile the OP in place, scoped to just it
+            # (the base channel may hold unrelated messages). Growing it into a
+            # thread mid-life isn't supported by the shared reconcile.
+            if len(messages) > 1:
+                raise click.UsageError(
+                    f'Session has a lone OP ({state.discord_op_id}) and the doc now has '
+                    f'{len(messages)} messages; growing a lone OP into a thread on re-push '
+                    'is not supported. Re-init the session to push a fresh thread.'
+                )
+            reconcile_thread_id = client.channel_id
+            only_ids = {state.discord_op_id}
+
     result = client.sync(
         Thread(messages=messages),
+        thread_id=reconcile_thread_id,
         dry_run=dry_run,
         pace=pace,
         jitter=jitter,
         thread_name=name,
+        only_ids=only_ids,
     )
 
     if dry_run:
         err(result.format_preview())
-        err(f'(dry run — {len(messages)} message(s), thread name {name!r})')
+        verb = 're-push' if repush else 'fresh'
+        err(f'(dry run — {verb}, {len(messages)} message(s), thread name {name!r})')
         return
 
     state.discord_channel_id = client.channel_id
     state.discord_guild_id = client.guild_id
     state.discord_op_id = result.message_ids[0]
-    state.discord_thread_id = result.thread_id if len(messages) > 1 else None
+    # A reconcile never changes the thread id (a lone-OP reconcile passes the
+    # base channel as `thread_id`, which is not a thread), so only a fresh push
+    # sets it — from whether the doc actually had replies.
+    if not repush:
+        state.discord_thread_id = result.thread_id if len(messages) > 1 else None
     state.discord_thread_name = name
     state.save()
 
     op_id = state.discord_op_id
+    verb = 'Reconciled' if repush else 'Posted'
     if state.discord_thread_id:
-        err(f'Posted OP {op_id} + {len(messages) - 1} repl(y/ies) in thread {state.discord_thread_id}.')
+        err(f'{verb} OP {op_id} + {len(messages) - 1} repl(y/ies) in thread {state.discord_thread_id}.')
     else:
-        err(f'Posted OP {op_id} (no replies).')
+        err(f'{verb} OP {op_id} (no replies).')
     if client.guild_id:
         click.echo(f'https://discord.com/channels/{client.guild_id}/{client.channel_id}/{op_id}')
 
