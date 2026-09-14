@@ -2993,13 +2993,20 @@ def discord_push(
     path = _resolve_doc_path(state, doc_path)
     text = Path(path).read_text()
     parsed = parse_thread(text)
-    messages = resolve_messages(parsed.thread.messages, parsed.frontmatter)
+    # Discord attachments are structural: lift trailing `![alt](target)` images
+    # out of content into `Msg.images` (local paths resolved against the doc's
+    # dir), so routing sees them and the reconcile diffs clean content.
+    messages = resolve_messages(
+        parsed.thread.messages, parsed.frontmatter,
+        lift_images=True, base_dir=Path(path).parent,
+    )
     name = thread_name or state.discord_thread_name or Path(state.doc_path).stem
 
-    # Per-message sender (name/avatar) is webhook-only on Discord — including on
-    # the OP: `op_sender` posts the OP through the webhook (parent channel) and
-    # the bot opens the thread off it (see specs/done/discord-webhook-attachments.md §3).
-    per_sender = any(isinstance(m, Msg) for m in messages)
+    # A per-message sender (name/avatar) or an attachment is webhook-only on
+    # Discord — including on the OP: `op_sender` / an image posts the OP through
+    # the webhook (parent channel) and the bot opens the thread off it (see
+    # specs/done/discord-webhook-attachments.md §3). Either makes a message a `Msg`.
+    needs_webhook = any(isinstance(m, Msg) for m in messages)
 
     repush = state.discord_op_id is not None
     # A re-push always reads the live thread to compute the diff, so it needs a
@@ -3007,16 +3014,17 @@ def discord_push(
     # reads nothing).
     require_creds = repush or not dry_run
     bot = _discord_client(state, channel, guild, require_token=require_creds)
-    if per_sender:
-        # Per-sender replies go through a webhook, into the bot-opened thread.
+    if needs_webhook:
+        # Per-sender / attachment messages go through a webhook, into the
+        # bot-opened thread.
         from .discord import DiscordHybridClient, DiscordWebhookClient
 
         webhook_url = os.environ.get(DISCORD_WEBHOOK_ENV)
         if not webhook_url:
             if require_creds:
                 raise click.UsageError(
-                    f'Doc has per-sender replies (`+++ as <name>`); set {DISCORD_WEBHOOK_ENV} '
-                    'to a Discord webhook URL to post them.'
+                    f'Doc has per-sender replies (`+++ as <name>`) or image attachments; set '
+                    f'{DISCORD_WEBHOOK_ENV} to a Discord webhook URL to post them.'
                 )
             webhook_url = 'dry-run'  # never used — a dry run posts nothing
         client = DiscordHybridClient(bot, DiscordWebhookClient(webhook_url))

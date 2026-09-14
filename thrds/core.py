@@ -89,6 +89,34 @@ class Action:
 
 
 @dataclass
+class Image:
+    """One image attachment on a desired message — the unified surface across
+    platforms whose native mechanisms differ (see `specs/unified-image-attachments.md`).
+
+    A **hosted URL** is the cross-platform currency: with ``url`` set, Slack
+    references it in a Block Kit image block and Discord `GET`s it and uploads
+    the bytes as a webhook attachment. With only ``path`` (local bytes), Discord
+    uploads directly but Slack **raises** — it has no native path without first
+    hosting the bytes (URL-first; the lazy-upload bridge is a deferred item in
+    the spec). ``bust`` cache-busts a stable ``url`` on edit for Slack (Discord
+    always refreshes by re-uploading, so it ignores it).
+
+    Both forms reach here identically: a doc's trailing ``![alt](target){bust?}``
+    line (lifted at resolve time) or a programmatic ``Msg(images=[Image(...)])``.
+    """
+    url: str | None = None
+    path: Path | str | None = None
+    alt: str = ""
+    bust: bool = False
+
+    def __post_init__(self):
+        if self.url is None and self.path is None:
+            raise ValueError("Image needs a `url` or a `path`")
+        if self.bust and self.url is None:
+            raise ValueError("Image `bust` cache-busts a `url`; it needs one")
+
+
+@dataclass
 class Msg:
     """A desired message with an optional per-message sender override.
 
@@ -107,21 +135,16 @@ class Msg:
     `DiscordClient` warns once and ignores. Bluesky has no sender
     concept; ignored silently.
 
-    ``files`` are binary attachments to upload with the message (e.g. a
-    rendered PNG). They map to Discord's multipart attachment upload
-    (`DiscordWebhookClient`, hence the `DiscordHybridClient`), and carry
-    through POST and — when an edit fires — EDIT, so a re-push whose text
-    changed also refreshes the attachment. Platforms that reference hosted
-    media by URL rather than uploading bytes (Slack via a trailing
-    ``![alt](url)`` image block, Bluesky) **raise** on non-empty ``files``
-    rather than silently drop them — use their content-level image syntax
-    there. Empty ``files`` (the default) is a no-op everywhere.
+    ``images`` are `Image` attachments carried through POST and — when an edit
+    fires — EDIT, so a re-push whose text changed also refreshes the picture.
+    Each platform resolves them natively (Slack image block, Discord upload);
+    see `Image`. Empty ``images`` (the default) is a no-op everywhere.
     """
     content: str
     username: str | None = None
     icon_url: str | None = None
     icon_emoji: str | None = None
-    files: Sequence[Path | str] = ()
+    images: Sequence[Image] = ()
 
 
 def _content(entry: str | Msg) -> str:
@@ -141,14 +164,14 @@ def _post_kwargs(entry: str | Msg) -> dict:
             'username': entry.username,
             'icon_url': entry.icon_url,
             'icon_emoji': entry.icon_emoji,
-            'files': entry.files,
+            'images': entry.images,
         }
     return {}
 
 
-def _files(entry: str | Msg) -> Sequence[Path | str]:
+def _images(entry: str | Msg) -> 'Sequence[Image]':
     """The attachments an EDIT should re-upload (empty for a bare `str`)."""
-    return entry.files if isinstance(entry, Msg) else ()
+    return entry.images if isinstance(entry, Msg) else ()
 
 
 def _reply_target(client: 'ThreadClient', op_id: str, thread_name: str | None) -> str:
@@ -485,7 +508,7 @@ def sync(
                     _pace()
                     result_msg = client.edit(
                         existing[i].id, desired_contents[i],
-                        files=_files(desired.messages[i]),
+                        images=_images(desired.messages[i]),
                     )
                 except EditRateLimited:
                     # Fall back to delete+repost for this and all remaining messages

@@ -1,4 +1,4 @@
-from .core import Action, ActionType, EditRateLimited, Message, Msg, OrphanedRepliesError, SenderChangeForbidden, SenderChangePolicy, SyncOptions, SyncResult, Thread, sync
+from .core import Action, ActionType, EditRateLimited, Image, Message, Msg, OrphanedRepliesError, SenderChangeForbidden, SenderChangePolicy, SyncOptions, SyncResult, Thread, sync
 from .discord import NO_MENTIONS, DiscordClient, DiscordHybridClient, DiscordWebhookClient
 from .doc import Doc, DocMessage, DocSyncResult, DocThread, Frontmatter
 from .linked import LinkedSyncResult, LinkedThread, Section
@@ -23,6 +23,7 @@ __all__ = [
     "DocThread",
     "EditRateLimited",
     "Frontmatter",
+    "Image",
     "LinkedSyncResult",
     "LinkedThread",
     "LintIssue",

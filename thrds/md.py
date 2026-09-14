@@ -39,9 +39,12 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlsplit
 
-from .core import Msg
+from .core import Image, Msg
 from .doc import Doc, DocMessage, DocThread, Frontmatter, SenderProfile
+from .imageblock import split_trailing_images
 
 
 _HEADER_RE = re.compile(r'^===(?:[ \t]+([a-zA-Z0-9_-]+))?[ \t]*$')
@@ -132,7 +135,32 @@ def _build_profile(fields: dict[str, str]) -> SenderProfile:
     return SenderProfile(name=name, icon_url=icon_url, icon_emoji=icon_emoji)
 
 
-def resolve_messages(messages: list[DocMessage], frontmatter: Frontmatter) -> list[str | Msg]:
+def _lift_doc_images(content: str, base_dir: Path | None) -> tuple[str, list[Image]]:
+    """Lift the trailing ``![alt](target){bust?}`` run into `Image`s, cleaning
+    ``content``. ``target`` with a URL scheme → `Image(url=…)`; otherwise a local
+    path resolved against ``base_dir`` (or used as-is if none) → `Image(path=…)`.
+    ``{bust}`` only applies to a URL. Custom-emoji image lines (``![:x:](…)``)
+    are not lifted (they belong to mrkdwn) — `split_trailing_images` skips them."""
+    body, refs = split_trailing_images(content)
+    if not refs:
+        return content, []
+    images: list[Image] = []
+    for ref in refs:
+        if urlsplit(ref.url).scheme:
+            images.append(Image(url=ref.url, alt=ref.alt, bust=ref.bust))
+        else:
+            path = base_dir / ref.url if base_dir is not None else Path(ref.url)
+            images.append(Image(path=path, alt=ref.alt))
+    return body, images
+
+
+def resolve_messages(
+    messages: list[DocMessage],
+    frontmatter: Frontmatter,
+    *,
+    lift_images: bool = False,
+    base_dir: Path | None = None,
+) -> list[str | Msg]:
     """Resolve parsed messages to `sync`'s desired input (bare ``str`` or `Msg`).
 
     ``messages`` is the OP-first list of *our* messages (foreign ones filtered by
@@ -141,15 +169,29 @@ def resolve_messages(messages: list[DocMessage], frontmatter: Frontmatter) -> li
     carrying that profile's name/avatar; a message with none stays a bare content
     ``str``, so a sender-free doc yields the exact ``list[str]`` it did before this
     feature (zero behavior change). Refs are already validated at parse time.
+
+    ``lift_images`` pulls the trailing ``![alt](target)`` run out of each
+    message's content into `Msg.images` (stripping it from the wire content) —
+    the form Discord needs, where an attachment is structural and the bot must
+    know a message has one *before* routing it to the webhook. Slack leaves
+    ``lift_images=False``: it carries images in content (image blocks that
+    round-trip on read-back), so lifting there would desync the reconcile. Local
+    ``target`` paths resolve against ``base_dir`` (the doc's directory).
     """
     out: list[str | Msg] = []
     for i, m in enumerate(messages):
         ref = frontmatter.op_sender if i == 0 else m.sender
-        if ref is None:
-            out.append(m.content)
+        content, images = _lift_doc_images(m.content, base_dir) if lift_images else (m.content, [])
+        # Pass `images` only when non-empty, so an image-free message keeps the
+        # `Msg` default `()` (and a sender-and-image-free one stays a bare str).
+        img_kw = {'images': images} if images else {}
+        if ref is None and not images:
+            out.append(content)
+        elif ref is None:
+            out.append(Msg(content, **img_kw))
         else:
             p = frontmatter.senders[ref]
-            out.append(Msg(m.content, username=p.name, icon_url=p.icon_url, icon_emoji=p.icon_emoji))
+            out.append(Msg(content, username=p.name, icon_url=p.icon_url, icon_emoji=p.icon_emoji, **img_kw))
     return out
 
 

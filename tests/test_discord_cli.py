@@ -553,13 +553,18 @@ def test_discord_push_repush_lone_op_grow_refused(in_tmp, monkeypatch):
 
 class _WebhookRecorder:
     """Stub for `DiscordWebhookClient._curl_raw`: records `(method, url, data)`;
-    POSTs return ids `w1`, `w2`, …."""
+    POSTs return ids `w1`, `w2`, …. A multipart (``form``) call — an attachment
+    upload — lands in ``form_calls`` as ``(method, url, form)``."""
     def __init__(self):
         self.calls: list[tuple[str, str, dict | None]] = []
+        self.form_calls: list[tuple[str, str, list]] = []
         self._n = 0
 
-    def __call__(self, method, url, data=None, *, headers=None, label=None):
-        self.calls.append((method, url, data))
+    def __call__(self, method, url, data=None, *, form=None, headers=None, label=None):
+        if form is not None:
+            self.form_calls.append((method, url, form))
+        else:
+            self.calls.append((method, url, data))
         if method == 'POST':
             self._n += 1
             return {'id': f'w{self._n}'}
@@ -619,8 +624,8 @@ def test_discord_push_per_sender_without_webhook_raises(in_tmp, monkeypatch):
     result = CliRunner().invoke(cli, ['discord', 'push'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        'Error: Doc has per-sender replies (`+++ as <name>`); set THRDS_DISCORD_WEBHOOK '
-        'to a Discord webhook URL to post them.'
+        'Error: Doc has per-sender replies (`+++ as <name>`) or image attachments; set '
+        'THRDS_DISCORD_WEBHOOK to a Discord webhook URL to post them.'
     )
 
 
@@ -665,6 +670,66 @@ def test_discord_push_op_sender_routes_op_through_webhook(in_tmp, monkeypatch):
         ('POST', '/channels/CHAN/messages/w1/threads', {'name': 'Digest'}),
     ]
     assert result.stdout == 'https://discord.com/channels/GUILD/CHAN/w1\n'
+    state = SessionState.load(session)
+    assert (state.discord_op_id, state.discord_thread_id) == ('w1', 'thread-1')
+
+
+def test_discord_push_doc_image_op_routes_through_webhook(in_tmp, monkeypatch):
+    # A doc whose OP carries a trailing `![](url)`: it lifts to a `Msg.images`
+    # attachment, so the OP posts through the webhook as multipart (custom sender
+    # folded in), the bot opens the thread off it, and a reply fans in.
+    import json
+
+    import thrds.discord as dm
+
+    doc = (
+        "---\n"
+        "op_sender: gcs\n"
+        "sender.gcs.name: GCS\n"
+        "sender.a.name: A\n"
+        "---\n"
+        "GCS usage\n\n![plot](https://x/plot.png)\n\n+++ as a\nr\n"
+    )
+    session = _init_discord(in_tmp, monkeypatch, doc_text=doc)
+    _set_discord_env(monkeypatch)
+    monkeypatch.setenv(DISCORD_WEBHOOK_ENV, _WEBHOOK)
+    bot_rec = _CurlRecorder()
+    hook_rec = _WebhookRecorder()
+    _install_curl(monkeypatch, bot_rec)
+    monkeypatch.setattr(
+        DiscordWebhookClient, '_curl_raw',
+        lambda self, method, url, data=None, *, form=None, headers=None, label=None: hook_rec(
+            method, url, data, form=form, headers=headers, label=label,
+        ),
+    )
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"PNGdata"
+
+    monkeypatch.setattr(dm, "urlopen", lambda url: _Resp())
+
+    result = CliRunner().invoke(cli, ['discord', 'push', '-N', 'Digest'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # OP: one multipart webhook POST, no thread_id; payload folds the sender +
+    # the lifted attachment manifest, content stripped of the image line.
+    assert len(hook_rec.form_calls) == 1
+    method, url, form = hook_rec.form_calls[0]
+    assert (method, url) == ('POST', f'{_WEBHOOK}?wait=true')
+    assert json.loads(dict(form)['payload_json']) == {
+        'content': 'GCS usage',
+        'username': 'GCS',
+        'attachments': [{'id': 0, 'filename': 'plot.png'}],
+    }
+    assert dict(form)['files[0]'].endswith('/plot.png')
+    # The reply fans in via the webhook (JSON) into the bot-opened thread.
+    assert hook_rec.calls == [
+        ('POST', f'{_WEBHOOK}?wait=true&thread_id=thread-1', {'content': 'r', 'username': 'A'}),
+    ]
+    assert bot_rec.calls == [
+        ('POST', '/channels/CHAN/messages/w1/threads', {'name': 'Digest'}),
+    ]
     state = SessionState.load(session)
     assert (state.discord_op_id, state.discord_thread_id) == ('w1', 'thread-1')
 

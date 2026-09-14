@@ -49,6 +49,40 @@ def test_post_lifts_trailing_image_into_blocks():
     ]
 
 
+def test_post_images_kwarg_matches_content_image_line():
+    # `images=[Image(url=…)]` folds into content as a trailing `![alt](url)`
+    # line, so it produces the byte-identical payload to the content form.
+    from thrds.core import Image
+
+    a = _FakeSlackClient()
+    a.post('August usage', images=[Image(url=CARD, alt='usage card')])
+    b = _FakeSlackClient()
+    b.post(f'August usage\n\n![usage card]({CARD})')
+    assert _payload(a, 'chat.postMessage') == _payload(b, 'chat.postMessage')
+
+
+def test_post_images_kwarg_bust_folds_with_marker():
+    from thrds.core import Image
+
+    a = _FakeSlackClient()
+    a.post('caption', images=[Image(url=CARD, alt='c', bust=True)])
+    b = _FakeSlackClient()
+    b.post(f'caption\n\n![c]({CARD}){{bust}}')
+    # Both cache-bust: the wire image_url carries a thrds_bust param.
+    block_a = _payload(a, 'chat.postMessage')['blocks'][-1]
+    block_b = _payload(b, 'chat.postMessage')['blocks'][-1]
+    assert block_a['type'] == 'image' and 'thrds_bust=' in block_a['image_url']
+    assert block_a.keys() == block_b.keys()
+
+
+def test_post_images_path_only_raises():
+    from thrds.core import Image
+
+    client = _FakeSlackClient()
+    with pytest.raises(NotImplementedError, match="a hosted `url`"):
+        client.post('body', images=[Image(path='/x/p.png')])
+
+
 def test_post_body_still_converted_to_mrkdwn():
     client = _FakeSlackClient()
     client.post(f'**August** usage\n\n![card]({CARD})')

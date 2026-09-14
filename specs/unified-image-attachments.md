@@ -79,6 +79,17 @@ Classification: `urllib.parse.urlsplit(target).scheme` non-empty ⇒ URL; else a
 - `discord push` of a doc with a `![](url)` OP routes through the webhook.
 - A Slack doc-push regression check: an existing `![](url)` doc produces the same `chat.postMessage` payload as before the resolve-layer move.
 
+## Implemented (2026-09-14)
+
+Everything above except the Deferred section. Notes on where the design met reality:
+
+- **`core.Image`** (`url`/`path`/`alt`/`bust`, validated) and **`Msg.images`** replace `Msg.files`; `ThreadClient.post`/`edit` carry `images`. Exported as `thrds.Image`.
+- **Resolve lift** (`md.resolve_messages(..., lift_images=, base_dir=)`): off by default; `discord push` passes `lift_images=True, base_dir=<doc dir>`. Reuses `imageblock.split_trailing_images` (so emoji-image lines and mid-message images are untouched), classifying each target as URL (has a scheme) or local path.
+- **Slack folds, not blocks-from-a-side-channel.** The design said "Slack builds blocks from `images=`"; reality: Slack's image round-trip lives in *content* (read-back reconstructs `![](url)` lines), so building blocks from a separate channel would make every re-push see a phantom diff. Instead `Msg.images` **fold into content** as trailing `![alt](url)` lines (`_fold_images_into_content`, URL-first raise) — in `SlackClient.sync` (before the reconcile diff, so it stays idempotent) and in `post`/`edit` (for direct callers). Same wire payload, idempotent converge. This is why Slack keeps `lift_images=False`: it *wants* images in content.
+- **Discord webhook** resolves `Image`s to local paths (`_image_paths`: `path` direct, `url` fetched to a temp dir named by the URL basename, cleaned up after) and uploads via the existing `_files_form` multipart. Bot/Bluesky raise on non-empty `images`.
+- **Idempotency**: Slack via the content round-trip (a no-op converge is a no-op). Discord keeps clean content on both the desired (lifted) and live (read-back) sides, so an image-bearing message SKIPs unless its text changed — the documented trade (a bytes-only change with unchanged text won't refresh).
+- **Tests**: `test_attachments.py` (`Image` validation, `Msg.images` plumbing, the platform raises), `test_doc_sender.py` (resolve lift: url/path/bust/mid-message/sender), `test_image_blocks.py` (Slack `images=` folds to the identical content payload; path-only raises), `test_discord_webhook.py` (path + url-fetch multipart), `test_discord_hybrid.py` (attachment OP routing + refresh), `test_discord_cli.py` (`discord push` of a doc-image OP). Full suite green (1492 passed).
+
 ## Deferred: lazy upload on Slack
 
 To make **path-only** images work on Slack (true bytes-everywhere symmetry), thrds would host the bytes via Slack's own upload flow — `files.getUploadURLExternal` → PUT the bytes → `files.completeUploadExternal` — then reference the returned permalink in an image block. Caveats to resolve when this is picked up: Slack-hosted URLs for image *blocks* have historically been finicky (public-visibility requirements, permalink vs. direct URL), and an upload is a side-effecting extra API round-trip per image per post. Until then, `path`-only on Slack raises and the consumer supplies a URL (mgu already hosts its plots for the Slack report). Track as a follow-on; not needed by any current consumer.

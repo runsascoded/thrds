@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from thrds import DiscordClient, DiscordHybridClient, DiscordWebhookClient, Msg, Thread
+from thrds import DiscordClient, DiscordHybridClient, DiscordWebhookClient, Image, Msg, Thread
 
 WEBHOOK = "https://discord.com/api/webhooks/123/faketoken"
 AV = "https://cdn.discordapp.com/embed/avatars/0.png"
@@ -183,7 +183,7 @@ def test_op_with_attachment_routes_to_webhook(monkeypatch, tmp_path):
     hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
 
     result = hybrid.sync(Thread(messages=[
-        Msg("OP body", files=[png]),
+        Msg("OP body", images=[Image(path=png)]),
         "bare reply",
     ]), thread_name="Digest")
 
@@ -397,7 +397,7 @@ def test_repush_refreshes_webhook_op_attachment_on_edit(monkeypatch, tmp_path):
     hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
 
     hybrid.sync(Thread(messages=[
-        Msg("OP CHANGED", username="Digest", icon_url=AV, files=[png]),
+        Msg("OP CHANGED", username="Digest", icon_url=AV, images=[Image(path=png)]),
         Msg("reply A", username="Alice", icon_url=AV),
     ]), thread_id="thread-1")
 

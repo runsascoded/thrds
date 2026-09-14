@@ -223,14 +223,14 @@ What each transport can do. The columns are the four sync clients — Slack (`Sl
 | Edit a reply | ✅ | ✅ | ✅ | ❌ → delete+repost |
 | Post a reply with a custom sender | ✅ | ❌ | ✅ | ❌ |
 | **Edit an existing message's sender** | ❌ | ❌ | ❌ | ❌ |
-| Attach an image / file | ✅² | ❌ | ✅² (`files=`) | ❌ |
+| Attach an image / file | ✅² | ❌ | ✅² (upload) | ❌ |
 | Refresh that image in place (on edit) | ✅² | ❌ | ✅² | ❌ |
 | Custom emoji inline in text | ✅³ | ✅³ | ✅³ | ❌ |
 | Per-message char limit | 4000 | 2000 | 2000 | 300 / paragraph |
 
 ¹ Slack and Bluesky thread *implicitly*: a reply addresses the OP's own id (Slack's `thread_ts`, Bluesky's reply refs), so any message is already a thread root — there is no separate "create thread" call. Discord's thread is a distinct channel that must be `create_thread`'d off the OP (a message id isn't a channel), which is why `sync` has the `open_thread` seam that only `DiscordClient` implements.
 
-² Two different mechanisms, same outcome — a picture in the message that updates in place, keeping the same message id (no repost). **Slack** attaches a hosted-URL Block Kit *image block* and refreshes it by editing the block's URL; a `{bust}` suffix forces a refetch when the bytes change under a stable URL (`specs/done/editable-image-blocks.md`). The **Discord webhook** uploads the file as a real multipart *attachment* (`post(files=[…])`) and refreshes it by re-uploading on edit (`edit(files=[…])`). Programmatically this is a `Msg(content, files=[…])` field that flows through `sync`; the Discord **bot** API can attach files too, but thrds hasn't wired it — only the webhook transport, which is what the per-sender digests use. Bluesky's image embeds aren't wired.
+² Two different mechanisms, **one authoring surface** — a `Msg(content, images=[Image(url=…, path=…, alt=…, bust=…)])`, or a trailing `![alt](target)` line in a doc, either way an `Image` (`specs/unified-image-attachments.md`). A picture in the message that updates in place, keeping the same message id (no repost). **Slack** references a hosted URL in a Block Kit *image block* and refreshes it by editing the block's URL; a `{bust}` forces a refetch when the bytes change under a stable URL (`specs/done/editable-image-blocks.md`). The **Discord webhook** uploads the bytes as a real multipart *attachment* and refreshes by re-uploading on edit; a `url` image it fetches first. A hosted **URL is the cross-platform currency** — it works on both; local `path` bytes upload on Discord but **raise** on Slack (URL-first; hosting them via Slack's upload flow is a deferred item). The Discord **bot** API can attach files too, but only the webhook transport is wired (what the per-sender digests use). Bluesky's image embeds aren't wired.
 
 ³ Custom emoji live *inline in the message text*, a different slot from the sender avatar (which is a hosted image URL, not an emoji). The syntax differs: **Slack** references workspace emoji by name — `:my_emoji:`; **Discord** references them by `<:name:id>` (static) / `<a:name:id>` (animated), which resolve either to a **guild** emoji (uploaded to a server) or an **application** emoji (owned by the bot app, usable anywhere it posts — the reusable, Slack-workspace-like option). Both Discord transports render them because it's just content text. Bluesky has no custom emoji.
 
@@ -267,7 +267,7 @@ result = bsky.sync(thread)   # no edit API: falls back to delete+repost on chang
 Per-message senders on Discord need the webhook transport — a bot token is a single identity, so the webhook fans per-sender replies into a bot-opened thread (`DiscordClient.post` *raises* on a sender override rather than silently dropping it). `DiscordHybridClient` wraps the pair so one declarative `sync` does the whole threaded per-contributor digest. Each message is routed by whether it needs the webhook: a `Msg` carrying a sender **or an attachment** posts (and re-push-edits) through the webhook, bare replies stay on the bot. This applies to the OP too — a plain OP is the bot's identity, but an OP with a sender or a file is webhook-posted to the parent channel and the bot opens the thread off it:
 
 ```python
-from thrds import DiscordClient, DiscordHybridClient, DiscordWebhookClient, Msg, Thread
+from thrds import DiscordClient, DiscordHybridClient, DiscordWebhookClient, Image, Msg, Thread
 
 bot = DiscordClient(token="bot-token", channel_id="1489279547689140505", guild_id="…")
 hook = DiscordWebhookClient("https://discord.com/api/webhooks/…")
@@ -275,13 +275,14 @@ digest = DiscordHybridClient(bot, hook)
 
 result = digest.sync(Thread(messages=[
     # OP with a custom sender + an attached plot → webhook; bot threads off it.
-    Msg("GCS usage — August", username="GCS usage", icon_url="https://…/cal.png", files=["plot.png"]),
+    Msg("GCS usage — August", username="GCS usage", icon_url="https://…/cal.png",
+        images=[Image(path="plot.png")]),
     Msg("8/1 — 3,253 TB", username="8/1 — 3,253 TB", icon_url="https://…/up.png"),
     Msg("8/2 — 3,252 TB", username="8/2 — 3,252 TB", icon_url="https://…/down.png"),
 ]), thread_name="GCS usage — August")
 
 # Re-push reconciles: edits go back to the transport that authored each message
-# (the webhook OP edits via the webhook, with no ?thread_id). A `Msg.files` change
+# (the webhook OP edits via the webhook, with no ?thread_id). A `Msg.images` change
 # re-uploads the attachment whenever that message's text also changed.
 digest.sync(updated_thread, thread_id=result.thread_id)
 ```

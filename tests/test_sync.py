@@ -34,7 +34,7 @@ class MockClient:
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
-        files=(),
+        images=(),
     ) -> Message:
         self.post_calls.append({
             'content': content,
@@ -50,7 +50,7 @@ class MockClient:
             self.threads.setdefault(thread_id, []).append(msg)
         return msg
 
-    def edit(self, message_id: str, content: str, *, files=()) -> Message:
+    def edit(self, message_id: str, content: str, *, images=()) -> Message:
         for msgs in self.threads.values():
             for i, m in enumerate(msgs):
                 if m.id == message_id:
@@ -101,7 +101,7 @@ class RateLimitedMockClient(MockClient):
         self._edit_count = 0
         self._fail_after = fail_after_n_edits
 
-    def edit(self, message_id: str, content: str, *, files=()) -> Message:
+    def edit(self, message_id: str, content: str, *, images=()) -> Message:
         self._edit_count += 1
         if self._edit_count > self._fail_after:
             raise EditRateLimited("rate limited")

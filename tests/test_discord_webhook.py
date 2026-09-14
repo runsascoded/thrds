@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from thrds import NO_MENTIONS, DiscordWebhookClient, Message
+from thrds import NO_MENTIONS, DiscordWebhookClient, Image, Message
 
 WEBHOOK = "https://discord.com/api/webhooks/123/faketoken"
 AVATAR = "https://cdn.discordapp.com/embed/avatars/0.png"
@@ -186,11 +186,11 @@ def test_error_labels_never_carry_the_secret_url(rec):
 # --- file attachments (specs/discord-webhook-attachments.md §1) ---
 
 
-def test_post_with_files_uploads_multipart(rec, tmp_path):
+def test_post_with_path_image_uploads_multipart(rec, tmp_path):
     png = tmp_path / "diff.png"
     png.write_bytes(b"\x89PNG\r\n\x1a\n")
     client = DiscordWebhookClient(WEBHOOK)
-    msg = client.post("here", files=[png])
+    msg = client.post("here", images=[Image(path=png)])
     assert msg == Message(id="w1", content="here")
     # Multipart: payload_json (content + attachments manifest) + one file part.
     assert rec.form_calls == [
@@ -203,41 +203,62 @@ def test_post_with_files_uploads_multipart(rec, tmp_path):
     assert rec.calls == []
 
 
-def test_post_without_files_stays_json(rec):
+def test_post_with_url_image_fetches_then_uploads(rec, tmp_path, monkeypatch):
+    # A `url` image is fetched (GET) to a temp file, then uploaded as multipart —
+    # the attachment is named after the URL's basename.
+    import thrds.discord as dm
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"\x89PNGdata"
+
+    monkeypatch.setattr(dm, "urlopen", lambda url: _Resp())
     client = DiscordWebhookClient(WEBHOOK)
-    client.post("plain", files=[])
+    client.post("here", images=[Image(url="https://host/path/chart.png")])
+    assert len(rec.form_calls) == 1
+    method, url, form, label = rec.form_calls[0]
+    assert (method, url, label) == ("POST", f"{WEBHOOK}?wait=true", "POST webhook message")
+    assert form[0] == ("payload_json", '{"content": "here", "attachments": [{"id": 0, "filename": "chart.png"}]}')
+    part_name, at_path = form[1]
+    assert part_name == "files[0]" and at_path.endswith("/chart.png")
+
+
+def test_post_without_images_stays_json(rec):
+    client = DiscordWebhookClient(WEBHOOK)
+    client.post("plain", images=[])
     assert rec.form_calls == []
     assert rec.calls == [
         ("POST", f"{WEBHOOK}?wait=true", {"content": "plain"}, "POST webhook message"),
     ]
 
 
-def test_post_too_many_files_raises(rec, tmp_path):
-    files = []
+def test_post_too_many_images_raises(rec, tmp_path):
+    images = []
     for i in range(11):
         p = tmp_path / f"f{i}.png"
         p.write_bytes(b"x")
-        files.append(p)
+        images.append(Image(path=p))
     client = DiscordWebhookClient(WEBHOOK)
     with pytest.raises(ValueError, match="at most 10 files per message; got 11"):
-        client.post("too many", files=files)
+        client.post("too many", images=images)
     assert rec.calls == [] and rec.form_calls == []
 
 
-def test_post_oversized_file_raises(rec, tmp_path):
+def test_post_oversized_image_raises(rec, tmp_path):
     big = tmp_path / "big.png"
     with big.open("wb") as f:
         f.truncate(8 * 1024 * 1024 + 1)  # sparse: one past the 8 MiB cap
     client = DiscordWebhookClient(WEBHOOK)
     with pytest.raises(ValueError, match="exceeds Discord's default 8388608-byte"):
-        client.post("huge", files=[big])
+        client.post("huge", images=[Image(path=big)])
 
 
-def test_edit_with_files_replaces_attachments(rec, tmp_path):
+def test_edit_with_images_replaces_attachments(rec, tmp_path):
     png = tmp_path / "new.png"
     png.write_bytes(b"\x89PNG")
     client = DiscordWebhookClient(WEBHOOK, thread_id="t9")
-    client.edit("w1", "updated", files=[png])
+    client.edit("w1", "updated", images=[Image(path=png)])
     assert rec.form_calls == [
         ("PATCH", f"{WEBHOOK}/messages/w1?thread_id=t9",
          [("payload_json", '{"content": "updated", "attachments": [{"id": 0, "filename": "new.png"}]}'),

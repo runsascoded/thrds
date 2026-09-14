@@ -6,7 +6,7 @@ import re
 import time
 import urllib.request
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -22,7 +22,7 @@ from .chrome import (
     render as render_chrome,
     split as split_chrome,
 )
-from .core import Message, OrphanedRepliesError, SyncOptions, SyncResult, Thread, sync
+from .core import Image, Message, Msg, OrphanedRepliesError, SyncOptions, SyncResult, Thread, sync
 from .doc import Doc, DocMessage, DocSyncResult, DocThread, Frontmatter
 from .imageblock import (
     ImageRef,
@@ -75,6 +75,31 @@ SLACK_MESSAGE_LIMIT = 4000
 # A `section` block's text maxes out below the 4000 a plain `text` message
 # allows, so a body in between finalizes as text rather than being split.
 SLACK_SECTION_LIMIT = 3000
+
+
+def _fold_images_into_content(content: str, images: 'Sequence[Image]') -> str:
+    """Append unified `Image`s to ``content`` as trailing ``![alt](url){bust?}``
+    lines — Slack's canonical, idempotent image form.
+
+    Slack carries images in message content (lifted to image blocks, and
+    reconstructed there on read-back), so folding `Msg.images` into content
+    routes them through that one proven path: a converge stays a no-op because
+    the desired content matches the read-back. URL-first — an `Image` with only
+    a local ``path`` **raises** (host it and pass a `url`, or await the deferred
+    lazy-upload bridge; see `specs/unified-image-attachments.md`)."""
+    if not images:
+        return content
+    lines = []
+    for im in images:
+        if im.url is None:
+            raise NotImplementedError(
+                "Slack posts images by URL, not by uploading bytes: give the "
+                "`Image` a hosted `url` (a local `path` alone can't be posted to "
+                "Slack). See specs/unified-image-attachments.md."
+            )
+        lines.append(image_line(ImageRef(alt=im.alt, url=im.url, bust=im.bust)))
+    extra = "\n".join(lines)
+    return f"{content}\n{extra}" if content else extra
 
 
 @dataclass(frozen=True)
@@ -406,7 +431,7 @@ class SlackClient:
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
-        files: Sequence[Path | str] = (),
+        images: Sequence[Image] = (),
         raw: bool | None = None,
     ) -> Message:
         """
@@ -416,24 +441,25 @@ class SlackClient:
         ``chat:write.customize`` scope on the token for any override to
         take effect; without it Slack silently ignores the fields.
 
+        ``images`` are `Image` attachments (URL-first — a local-path-only
+        image raises); they fold into ``content`` as trailing ``![alt](url)``
+        lines and then lift to Block Kit image blocks like any such line, so the
+        doc and the programmatic surface converge on the same wire payload.
+
         ``raw`` follows the same override → default precedence: ``None``
         (the default) inherits ``self.raw``; ``True`` / ``False`` overrides.
         When resolved to ``True``, ``content`` is sent verbatim as wire
         ``text`` (no ``to_slack()`` md→mrkdwn conversion) — for consumers
         already emitting Slack mrkdwn. See `specs/done/raw-mrkdwn-passthrough.md`.
         """
+        content = _fold_images_into_content(content, images)
         if len(content) > SLACK_MESSAGE_LIMIT:
             raise ValueError(
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
             )
-        if files:
-            raise NotImplementedError(
-                "Slack posts images by URL, not by uploading bytes: put a trailing "
-                "`![alt](url)` in the content (lifted to an image block), not `files=`."
-            )
         resolved_raw = raw if raw is not None else self.raw
         # Raw consumers send wire mrkdwn verbatim — no image lifting either.
-        body, images = (content, []) if resolved_raw else split_trailing_images(content)
+        body, image_refs = (content, []) if resolved_raw else split_trailing_images(content)
         wire = content if resolved_raw else _md_to_slack(body)
         data: dict = {
             "channel": self.channel,
@@ -473,8 +499,8 @@ class SlackClient:
                 f"(xoxb-…): Slack ignores `chat.postMessage` sender customization "
                 f"on user (xoxp-…) tokens. Use a bot token, or drop the override."
             )
-        if images:
-            self._lift_image_blocks(data, images)
+        if image_refs:
+            self._lift_image_blocks(data, image_refs)
         if thread_id is not None:
             data["thread_ts"] = thread_id
         md = self._metadata_for(content)
@@ -490,27 +516,26 @@ class SlackClient:
         message_id: str,
         content: str,
         *,
-        files: Sequence[Path | str] = (),
+        images: Sequence[Image] = (),
         raw: bool | None = None,
     ) -> Message:
         """Edit ``message_id``'s text to ``content``.
+
+        ``images`` mirror `post()` — URL-first `Image`s folded into ``content``
+        as trailing ``![alt](url)`` lines and lifted to image blocks.
 
         ``raw`` matches `post()`'s semantics: ``None`` inherits ``self.raw``,
         else the boolean overrides. When resolved to ``True``, ``content``
         is sent as wire ``text`` verbatim (no ``to_slack()`` conversion).
         See `specs/done/raw-mrkdwn-passthrough.md`.
         """
+        content = _fold_images_into_content(content, images)
         if len(content) > SLACK_MESSAGE_LIMIT:
             raise ValueError(
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
             )
-        if files:
-            raise NotImplementedError(
-                "Slack edits images by URL, not by uploading bytes: put a trailing "
-                "`![alt](url)` in the content (lifted to an image block), not `files=`."
-            )
         resolved_raw = raw if raw is not None else self.raw
-        body, images = (content, []) if resolved_raw else split_trailing_images(content)
+        body, image_refs = (content, []) if resolved_raw else split_trailing_images(content)
         wire = content if resolved_raw else _md_to_slack(body)
         data: dict = {
             "channel": self.channel,
@@ -520,8 +545,8 @@ class SlackClient:
             "unfurl_media": not self._suppress_unfurls,
         }
         self._attach_chrome(data, content, wire)
-        if images:
-            self._lift_image_blocks(data, images)
+        if image_refs:
+            self._lift_image_blocks(data, image_refs)
         elif not resolved_raw and "blocks" not in data:
             # Declarative blocks: `chat.update` leaves existing blocks in
             # place unless told otherwise, so an edit that drops the doc's
@@ -668,6 +693,16 @@ class SlackClient:
         """
         self._suppress_unfurls = suppress_unfurls
         self._metadata_by_content = metadata
+        # Slack carries images in content (image blocks that round-trip on
+        # read-back), so fold any `Msg.images` into content up front: the
+        # reconcile then diffs content that matches the read-back and stays
+        # idempotent. Bare-str and image-free messages are untouched.
+        if any(isinstance(m, Msg) and m.images for m in thread.messages):
+            thread = replace(thread, messages=[
+                replace(m, content=_fold_images_into_content(m.content, m.images), images=())
+                if isinstance(m, Msg) and m.images else m
+                for m in thread.messages
+            ])
         try:
             return sync(
                 client=self,

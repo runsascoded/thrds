@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import random
+import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import urlopen
 
-from .core import EditRateLimited, Message, SyncOptions, SyncResult, Thread, sync
+from .core import EditRateLimited, Image, Message, SyncOptions, SyncResult, Thread, sync
 from .linked import (
     LinkedSyncResult,
     LinkedThread,
@@ -25,6 +31,35 @@ MAX_FILE_BYTES = 8 * 1024 * 1024  # Discord's default (non-boosted) per-file upl
 # for a bot-authored report whose text interpolates paths / names that may read
 # as `@here` / `@everyone` / `@role`. Pass to a client's `allowed_mentions=`.
 NO_MENTIONS = {"parse": []}
+
+
+@contextmanager
+def _image_paths(images: Sequence[Image]):
+    """Resolve unified `Image`s to local file paths for a multipart upload.
+
+    A ``path`` image is used in place; a ``url`` image is fetched (`GET`) into a
+    temp dir, named after the URL's basename so Discord shows a meaningful
+    filename. Yields the ordered list of paths and cleans up any fetched temps
+    afterward — so the caller's `_curl_raw` (which may retry) sees stable files
+    for the whole request. `path` wins when an `Image` carries both (no fetch)."""
+    tmpdir: str | None = None
+    paths: list[Path] = []
+    try:
+        for im in images:
+            if im.path is not None:
+                paths.append(Path(im.path))
+                continue
+            if tmpdir is None:
+                tmpdir = tempfile.mkdtemp(prefix="thrds-img-")
+            name = os.path.basename(urlsplit(im.url).path) or "image"
+            dest = Path(tmpdir) / name
+            with urlopen(im.url) as resp:
+                dest.write_bytes(resp.read())
+            paths.append(dest)
+        yield paths
+    finally:
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _files_form(body: dict, files: Sequence[Path | str]) -> list[tuple[str, str]]:
@@ -292,7 +327,7 @@ class DiscordClient(_DiscordHTTP):
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
-        files: Sequence[Path | str] = (),
+        images: Sequence[Image] = (),
     ) -> Message:
         """Post a message as the bot.
 
@@ -303,9 +338,9 @@ class DiscordClient(_DiscordHTTP):
         requires the webhook transport (a webhook-backed client; see
         ``specs/discord-push.md``); route such threads there.
 
-        ``files`` likewise route through the webhook transport — this bot
+        ``images`` likewise route through the webhook transport — this bot
         `post` doesn't build the multipart attachment upload — so non-empty
-        ``files`` **raises**. The `DiscordHybridClient` sends any attachment-
+        ``images`` **raises**. The `DiscordHybridClient` sends any attachment-
         bearing message via its webhook.
         """
         if username is not None or icon_url is not None or icon_emoji is not None:
@@ -314,9 +349,9 @@ class DiscordClient(_DiscordHTTP):
                 "(username/icon_url/icon_emoji); post via a webhook-backed "
                 "client for per-message identity. See specs/discord-push.md."
             )
-        if files:
+        if images:
             raise NotImplementedError(
-                "This bot `post` doesn't upload attachments; send `files=` via the "
+                "This bot `post` doesn't upload attachments; send `images=` via the "
                 "webhook transport (`DiscordWebhookClient` / `DiscordHybridClient`)."
             )
         if len(content) > MESSAGE_LIMIT:
@@ -353,12 +388,12 @@ class DiscordClient(_DiscordHTTP):
             )
         return self.create_thread(op_id, name)
 
-    def edit(self, message_id: str, content: str, *, files: Sequence[Path | str] = ()) -> Message:
+    def edit(self, message_id: str, content: str, *, images: Sequence[Image] = ()) -> Message:
         if len(content) > MESSAGE_LIMIT:
             raise ValueError(f"Message exceeds Discord's {MESSAGE_LIMIT} char limit ({len(content)} chars)")
-        if files:
+        if images:
             raise NotImplementedError(
-                "This bot `edit` doesn't upload attachments; edit `files=` via the "
+                "This bot `edit` doesn't upload attachments; edit `images=` via the "
                 "webhook transport (`DiscordWebhookClient` / `DiscordHybridClient`)."
             )
         data: dict = {"content": content}
@@ -561,14 +596,15 @@ class DiscordWebhookClient(_DiscordHTTP):
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
-        files: Sequence[Path | str] = (),
+        images: Sequence[Image] = (),
     ) -> Message:
-        """Post a webhook message, optionally with file attachments.
+        """Post a webhook message, optionally with image attachments.
 
-        ``files`` (e.g. a rendered PNG) upload as multipart alongside the text —
-        they render inline like any user attachment, and `suppress_embeds`
-        (which only hides link previews) leaves them visible. Empty ``files``
-        sends the byte-identical JSON request as before."""
+        ``images`` (unified `Image`s — a ``path`` uploaded directly, a ``url``
+        fetched then uploaded) go as multipart alongside the text; they render
+        inline like any user attachment, and `suppress_embeds` (which only hides
+        link previews) leaves them visible. Empty ``images`` sends the
+        byte-identical JSON request as before."""
         if icon_emoji is not None:
             raise NotImplementedError(
                 "Discord webhooks have no emoji avatar; pass a hosted image URL as "
@@ -591,8 +627,9 @@ class DiscordWebhookClient(_DiscordHTTP):
             data["flags"] = 4
         if self.allowed_mentions is not None:
             data["allowed_mentions"] = self.allowed_mentions
-        if files:
-            resp = self._curl_raw("POST", url, form=_files_form(data, files), label="POST webhook message")
+        if images:
+            with _image_paths(images) as paths:
+                resp = self._curl_raw("POST", url, form=_files_form(data, paths), label="POST webhook message")
         else:
             resp = self._curl_raw("POST", url, data, headers=self._HEADERS, label="POST webhook message")
         return Message(id=resp["id"], content=content)
@@ -602,15 +639,15 @@ class DiscordWebhookClient(_DiscordHTTP):
         message_id: str,
         content: str,
         *,
-        files: Sequence[Path | str] = (),
+        images: Sequence[Image] = (),
         keep_attachments: bool = True,
     ) -> Message:
         """Edit a webhook message's text, and optionally its attachments.
 
-        With no ``files``: ``keep_attachments`` (the default) leaves existing
+        With no ``images``: ``keep_attachments`` (the default) leaves existing
         attachments in place — a text-only edit must not strip an earlier image
         — while ``False`` sends ``attachments: []`` to drop them. Passing
-        ``files`` replaces the attachment set with the new uploads."""
+        ``images`` replaces the attachment set with the new uploads."""
         if len(content) > MESSAGE_LIMIT:
             raise ValueError(f"Message exceeds Discord's {MESSAGE_LIMIT} char limit ({len(content)} chars)")
         data: dict = {"content": content}
@@ -618,11 +655,12 @@ class DiscordWebhookClient(_DiscordHTTP):
             data["flags"] = 4
         if self.allowed_mentions is not None:
             data["allowed_mentions"] = self.allowed_mentions
-        if files:
-            self._curl_raw(
-                "PATCH", self._message_url(message_id), form=_files_form(data, files),
-                label=f"PATCH webhook message {message_id}",
-            )
+        if images:
+            with _image_paths(images) as paths:
+                self._curl_raw(
+                    "PATCH", self._message_url(message_id), form=_files_form(data, paths),
+                    label=f"PATCH webhook message {message_id}",
+                )
         else:
             if not keep_attachments:
                 data["attachments"] = []
@@ -723,9 +761,9 @@ class DiscordHybridClient:
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
-        files: Sequence[Path | str] = (),
+        images: Sequence[Image] = (),
     ) -> Message:
-        via_webhook = username is not None or icon_url is not None or icon_emoji is not None or bool(files)
+        via_webhook = username is not None or icon_url is not None or icon_emoji is not None or bool(images)
         if thread_id is None:
             # OP. A plain OP is the bot's single identity; one carrying a sender
             # or an attachment goes through the webhook, into the PARENT channel
@@ -738,7 +776,7 @@ class DiscordHybridClient:
             try:
                 msg = self.webhook.post(
                     content, thread_id=None,
-                    username=username, icon_url=icon_url, icon_emoji=icon_emoji, files=files,
+                    username=username, icon_url=icon_url, icon_emoji=icon_emoji, images=images,
                 )
             finally:
                 self.webhook.thread_id = prev
@@ -748,13 +786,13 @@ class DiscordHybridClient:
         if via_webhook:
             msg = self.webhook.post(
                 content, thread_id=thread_id,
-                username=username, icon_url=icon_url, icon_emoji=icon_emoji, files=files,
+                username=username, icon_url=icon_url, icon_emoji=icon_emoji, images=images,
             )
             self._webhook_ids.add(msg.id)
             return msg
         return self.bot.post(content, thread_id=thread_id)
 
-    def edit(self, message_id: str, content: str, *, files: Sequence[Path | str] = ()) -> Message:
+    def edit(self, message_id: str, content: str, *, images: Sequence[Image] = ()) -> Message:
         if message_id == self._webhook_op_id:
             # The webhook-authored OP lives in the parent channel — its edit must
             # not carry `?thread_id`. Clear the webhook's thread override around
@@ -762,12 +800,12 @@ class DiscordHybridClient:
             prev = self.webhook.thread_id
             self.webhook.thread_id = None
             try:
-                return self.webhook.edit(message_id, content, files=files)
+                return self.webhook.edit(message_id, content, images=images)
             finally:
                 self.webhook.thread_id = prev
         if message_id in self._webhook_ids:
-            return self.webhook.edit(message_id, content, files=files)
-        return self.bot.edit(message_id, content, files=files)
+            return self.webhook.edit(message_id, content, images=images)
+        return self.bot.edit(message_id, content, images=images)
 
     def delete(self, message_id: str) -> None:
         if message_id in self._webhook_ids:

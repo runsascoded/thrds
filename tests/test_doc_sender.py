@@ -91,6 +91,55 @@ def test_sender_free_doc_resolves_to_bare_strings():
     assert all(isinstance(m, str) for m in resolved)
 
 
+def test_lift_images_default_off_keeps_content():
+    # Without lift_images, a trailing image line stays in content (Slack's form).
+    p = parse_thread("OP body\n\n![plot](https://x/p.png)\n")
+    assert resolve_messages(p.thread.messages, p.frontmatter) == [
+        "OP body\n\n![plot](https://x/p.png)",
+    ]
+
+
+def test_lift_images_url_into_msg():
+    from thrds.core import Image
+
+    p = parse_thread("OP body\n\n![plot](https://x/p.png){bust}\n")
+    assert resolve_messages(p.thread.messages, p.frontmatter, lift_images=True) == [
+        Msg("OP body", images=[Image(url="https://x/p.png", alt="plot", bust=True)]),
+    ]
+
+
+def test_lift_images_local_path_resolved_against_base_dir():
+    from pathlib import Path
+
+    from thrds.core import Image
+
+    p = parse_thread("caption\n\n![c](./plot.png)\n")
+    assert resolve_messages(
+        p.thread.messages, p.frontmatter, lift_images=True, base_dir=Path("/docs"),
+    ) == [
+        Msg("caption", images=[Image(path=Path("/docs/plot.png"), alt="c")]),
+    ]
+
+
+def test_lift_images_with_sender_keeps_both():
+    from thrds.core import Image
+
+    p = parse_thread(
+        "---\nop_sender: gcs\nsender.gcs.name: GCS\n---\n"
+        "OP body\n\n![plot](https://x/p.png)\n"
+    )
+    assert resolve_messages(p.thread.messages, p.frontmatter, lift_images=True) == [
+        Msg("OP body", username="GCS", images=[Image(url="https://x/p.png", alt="plot")]),
+    ]
+
+
+def test_lift_images_mid_message_not_lifted():
+    # Only a trailing image run lifts; an image with text after it stays inline.
+    p = parse_thread("before\n\n![c](https://x/p.png)\n\nafter\n")
+    resolved = resolve_messages(p.thread.messages, p.frontmatter, lift_images=True)
+    assert resolved == ["before\n\n![c](https://x/p.png)\n\nafter"]
+
+
 def test_emoji_vs_url_avatar_detection():
     p = parse_thread(
         "---\n"

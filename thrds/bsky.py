@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import Path
 
-from .core import EditRateLimited, Message, SyncOptions, SyncResult, Thread, sync
+from .core import EditRateLimited, Image, Message, SyncOptions, SyncResult, Thread, sync
 
 try:
     from atproto import Client as AtClient
@@ -69,7 +68,7 @@ class BskyClient:
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
-        files: Sequence[Path | str] = (),
+        images: Sequence[Image] = (),
     ) -> Message:
         """Create a post. If thread_id is given, reply to the root post.
 
@@ -82,10 +81,10 @@ class BskyClient:
                 "Bluesky has no per-message sender concept "
                 "(username/icon_url/icon_emoji cannot be honored)."
             )
-        if files:
+        if images:
             raise NotImplementedError(
-                "Bluesky attachment upload isn't implemented in this client "
-                "(`files=` is unsupported)."
+                "Bluesky image embeds aren't wired in this client "
+                "(`images=` is unsupported)."
             )
         if len(content) > POST_LIMIT:
             raise ValueError(f"Post exceeds Bluesky's {POST_LIMIT} char limit ({len(content)} chars)")
@@ -103,7 +102,7 @@ class BskyClient:
 
         return Message(id=resp.uri, content=content)
 
-    def edit(self, message_id: str, content: str, *, files: Sequence[Path | str] = ()) -> Message:
+    def edit(self, message_id: str, content: str, *, images: Sequence[Image] = ()) -> Message:
         """Bluesky doesn't support editing. Trigger delete+repost fallback."""
         raise EditRateLimited("Bluesky does not support editing posts")
 

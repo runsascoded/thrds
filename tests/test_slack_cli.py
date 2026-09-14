@@ -76,7 +76,7 @@ class CrudSpy:
         self.thread_calls.append({"channel": channel, "thread_ts": thread_ts})
         return list(self.thread_returns)
 
-    def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None, files=(), raw=None):
+    def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None, images=(), raw=None):
         self.post_calls.append({
             "content": content, "thread_id": thread_id,
             "username": username, "icon_url": icon_url, "icon_emoji": icon_emoji,
@@ -85,7 +85,7 @@ class CrudSpy:
         from thrds import Message
         return Message(id=self.post_returns_id, content=content)
 
-    def edit(self, message_id, content, *, files=(), raw=None):
+    def edit(self, message_id, content, *, images=(), raw=None):
         self.edit_calls.append({
             "message_id": message_id, "content": content, "raw": raw,
             "channel": self.channel,
