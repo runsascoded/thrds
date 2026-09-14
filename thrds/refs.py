@@ -54,7 +54,11 @@ def substitute_refs(content: str, resolver: Callable[[str], str]) -> str:
 
 
 def _substitute_message(msg: DocMessage, resolver: Callable[[str], str]) -> DocMessage:
-    return DocMessage(content=substitute_refs(msg.content, resolver), author=msg.author)
+    return DocMessage(
+        content=substitute_refs(msg.content, resolver),
+        author=msg.author,
+        sender=msg.sender,
+    )
 
 
 def _substitute_thread(thread: DocThread, resolver: Callable[[str], str]) -> DocThread:

@@ -27,8 +27,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .doc import DocThread
+if TYPE_CHECKING:
+    from .md import ParsedThread
 
 
 # `01-cw-quickwins.md` → (1, 'cw-quickwins'). The slug charset matches
@@ -120,14 +122,20 @@ def thread_files(session_dir: Path | str = '.') -> list[ThreadFile]:
     return sorted(found)
 
 
-def read_thread(tf: ThreadFile) -> DocThread:
-    """Parse one :class:`ThreadFile` into a `DocThread`, slug from the filename."""
+def read_thread(tf: ThreadFile) -> ParsedThread:
+    """Parse one :class:`ThreadFile` into its `ParsedThread` (thread + frontmatter).
+
+    The frontmatter rides along because per-thread-file sender profiles
+    (``sender.<name>.*`` / ``op_sender``) live there, and `push` / `promote`
+    need them to post per-sender (`+++ as <name>`). The slug comes from the
+    filename.
+    """
     from .md import parse_thread  # local import: md imports nothing from here, but keep the edge one-way
-    return parse_thread(tf.path.read_text(), slug=tf.slug).thread
+    return parse_thread(tf.path.read_text(), slug=tf.slug)
 
 
-def read_threads(session_dir: Path | str = '.') -> list[DocThread]:
-    """Every thread in ``session_dir``, in file order.
+def read_threads(session_dir: Path | str = '.') -> list[ParsedThread]:
+    """Every thread in ``session_dir`` (with its frontmatter), in file order.
 
     File order (the ``NN`` prefix) is post order for a batch push, which is why
     it's deterministic rather than whatever ``iterdir`` happens to yield.
@@ -135,8 +143,8 @@ def read_threads(session_dir: Path | str = '.') -> list[DocThread]:
     return [read_thread(tf) for tf in thread_files(session_dir)]
 
 
-def find_thread(session_dir: Path | str, slug: str) -> tuple[ThreadFile, DocThread]:
-    """The ``(file, thread)`` for ``slug``; raises with the available slugs if absent."""
+def find_thread(session_dir: Path | str, slug: str) -> tuple[ThreadFile, ParsedThread]:
+    """The ``(file, parsed)`` for ``slug``; raises with the available slugs if absent."""
     files = thread_files(session_dir)
     for tf in files:
         if tf.slug == slug:

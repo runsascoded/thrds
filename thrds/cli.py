@@ -1002,9 +1002,11 @@ def slack_push(channel: str | None, force: bool, keep_staging: bool, dry_run: bo
             )
         session_dir = Path.cwd()
         files = thread_files(session_dir)
-        threads = read_threads(session_dir)
-        if not threads:
+        parsed = read_threads(session_dir)
+        if not parsed:
             raise click.UsageError('No thread files (`NN-slug.md`) in this session.')
+        threads = [p.thread for p in parsed]
+        frontmatter_by_slug = {p.thread.slug: p.frontmatter for p in parsed}
         for slug, target in _absorb_file_chrome(session_dir, threads, state, client, dry_run).items():
             where = target.channel + (f' @ {target.thread_ts}' if target.thread_ts else '')
             err(f"targeted {slug} → {where} (from a chrome line in its file)")
@@ -1037,6 +1039,7 @@ def slack_push(channel: str | None, force: bool, keep_staging: bool, dry_run: bo
         result = client.sync_threads_staging(
             threads, state, dry_run=dry_run,
             filenames=names, remote=rmt,
+            frontmatter_by_slug=frontmatter_by_slug,
         )
         _print_sync_summary(f'pushed to {rmt.name}' + (' (dry-run)' if dry_run else ''), result)
         if not dry_run:
@@ -1939,9 +1942,10 @@ def slack_promote(channel: str | None, force: bool, dry_run: bool, thread_ts: st
     _require_per_thread(state)
 
     try:
-        tf, thread = find_thread(Path.cwd(), slug)
+        tf, parsed = find_thread(Path.cwd(), slug)
     except ValueError as e:
         raise click.UsageError(str(e))
+    thread = parsed.thread
 
     target = state.target_for(slug)
     if channel is not None:
@@ -1974,7 +1978,7 @@ def slack_promote(channel: str | None, force: bool, dry_run: bool, thread_ts: st
     # let a promote silently edit and delete unrelated messages — the plan is
     # the thing being approved, not the prose. See
     # specs/promote-shared-thread-safety.md.
-    plan = client.promote_thread(slug, thread, target, state, dry_run=True)
+    plan = client.promote_thread(slug, thread, target, state, dry_run=True, frontmatter=parsed.frontmatter)
     err('  ---')
     err(plan.format_preview(color=sys.stderr.isatty(), prefix='  '))
     err('  ---')
@@ -2000,7 +2004,7 @@ def slack_promote(channel: str | None, force: bool, dry_run: bool, thread_ts: st
     if not yes:
         click.confirm('Apply this plan?', abort=True, err=True)
 
-    result = client.promote_thread(slug, thread, target, state)
+    result = client.promote_thread(slug, thread, target, state, frontmatter=parsed.frontmatter)
     state.save()
     err(f"posted {slug}: {entry.posted_ts}")
     _notify_promoted(client, slug, target.channel, entry.posted_ts)

@@ -52,6 +52,8 @@ slck replay [-n]                       # rewrite a pre-migrate session's *git hi
 
 **Destination is a property of the thread, not the session.** Each thread records its own `{channel, thread_ts?}` target in `thrds.yml` (session-level `prod_channel` is just the default). No `thread_ts` → post a new top-level message; with one → the thread's messages go in as replies — so "draft a reply to someone else's post" and "batch six messages into one channel" are the same mechanism.
 
+**Per-message sender in the doc.** A message can post under a custom display name + avatar — the [`+++ as <name>` / `op_sender` syntax](#platform-capabilities) shared with Discord. Name each profile once in frontmatter (`sender.<name>.name` / `.avatar`), reference it from the OP via `op_sender:` and from a reply on its `+++ as <name>` delimiter; `push` and `promote` post each message under its profile (Slack does this natively via `chat.postMessage`, so unlike Discord even the OP can carry one). Needs an `xoxb-` bot token — Slack ignores sender customization on user tokens. This is the versioned counterpart to the programmatic `Msg(content, username=, icon_url=)` API; a sender-free doc pushes exactly as before.
+
 **Staging-only chrome.** Staged messages carry one extra line — where the draft is aimed, what it became once posted, and which gist file it is:
 
 ```

@@ -23,7 +23,7 @@ from .chrome import (
     split as split_chrome,
 )
 from .core import Message, OrphanedRepliesError, SyncOptions, SyncResult, Thread, sync
-from .doc import Doc, DocMessage, DocSyncResult, DocThread
+from .doc import Doc, DocMessage, DocSyncResult, DocThread, Frontmatter
 from .imageblock import (
     ImageRef,
     bust_token,
@@ -59,6 +59,7 @@ from .remotes import Remote
 from .richtext import render as render_rich_text, rich_text_enabled
 from .state import SessionState, ThreadEntry, ThreadTarget
 from .tracking import STAGING
+from .md import resolve_messages
 from .threadfile import (
     SLUG_RE,
     dedupe_thread_filename,
@@ -843,6 +844,7 @@ class SlackClient:
         pace: float,
         jitter: float,
         suppress_unfurls: bool,
+        frontmatter_by_slug: dict[str, Frontmatter] | None = None,
     ) -> None:
         """Phase-3: fetch permalinks + re-sync messages containing refs.
 
@@ -888,6 +890,7 @@ class SlackClient:
                 pace=pace,
                 jitter=jitter,
                 suppress_unfurls=suppress_unfurls,
+                frontmatter=(frontmatter_by_slug or {}).get(thread.slug),
             )
 
     # --- Doc-level sync (multi-thread) ---
@@ -964,13 +967,17 @@ class SlackClient:
         pace: float,
         jitter: float,
         suppress_unfurls: bool,
+        frontmatter: Frontmatter | None = None,
     ) -> tuple[str, SyncResult]:
         """Sync one owned thread (its OP + replies) via `sync()`.
 
         Filters ``thread.messages`` to ours-only (``author is None``) before
         translating to a `Thread` — foreign messages are preserved on Slack
-        by `core.sync`'s editable filter, never re-posted. Returns
-        ``(op_ts, sync_result)``.
+        by `core.sync`'s editable filter, never re-posted. ``frontmatter``
+        carries the per-thread sender profiles (`op_sender` / ``sender.*``), so
+        a `+++ as <name>` reply resolves to a `Msg` with that name/avatar (a
+        sender-free thread yields the same bare-string `Thread` as before).
+        Returns ``(op_ts, sync_result)``.
         """
         ours = [m for m in thread.messages if m.author is None]
         if not ours:
@@ -979,19 +986,8 @@ class SlackClient:
                 "message has an author, which shouldn't be possible (OP must "
                 "be ours). Data-model bug."
             )
-        if any(m.sender is not None for m in ours):
-            # Per-message sender (`+++ as <name>`) isn't wired through the Slack
-            # staging/prod push yet (it drops frontmatter in `read_threads`).
-            # Raise rather than silently posting as the default identity —
-            # Slack per-sender is available programmatically via `Msg`, and doc-
-            # authored per-sender is live for `discord push`. See
-            # specs/doc-sender-syntax.md.
-            raise ValueError(
-                f"Thread {thread.slug!r}: per-message sender (`+++ as <name>`) isn't wired "
-                "for `slack push` yet — use the programmatic `Msg` API, or `thrds discord "
-                "push`. See specs/doc-sender-syntax.md."
-            )
-        core_thread = Thread(messages=[m.content for m in ours])
+        fm = frontmatter if frontmatter is not None else Frontmatter()
+        core_thread = Thread(messages=resolve_messages(ours, fm))
         metadata: dict[str, dict] = {}
         for i, m in enumerate(ours):
             kind = "op" if i == 0 else "reply"
@@ -1373,6 +1369,7 @@ class SlackClient:
         suppress_unfurls: bool = True,
         filenames: dict[str, str] | None = None,
         remote: Remote | None = None,
+        frontmatter_by_slug: dict[str, Frontmatter] | None = None,
     ) -> DocSyncResult:
         """Terraform-sync a session's thread files into its staging PC.
 
@@ -1448,6 +1445,7 @@ class SlackClient:
 
             thread_ts_by_slug: dict[str, str] = {}
             thread_results: dict[str, SyncResult] = {}
+            fm_by_slug = frontmatter_by_slug or {}
             for thread in phase2_doc.threads:
                 entry = state.thread(thread.slug)
                 op_ts, sync_result = self._sync_doc_thread(
@@ -1458,6 +1456,7 @@ class SlackClient:
                     pace=pace,
                     jitter=jitter,
                     suppress_unfurls=suppress_unfurls,
+                    frontmatter=fm_by_slug.get(thread.slug),
                 )
                 if not dry_run:
                     entry.pointer(remote.name).ts = op_ts
@@ -1480,6 +1479,7 @@ class SlackClient:
                     pace=pace,
                     jitter=jitter,
                     suppress_unfurls=suppress_unfurls,
+                    frontmatter_by_slug=fm_by_slug,
                 )
                 state.save()
 
@@ -1507,6 +1507,7 @@ class SlackClient:
         pace: float = 0.4,
         jitter: float = 0.0,
         suppress_unfurls: bool = True,
+        frontmatter: Frontmatter | None = None,
     ) -> SyncResult:
         """Post one thread to its own target. Never touches any other thread.
 
@@ -1567,7 +1568,8 @@ class SlackClient:
         prev_channel = self.channel
         self.channel = target.channel
         try:
-            core_thread = Thread(messages=[m.content for m in ours])
+            fm = frontmatter if frontmatter is not None else Frontmatter()
+            core_thread = Thread(messages=resolve_messages(ours, fm))
             metadata = {
                 m.content: self._thrds_metadata(state, slug, "op" if i == 0 else "reply")
                 for i, m in enumerate(ours)
@@ -2161,7 +2163,7 @@ class SlackClient:
                 DocThread(
                     slug=t.slug,
                     messages=[
-                        DocMessage(content=sub(m.content), author=m.author)
+                        DocMessage(content=sub(m.content), author=m.author, sender=m.sender)
                         for m in t.messages
                     ],
                 )
