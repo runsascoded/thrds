@@ -238,12 +238,18 @@ class _CurlRecorder:
         if method == 'GET':
             if path == '/users/@me':
                 return {'id': BOT_ID}
+            if path == '/applications/@me':
+                return {'id': 'app-1'}
+            if path.endswith('/webhooks'):
+                return []  # no existing webhook → auto-create makes one
             # `/…/messages/{id}` (single fetch) vs `/…/messages?limit=…` (list).
             if '/messages/' in path:
                 return self._op_message
             return self._thread_messages
         if method == 'POST' and path.endswith('/threads'):
             return {'id': 'thread-1'}
+        if method == 'POST' and path.endswith('/webhooks'):
+            return {'id': 'wh1', 'token': 'tok', 'application_id': 'app-1', 'name': data['name']}
         if method == 'POST' and path.endswith('/messages'):
             self._n += 1
             return {'id': f'm{self._n}'}
@@ -616,16 +622,55 @@ def test_discord_push_per_sender_routes_replies_through_webhook(in_tmp, monkeypa
     assert (state.discord_op_id, state.discord_thread_id) == ('m1', 'thread-1')
 
 
-def test_discord_push_per_sender_without_webhook_raises(in_tmp, monkeypatch):
+def test_discord_push_without_webhook_env_auto_creates_app_owned(in_tmp, monkeypatch):
+    # No env URL → the bot bootstraps an app-owned webhook (create_webhook) and
+    # the push proceeds through it.
+    doc = "---\nsender.alice.name: Alice\nsender.alice.avatar: https://x/a.png\n---\nOP body\n\n+++ as alice\nreply A\n"
+    _init_discord(in_tmp, monkeypatch, doc_text=doc)
+    _set_discord_env(monkeypatch)
+    monkeypatch.delenv(DISCORD_WEBHOOK_ENV, raising=False)
+    bot_rec = _CurlRecorder()
+    hook_rec = _WebhookRecorder()
+    _install_curl(monkeypatch, bot_rec)
+    monkeypatch.setattr(
+        DiscordWebhookClient, '_curl_raw',
+        lambda self, method, url, data=None, *, form=None, headers=None, label=None: hook_rec(
+            method, url, data, form=form, headers=headers, label=label,
+        ),
+    )
+    result = CliRunner().invoke(cli, ['discord', 'push', '-N', 'Digest'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # The webhook was auto-created (GET reuse-check + POST), then the reply fans
+    # in through the created webhook's URL.
+    assert ('GET', '/channels/CHAN/webhooks', None) in bot_rec.calls
+    assert ('POST', '/channels/CHAN/webhooks', {'name': 'thrds'}) in bot_rec.calls
+    assert hook_rec.calls == [
+        ('POST', 'https://discord.com/api/webhooks/wh1/tok?wait=true&thread_id=thread-1',
+         {'content': 'reply A', 'username': 'Alice', 'avatar_url': 'https://x/a.png'}),
+    ]
+
+
+def test_discord_push_webhook_create_fails_raises(in_tmp, monkeypatch):
+    # The bot lacks MANAGE_WEBHOOKS → create_webhook errors → a clear UsageError.
     doc = "---\nsender.alice.name: Alice\n---\nOP body\n\n+++ as alice\nreply A\n"
     _init_discord(in_tmp, monkeypatch, doc_text=doc)
     _set_discord_env(monkeypatch)
     monkeypatch.delenv(DISCORD_WEBHOOK_ENV, raising=False)
+
+    def _curl(self, method, path, data=None):
+        if method == 'GET' and path.endswith('/webhooks'):
+            return []
+        if method == 'POST' and path.endswith('/webhooks'):
+            raise RuntimeError('Discord API error: Missing Permissions (code 50013)')
+        return {'id': BOT_ID} if path == '/users/@me' else None
+
+    monkeypatch.setattr('thrds.discord.DiscordClient._curl', _curl)
     result = CliRunner().invoke(cli, ['discord', 'push'])
     assert result.exit_code == 2
     assert result.stderr.splitlines()[-1] == (
-        'Error: Doc has per-sender replies (`+++ as <name>`) or image attachments; set '
-        'THRDS_DISCORD_WEBHOOK to a Discord webhook URL to post them.'
+        'Error: Doc needs a webhook (per-sender replies or image attachments); '
+        'auto-creating one failed (Discord API error: Missing Permissions (code 50013)). '
+        'Grant the bot `MANAGE_WEBHOOKS`, or set THRDS_DISCORD_WEBHOOK to a webhook URL.'
     )
 
 

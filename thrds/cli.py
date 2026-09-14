@@ -2924,6 +2924,9 @@ DISCORD_BOT_TOKEN_ENV = 'THRDS_DISCORD_BOT_TOKEN'
 DISCORD_CHANNEL_ENV = 'THRDS_DISCORD_CHANNEL'
 DISCORD_GUILD_ENV = 'THRDS_DISCORD_GUILD'
 DISCORD_WEBHOOK_ENV = 'THRDS_DISCORD_WEBHOOK'
+# Name for the app-owned webhook `discord push` auto-creates when the env URL is
+# unset — stable so it's reused across pushes (see `DiscordClient.create_webhook`).
+HYBRID_WEBHOOK_NAME = 'thrds'
 
 
 def _discord_client(
@@ -3022,11 +3025,20 @@ def discord_push(
         webhook_url = os.environ.get(DISCORD_WEBHOOK_ENV)
         if not webhook_url:
             if require_creds:
-                raise click.UsageError(
-                    f'Doc has per-sender replies (`+++ as <name>`) or image attachments; set '
-                    f'{DISCORD_WEBHOOK_ENV} to a Discord webhook URL to post them.'
-                )
-            webhook_url = 'dry-run'  # never used — a dry run posts nothing
+                # Bootstrap an **app-owned** webhook from the bot token (reused
+                # by name across pushes) — no hand-pasted URL, and it guarantees
+                # app-emoji rendering (a user-created webhook strips them). Needs
+                # `MANAGE_WEBHOOKS`; the explicit env still overrides.
+                try:
+                    webhook_url = bot.create_webhook(HYBRID_WEBHOOK_NAME)
+                except RuntimeError as e:
+                    raise click.UsageError(
+                        f'Doc needs a webhook (per-sender replies or image attachments); '
+                        f'auto-creating one failed ({e}). Grant the bot `MANAGE_WEBHOOKS`, '
+                        f'or set {DISCORD_WEBHOOK_ENV} to a webhook URL.'
+                    ) from e
+            else:
+                webhook_url = 'dry-run'  # never used — a dry run posts nothing
         client = DiscordHybridClient(bot, DiscordWebhookClient(webhook_url))
     else:
         client = bot

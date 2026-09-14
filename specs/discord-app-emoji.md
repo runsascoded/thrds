@@ -30,6 +30,10 @@ Neither blocks mgu; both are pure additions.
 
 These three are what mgu deletes from `gcs_usage/discord_api.py`. Tests in `test_discord_app_emoji.py` assert exact request shapes (create/reuse/ignore-user-webhook, the emoji map, the data-URI upload, the name guard).
 
+### `discord push` defaults to `create_webhook` (2026-09-14)
+
+When no `THRDS_DISCORD_WEBHOOK` env URL is set, an image/per-sender `discord push` now bootstraps an **app-owned** webhook from the bot token (`bot.create_webhook('thrds')`, reused by name) instead of erroring — so the hybrid pair comes from a bot token alone, and the webhook is app-owned (app emoji render). Falls back to a clear `UsageError` if the bot lacks `MANAGE_WEBHOOKS` (grant it, or set the env URL). Tests: auto-create happy path + the create-fails error.
+
 ### Deferred: the doc-side `:name:` → `<:name:id>` rewrite
 
-Not shipped yet, because of a round-trip footgun this spec itself documents: a **user-created** webhook strips `<:name:id>` back to `:name:` on ingest, so rewriting desired content to `<:name:id>` would mismatch the read-back and re-edit every push. The rewrite is only idempotent when every emoji-bearing message posts through the **bot or an app-owned webhook** — so it should land *after*/*with* the hybrid defaulting to `create_webhook` (app-owned), and gate the rewrite on app-ownership. mgu keeps its own rewrite until then (the "optional" half of ask #2).
+Now **unblocked** (the app-owned-webhook default above removes the footgun) but not yet shipped. The footgun this spec documents: a **user-created** webhook strips `<:name:id>` back to `:name:` on ingest, so the rewrite is only idempotent when every emoji-bearing message posts through the bot or an app-owned webhook — which is now the default. Next step: rewrite desired `:name:` → `<:name:id>` in `discord push` using `bot.app_emojis()` (guarding on app-ownership when the webhook is env-supplied), so live posts render the custom arrows. mgu keeps its own rewrite until then (the "optional" half of ask #2).
