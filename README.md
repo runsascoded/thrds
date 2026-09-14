@@ -223,9 +223,13 @@ What each transport can do. The columns are the four sync clients — Slack (`Sl
 | Edit a reply | ✅ | ✅ | ✅ | ❌ → delete+repost |
 | Post a reply with a custom sender | ✅ | ❌ | ✅ | ❌ |
 | **Edit an existing message's sender** | ❌ | ❌ | ❌ | ❌ |
+| Attach an image / file | ✅² | ❌ | ✅² (`files=`) | ❌ |
+| Refresh that image in place (on edit) | ✅² | ❌ | ✅² | ❌ |
 | Per-message char limit | 4000 | 2000 | 2000 | 300 / paragraph |
 
 ¹ Slack and Bluesky thread *implicitly*: a reply addresses the OP's own id (Slack's `thread_ts`, Bluesky's reply refs), so any message is already a thread root — there is no separate "create thread" call. Discord's thread is a distinct channel that must be `create_thread`'d off the OP (a message id isn't a channel), which is why `sync` has the `open_thread` seam that only `DiscordClient` implements.
+
+² Two different mechanisms, same outcome — a picture in the message that updates in place, keeping the same message id (no repost). **Slack** attaches a hosted-URL Block Kit *image block* and refreshes it by editing the block's URL; a `{bust}` suffix forces a refetch when the bytes change under a stable URL (`specs/done/editable-image-blocks.md`). The **Discord webhook** uploads the file as a real multipart *attachment* (`post(files=[…])`) and refreshes it by re-uploading on edit (`edit(files=[…])`). The Discord **bot** API can attach files too, but thrds hasn't wired it — only the webhook transport, which is what the per-sender digests use. Bluesky's image embeds aren't wired.
 
 Reading the table:
 

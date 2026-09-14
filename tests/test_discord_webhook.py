@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from thrds import DiscordWebhookClient, Message
+from thrds import NO_MENTIONS, DiscordWebhookClient, Message
 
 WEBHOOK = "https://discord.com/api/webhooks/123/faketoken"
 AVATAR = "https://cdn.discordapp.com/embed/avatars/0.png"
@@ -22,15 +22,21 @@ AVATAR = "https://cdn.discordapp.com/embed/avatars/0.png"
 class _RawRecorder:
     """Stub for `DiscordWebhookClient._curl_raw`: records calls, returns ids.
 
-    A POST (message execution) returns a canned ``{"id": …}``; PATCH/DELETE
-    return None (edit/delete ignore the body).
+    A JSON call lands in ``calls`` as ``(method, url, data, label)``; a
+    multipart call (``form`` set) lands in ``form_calls`` as
+    ``(method, url, form, label)`` — kept apart so JSON-path assertions stay
+    exact. A POST returns a canned ``{"id": …}``; PATCH/DELETE return None.
     """
     def __init__(self):
         self.calls: list[tuple[str, str, dict | None, str | None]] = []
+        self.form_calls: list[tuple[str, str, list, str | None]] = []
         self._n = 0
 
-    def __call__(self, method, url, data=None, *, headers=None, label=None):
-        self.calls.append((method, url, data, label))
+    def __call__(self, method, url, data=None, *, form=None, headers=None, label=None):
+        if form is not None:
+            self.form_calls.append((method, url, form, label))
+        else:
+            self.calls.append((method, url, data, label))
         if method == "POST":
             self._n += 1
             return {"id": f"w{self._n}"}
@@ -42,8 +48,8 @@ def rec(monkeypatch):
     r = _RawRecorder()
     monkeypatch.setattr(
         DiscordWebhookClient, "_curl_raw",
-        lambda self, method, url, data=None, *, headers=None, label=None: r(
-            method, url, data, headers=headers, label=label,
+        lambda self, method, url, data=None, *, form=None, headers=None, label=None: r(
+            method, url, data, form=form, headers=headers, label=label,
         ),
     )
     return r
@@ -175,3 +181,107 @@ def test_error_labels_never_carry_the_secret_url(rec):
         "DELETE webhook message w1",
     ]
     assert all(WEBHOOK not in label for label in labels)
+
+
+# --- file attachments (specs/discord-webhook-attachments.md §1) ---
+
+
+def test_post_with_files_uploads_multipart(rec, tmp_path):
+    png = tmp_path / "diff.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    client = DiscordWebhookClient(WEBHOOK)
+    msg = client.post("here", files=[png])
+    assert msg == Message(id="w1", content="here")
+    # Multipart: payload_json (content + attachments manifest) + one file part.
+    assert rec.form_calls == [
+        ("POST", f"{WEBHOOK}?wait=true",
+         [("payload_json", '{"content": "here", "attachments": [{"id": 0, "filename": "diff.png"}]}'),
+          ("files[0]", f"@{png}")],
+         "POST webhook message"),
+    ]
+    # No JSON-path call was made.
+    assert rec.calls == []
+
+
+def test_post_without_files_stays_json(rec):
+    client = DiscordWebhookClient(WEBHOOK)
+    client.post("plain", files=[])
+    assert rec.form_calls == []
+    assert rec.calls == [
+        ("POST", f"{WEBHOOK}?wait=true", {"content": "plain"}, "POST webhook message"),
+    ]
+
+
+def test_post_too_many_files_raises(rec, tmp_path):
+    files = []
+    for i in range(11):
+        p = tmp_path / f"f{i}.png"
+        p.write_bytes(b"x")
+        files.append(p)
+    client = DiscordWebhookClient(WEBHOOK)
+    with pytest.raises(ValueError, match="at most 10 files per message; got 11"):
+        client.post("too many", files=files)
+    assert rec.calls == [] and rec.form_calls == []
+
+
+def test_post_oversized_file_raises(rec, tmp_path):
+    big = tmp_path / "big.png"
+    with big.open("wb") as f:
+        f.truncate(8 * 1024 * 1024 + 1)  # sparse: one past the 8 MiB cap
+    client = DiscordWebhookClient(WEBHOOK)
+    with pytest.raises(ValueError, match="exceeds Discord's default 8388608-byte"):
+        client.post("huge", files=[big])
+
+
+def test_edit_with_files_replaces_attachments(rec, tmp_path):
+    png = tmp_path / "new.png"
+    png.write_bytes(b"\x89PNG")
+    client = DiscordWebhookClient(WEBHOOK, thread_id="t9")
+    client.edit("w1", "updated", files=[png])
+    assert rec.form_calls == [
+        ("PATCH", f"{WEBHOOK}/messages/w1?thread_id=t9",
+         [("payload_json", '{"content": "updated", "attachments": [{"id": 0, "filename": "new.png"}]}'),
+          ("files[0]", f"@{png}")],
+         "PATCH webhook message w1"),
+    ]
+
+
+def test_edit_text_only_keeps_attachments(rec):
+    client = DiscordWebhookClient(WEBHOOK)
+    client.edit("w1", "just text")
+    # No `attachments` key → Discord leaves the existing image in place.
+    assert rec.calls == [
+        ("PATCH", f"{WEBHOOK}/messages/w1", {"content": "just text"}, "PATCH webhook message w1"),
+    ]
+
+
+def test_edit_drop_attachments_sends_empty_list(rec):
+    client = DiscordWebhookClient(WEBHOOK)
+    client.edit("w1", "text now", keep_attachments=False)
+    assert rec.calls == [
+        ("PATCH", f"{WEBHOOK}/messages/w1",
+         {"content": "text now", "attachments": []}, "PATCH webhook message w1"),
+    ]
+
+
+# --- allowed_mentions (specs/discord-webhook-attachments.md §2) ---
+
+
+def test_allowed_mentions_on_post_and_edit(rec):
+    client = DiscordWebhookClient(WEBHOOK, allowed_mentions=NO_MENTIONS)
+    client.post("ping @here")
+    client.edit("w1", "still @here")
+    assert rec.calls == [
+        ("POST", f"{WEBHOOK}?wait=true",
+         {"content": "ping @here", "allowed_mentions": {"parse": []}}, "POST webhook message"),
+        ("PATCH", f"{WEBHOOK}/messages/w1",
+         {"content": "still @here", "allowed_mentions": {"parse": []}}, "PATCH webhook message w1"),
+    ]
+
+
+def test_allowed_mentions_absent_by_default(rec):
+    client = DiscordWebhookClient(WEBHOOK)
+    client.post("hi @here")
+    assert rec.calls == [
+        ("POST", f"{WEBHOOK}?wait=true", {"content": "hi @here"}, "POST webhook message"),
+    ]

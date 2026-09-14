@@ -43,4 +43,16 @@ hook.post(content, files=[png])
 
 Its `thrds` pin (`gcs-usage/pyproject.toml`) moves to the pushed `py` head once this lands; until then it posts text-only.
 
+## Implemented (2026-09-14): Parts 1 & 2
+
+Parts 1 (attachments) and 2 (`allowed_mentions`) — everything the weekly report needs — are done. Part 3 (a custom OP sender on Discord) is **not** started: it needs a live probe (can the bot `create_thread` off a webhook-authored message?) and isn't a report dependency, so it stays open here.
+
+- **`_curl_raw`** grows a `form: list[tuple[str, str]] | None` alternative to `data` (mutually exclusive — asserted); each tuple is one `-F name=value`, and the caller omits the JSON content-type header so curl sets the multipart boundary. Retry/backoff/429/label handling is unchanged (one loop).
+- **`_files_form(body, files)`** (module helper): adds `attachments: [{"id", "filename"}]` to the JSON body and returns `[("payload_json", <json>), ("files[i]", "@<path>"), …]`; enforces ≤10 files and ≤8 MiB each with a clear `ValueError`.
+- **`DiscordWebhookClient.post(..., files=())`** — non-empty `files` → multipart; empty → byte-identical JSON as before. **`edit(..., files=(), keep_attachments=True)`** — text-only edit keeps existing attachments (no `attachments` key), `keep_attachments=False` sends `attachments: []` to drop them, and `files=[…]` replaces the set with new uploads.
+- **`allowed_mentions`** — constructor kwarg on both `DiscordWebhookClient` and `DiscordClient`; when set, every `post`/`edit` body carries it. `thrds.NO_MENTIONS = {"parse": []}` is exported for the common "suppress every ping" case.
+- Tests (`test_discord_webhook.py` +9, `test_discord_cli.py` +1): exact multipart form shapes for post/edit, the 11-file and 8-MiB `ValueError`s, text-only edit keeps attachments, drop-attachments sends `[]`, `allowed_mentions` present/absent on both clients. README capability matrix gains "Attach an image / file" + "Refresh that image in place" rows with a mechanism footnote. Not yet live-probed against `#bot-test` (the consumer's first real post will exercise it).
+
+Remaining: **Part 3** (custom OP sender on Discord) — probe-gated, not a weekly-report dependency.
+
 [weekly-discord-report]: ../../oa/marin-gcs-usage/specs/weekly-discord-report.md

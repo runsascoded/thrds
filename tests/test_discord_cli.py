@@ -703,3 +703,26 @@ def test_list_messages_editability_uses_real_bot_identity(monkeypatch):
         ('wh1', False),
     ]
     assert calls.count(('GET', '/users/@me')) == 1
+
+
+def test_bot_post_carries_allowed_mentions_when_set(monkeypatch):
+    # `allowed_mentions` (e.g. NO_MENTIONS) rides on the bot's `chat.postMessage`
+    # body when the client sets it, and is absent otherwise.
+    from thrds import NO_MENTIONS
+
+    posts: list[dict] = []
+
+    def curl(self, method, path, data=None):
+        if method == 'POST':
+            posts.append(data)
+            return {'id': 'm1'}
+        return None
+
+    monkeypatch.setattr(DiscordClient, '_curl', curl)
+    DiscordClient('bot-tok', 'CHAN', allowed_mentions=NO_MENTIONS).post('paths like @here')
+    DiscordClient('bot-tok', 'CHAN').post('paths like @here')
+
+    assert posts == [
+        {'content': 'paths like @here', 'allowed_mentions': {'parse': []}},
+        {'content': 'paths like @here'},
+    ]

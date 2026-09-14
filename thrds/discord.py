@@ -4,6 +4,8 @@ import json
 import random
 import subprocess
 import time
+from collections.abc import Sequence
+from pathlib import Path
 
 from .core import EditRateLimited, Message, SyncOptions, SyncResult, Thread, sync
 from .linked import (
@@ -16,6 +18,37 @@ from .linked import (
 
 DISCORD_API = "https://discord.com/api/v10"
 MESSAGE_LIMIT = 2000
+MAX_FILES = 10
+MAX_FILE_BYTES = 8 * 1024 * 1024  # Discord's default (non-boosted) per-file upload cap
+
+# A ready-made `allowed_mentions` that suppresses every ping — the safe default
+# for a bot-authored report whose text interpolates paths / names that may read
+# as `@here` / `@everyone` / `@role`. Pass to a client's `allowed_mentions=`.
+NO_MENTIONS = {"parse": []}
+
+
+def _files_form(body: dict, files: Sequence[Path | str]) -> list[tuple[str, str]]:
+    """Multipart form parts for a message with attachments.
+
+    Adds `attachments: [{"id", "filename"}]` to ``body`` (in order, so Discord
+    keeps the filenames and ordering), then returns the `-F` parts: one
+    `payload_json` carrying the JSON body, plus one `files[i]=@<path>` per file.
+    Enforces Discord's count/size limits with a clear `ValueError` (past the
+    server's own limit it would otherwise surface a terse `40005`)."""
+    paths = [Path(f) for f in files]
+    if len(paths) > MAX_FILES:
+        raise ValueError(f"Discord allows at most {MAX_FILES} files per message; got {len(paths)}")
+    for p in paths:
+        size = p.stat().st_size
+        if size > MAX_FILE_BYTES:
+            raise ValueError(
+                f"{p.name} is {size} bytes; exceeds Discord's default {MAX_FILE_BYTES}-byte "
+                f"(8 MiB) per-file upload limit"
+            )
+    body["attachments"] = [{"id": i, "filename": p.name} for i, p in enumerate(paths)]
+    return [("payload_json", json.dumps(body))] + [
+        (f"files[{i}]", f"@{p}") for i, p in enumerate(paths)
+    ]
 
 
 class _DiscordHTTP:
@@ -44,9 +77,12 @@ class _DiscordHTTP:
         url: str,
         data: dict | None = None,
         *,
+        form: list[tuple[str, str]] | None = None,
         headers: dict[str, str] | None = None,
         label: str | None = None,
     ) -> dict | list | None:
+        if data is not None and form is not None:
+            raise ValueError("_curl_raw: pass `data` (JSON) or `form` (multipart), not both")
         label = label or f"{method} {url}"
         last_err = ""
         for attempt in range(self._MAX_ATTEMPTS):
@@ -55,6 +91,11 @@ class _DiscordHTTP:
                 cmd += ["-H", f"{key}: {value}"]
             if data is not None:
                 cmd += ["-d", json.dumps(data)]
+            elif form is not None:
+                # Each part `-F name=value`; curl sets the multipart boundary +
+                # Content-Type (so the caller omits its JSON content-type header).
+                for name, value in form:
+                    cmd += ["-F", f"{name}={value}"]
             cmd.append(url)
             result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
@@ -135,10 +176,18 @@ class _DiscordHTTP:
 
 
 class DiscordClient(_DiscordHTTP):
-    def __init__(self, token: str, channel_id: str, guild_id: str | None = None):
+    def __init__(
+        self,
+        token: str,
+        channel_id: str,
+        guild_id: str | None = None,
+        *,
+        allowed_mentions: dict | None = None,
+    ):
         self.token = token if token.startswith("Bot ") else f"Bot {token}"
         self.channel_id = channel_id
         self.guild_id = guild_id
+        self.allowed_mentions = allowed_mentions
         self._active_thread_id: str | None = None
         self._suppress_embeds: bool = False
         self._bot_user_id: str | None = None
@@ -265,6 +314,8 @@ class DiscordClient(_DiscordHTTP):
         data: dict = {"content": content}
         if self._suppress_embeds:
             data["flags"] = 4
+        if self.allowed_mentions is not None:
+            data["allowed_mentions"] = self.allowed_mentions
         resp = self._curl("POST", f"/channels/{channel}/messages", data)
         return Message(id=resp["id"], content=content)
 
@@ -464,12 +515,14 @@ class DiscordWebhookClient(_DiscordHTTP):
         username: str | None = None,
         avatar_url: str | None = None,
         suppress_embeds: bool = False,
+        allowed_mentions: dict | None = None,
     ):
         self.webhook_url = webhook_url
         self.thread_id = thread_id
         self.username = username
         self.avatar_url = avatar_url
         self.suppress_embeds = suppress_embeds
+        self.allowed_mentions = allowed_mentions
 
     def _message_url(self, message_id: str) -> str:
         url = f"{self.webhook_url}/messages/{message_id}"
@@ -492,7 +545,14 @@ class DiscordWebhookClient(_DiscordHTTP):
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
+        files: Sequence[Path | str] = (),
     ) -> Message:
+        """Post a webhook message, optionally with file attachments.
+
+        ``files`` (e.g. a rendered PNG) upload as multipart alongside the text —
+        they render inline like any user attachment, and `suppress_embeds`
+        (which only hides link previews) leaves them visible. Empty ``files``
+        sends the byte-identical JSON request as before."""
         if icon_emoji is not None:
             raise NotImplementedError(
                 "Discord webhooks have no emoji avatar; pass a hosted image URL as "
@@ -513,19 +573,47 @@ class DiscordWebhookClient(_DiscordHTTP):
             data["avatar_url"] = resolved_avatar
         if self.suppress_embeds:
             data["flags"] = 4
-        resp = self._curl_raw("POST", url, data, headers=self._HEADERS, label="POST webhook message")
+        if self.allowed_mentions is not None:
+            data["allowed_mentions"] = self.allowed_mentions
+        if files:
+            resp = self._curl_raw("POST", url, form=_files_form(data, files), label="POST webhook message")
+        else:
+            resp = self._curl_raw("POST", url, data, headers=self._HEADERS, label="POST webhook message")
         return Message(id=resp["id"], content=content)
 
-    def edit(self, message_id: str, content: str) -> Message:
+    def edit(
+        self,
+        message_id: str,
+        content: str,
+        *,
+        files: Sequence[Path | str] = (),
+        keep_attachments: bool = True,
+    ) -> Message:
+        """Edit a webhook message's text, and optionally its attachments.
+
+        With no ``files``: ``keep_attachments`` (the default) leaves existing
+        attachments in place — a text-only edit must not strip an earlier image
+        — while ``False`` sends ``attachments: []`` to drop them. Passing
+        ``files`` replaces the attachment set with the new uploads."""
         if len(content) > MESSAGE_LIMIT:
             raise ValueError(f"Message exceeds Discord's {MESSAGE_LIMIT} char limit ({len(content)} chars)")
         data: dict = {"content": content}
         if self.suppress_embeds:
             data["flags"] = 4
-        self._curl_raw(
-            "PATCH", self._message_url(message_id), data,
-            headers=self._HEADERS, label=f"PATCH webhook message {message_id}",
-        )
+        if self.allowed_mentions is not None:
+            data["allowed_mentions"] = self.allowed_mentions
+        if files:
+            self._curl_raw(
+                "PATCH", self._message_url(message_id), form=_files_form(data, files),
+                label=f"PATCH webhook message {message_id}",
+            )
+        else:
+            if not keep_attachments:
+                data["attachments"] = []
+            self._curl_raw(
+                "PATCH", self._message_url(message_id), data,
+                headers=self._HEADERS, label=f"PATCH webhook message {message_id}",
+            )
         return Message(id=message_id, content=content)
 
     def delete(self, message_id: str) -> None:
