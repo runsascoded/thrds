@@ -14,6 +14,20 @@ from thrds import DiscordClient, DiscordHybridClient, DiscordWebhookClient, Msg,
 
 WEBHOOK = "https://discord.com/api/webhooks/123/faketoken"
 AV = "https://cdn.discordapp.com/embed/avatars/0.png"
+BOT_ID = "700700700"  # this bot's own user id (`GET /users/@me`)
+
+
+def _own(msg: dict) -> dict:
+    """Stamp a canned message as authored by us unless it's already marked.
+
+    Real Discord messages always carry `author`; these fixtures omit it, so a
+    message with neither `author` nor `webhook_id` is one the bot posted (the
+    common case in these single-identity threads) — stamp `author.id == BOT_ID`
+    so `_authored_by_us` marks it editable. A `webhook_id` (webhook reply) or an
+    explicit foreign `author` is left as-is."""
+    if "author" not in msg and "webhook_id" not in msg:
+        return {**msg, "author": {"id": BOT_ID}}
+    return msg
 
 
 class _BotRecorder:
@@ -21,17 +35,21 @@ class _BotRecorder:
 
     POSTs get ids `m1`, `m2`, …; a thread-create returns `thread-1`; a list GET
     returns ``thread_messages`` (raw dicts, newest-first — `_list_raw` reverses);
-    a single-message GET returns ``op_message``.
+    a single-message GET returns ``op_message``; `GET /users/@me` returns this
+    bot's id. Canned messages are stamped as bot-authored (`_own`) unless they
+    already carry a `webhook_id` or an explicit `author`.
     """
     def __init__(self, thread_messages=None, op_message=None):
         self.calls: list[tuple[str, str, dict | None]] = []
         self._n = 0
-        self._thread_messages = thread_messages or []
-        self._op_message = op_message
+        self._thread_messages = [_own(m) for m in (thread_messages or [])]
+        self._op_message = _own(op_message) if op_message is not None else None
 
     def __call__(self, method, path, data=None):
         self.calls.append((method, path, data))
         if method == "GET":
+            if path == "/users/@me":
+                return {"id": BOT_ID}
             if "/messages/" in path:
                 return self._op_message
             return self._thread_messages
@@ -60,6 +78,9 @@ class _WebhookRecorder:
 
 def _hybrid(monkeypatch, bot_rec, hook_rec):
     monkeypatch.setattr(DiscordClient, "_curl", lambda self, m, p, data=None: bot_rec(m, p, data))
+    # Pin the bot identity so classification doesn't emit a `GET /users/@me`
+    # into the recorded call sequence (its resolution is covered separately).
+    monkeypatch.setattr(DiscordClient, "bot_user_id", property(lambda self: BOT_ID))
     monkeypatch.setattr(
         DiscordWebhookClient, "_curl_raw",
         lambda self, method, url, data=None, *, headers=None, label=None: hook_rec(
@@ -250,3 +271,28 @@ def test_repush_deletes_each_reply_via_its_author(monkeypatch):
     assert hook_rec.calls == [
         ("DELETE", f"{WEBHOOK}/messages/w1?thread_id=thread-1", None),
     ]
+
+
+def test_repush_preserves_a_foreign_human_reply(monkeypatch):
+    # A human reply (explicit foreign author, no webhook_id) sits between our
+    # OP and our webhook reply. Desired keeps OP + reply; the human message is
+    # non-editable, so `core.sync` preserves it — never edited, never deleted,
+    # and it doesn't consume a desired slot.
+    bot_rec, hook_rec = _repush_recorders([
+        {"id": "h1", "content": "a human chimed in", "type": 0, "author": {"id": "999human"}},
+        {"id": "w1", "content": "reply A", "type": 0, "webhook_id": "wh"},
+    ])
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    hybrid.sync(Thread(messages=[
+        "OP body",
+        Msg("reply A", username="Alice", icon_url=AV),
+    ]), thread_id="thread-1")
+
+    # Bot only reads (list + parent OP); nothing touches h1, and the unchanged
+    # webhook reply is a SKIP, so no writes on either transport.
+    assert bot_rec.calls == [
+        ("GET", "/channels/thread-1/messages?limit=100", None),
+        ("GET", "/channels/CHAN/messages/thread-1", None),
+    ]
+    assert hook_rec.calls == []

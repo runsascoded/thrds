@@ -193,6 +193,21 @@ def test_discord_verb_on_slack_session_errors_clearly(in_tmp, monkeypatch):
 # --- discord push / thread (bot delivery) ---
 
 
+BOT_ID = '700700700'  # this bot's own user id (`GET /users/@me`)
+
+
+def _own(msg: dict) -> dict:
+    """Stamp a canned message as bot-authored unless already marked.
+
+    Real Discord messages always carry `author`; these fixtures omit it, so a
+    message with neither `author` nor `webhook_id` is one the bot posted —
+    stamp `author.id == BOT_ID` so `_authored_by_us` marks it editable. An
+    explicit foreign `author` (or a `webhook_id`) is left as-is."""
+    if 'author' not in msg and 'webhook_id' not in msg:
+        return {**msg, 'author': {'id': BOT_ID}}
+    return msg
+
+
 class _CurlRecorder:
     """Stub for `DiscordClient._curl`: records every call and returns canned
     responses.
@@ -202,7 +217,11 @@ class _CurlRecorder:
     - a list GET (``…/messages?limit=…``) returns ``thread_messages``
     - a single-message GET (``…/messages/{id}``, used to fetch the parent-channel
       OP during a thread reconcile) returns ``op_message``
+    - ``GET /users/@me`` returns this bot's id (identity for editability)
     - PATCH / DELETE return None (edit/delete ignore the response body)
+
+    Canned messages are stamped bot-authored (`_own`) unless they carry a
+    `webhook_id` or an explicit `author`.
     """
     def __init__(
         self,
@@ -211,12 +230,14 @@ class _CurlRecorder:
     ):
         self.calls: list[tuple[str, str, dict | None]] = []
         self._n = 0
-        self._thread_messages = thread_messages or []
-        self._op_message = op_message
+        self._thread_messages = [_own(m) for m in (thread_messages or [])]
+        self._op_message = _own(op_message) if op_message is not None else None
 
     def __call__(self, method: str, path: str, data: dict | None = None):
         self.calls.append((method, path, data))
         if method == 'GET':
+            if path == '/users/@me':
+                return {'id': BOT_ID}
             # `/…/messages/{id}` (single fetch) vs `/…/messages?limit=…` (list).
             if '/messages/' in path:
                 return self._op_message
@@ -227,6 +248,14 @@ class _CurlRecorder:
             self._n += 1
             return {'id': f'm{self._n}'}
         return None
+
+
+def _install_curl(monkeypatch, rec):
+    """Route `DiscordClient._curl` to ``rec`` and pin the bot identity, so
+    editability classification doesn't emit a `GET /users/@me` into the recorded
+    call sequence (its real resolution is covered by a separate unit test)."""
+    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    monkeypatch.setattr(DiscordClient, 'bot_user_id', property(lambda self: BOT_ID))
 
 
 def _set_discord_env(monkeypatch, token='bot-tok', channel='CHAN', guild='GUILD'):
@@ -244,7 +273,7 @@ def test_discord_push_fresh_creates_op_thread_and_replies(in_tmp, monkeypatch):
     session = _init_discord(in_tmp, monkeypatch, doc_text="OP body\n\n+++\n\nreply one\n")
     _set_discord_env(monkeypatch)
     rec = _CurlRecorder()
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    _install_curl(monkeypatch, rec)
 
     result = CliRunner().invoke(cli, ['discord', 'push', '-N', 'My Thread'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -271,7 +300,7 @@ def test_discord_push_lone_op_opens_no_thread(in_tmp, monkeypatch):
     session = _init_discord(in_tmp, monkeypatch, doc_text="just the OP, no replies\n")
     _set_discord_env(monkeypatch)
     rec = _CurlRecorder()
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    _install_curl(monkeypatch, rec)
 
     result = CliRunner().invoke(cli, ['discord', 'push'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -286,7 +315,7 @@ def test_discord_push_dry_run_posts_nothing_and_needs_no_token(in_tmp, monkeypat
     session = _init_discord(in_tmp, monkeypatch, doc_text="OP body\n\n+++\n\nreply one\n")
     _set_discord_env(monkeypatch, token=None)  # no credentials — dry run makes no calls
     rec = _CurlRecorder()
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    _install_curl(monkeypatch, rec)
 
     result = CliRunner().invoke(cli, ['discord', 'push', '-n', '-N', 'My Thread'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -318,7 +347,7 @@ def test_discord_push_repush_edits_changed_reply_in_thread(in_tmp, monkeypatch):
         thread_messages=[{'id': 'r1', 'content': 'reply OLD', 'type': 0}],
         op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
     )
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    _install_curl(monkeypatch, rec)
 
     result = CliRunner().invoke(cli, ['discord', 'push'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -334,6 +363,36 @@ def test_discord_push_repush_edits_changed_reply_in_thread(in_tmp, monkeypatch):
     assert (state.discord_op_id, state.discord_thread_id) == ('op1', 'op1')
 
 
+def test_discord_push_repush_preserves_a_foreign_human_reply(in_tmp, monkeypatch):
+    # Someone replied in our thread. On re-push the doc has only our OP + reply,
+    # so a naive reconcile (every message editable) would DELETE the human's
+    # message. It's foreign (author != our bot, no webhook_id), so it's
+    # non-editable and preserved: the reconcile sees only our OP + reply, both
+    # unchanged, and touches nothing.
+    session = _init_discord(in_tmp, monkeypatch, doc_text="OP body\n\n+++\n\nreply one\n")
+    _set_discord_env(monkeypatch)
+    _seed_pushed_thread(session)
+    rec = _CurlRecorder(
+        # newest-first (`_list_raw` reverses to chronological): human reply is
+        # newer than our reply `r1`.
+        thread_messages=[
+            {'id': 'h1', 'content': 'a person chimed in', 'type': 0, 'author': {'id': '999human'}},
+            {'id': 'r1', 'content': 'reply one', 'type': 0},
+        ],
+        op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
+    )
+    _install_curl(monkeypatch, rec)
+
+    result = CliRunner().invoke(cli, ['discord', 'push'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # Only reads: the human reply is never edited or deleted, and our own
+    # messages are unchanged (SKIP), so no PATCH/DELETE at all.
+    assert rec.calls == [
+        ('GET', '/channels/op1/messages?limit=100', None),
+        ('GET', '/channels/CHAN/messages/op1', None),
+    ]
+
+
 def test_discord_push_repush_edits_op_via_parent_channel(in_tmp, monkeypatch):
     # The bug the live probe found: the OP lives in the parent channel but
     # shares the thread's id, so `PATCH /channels/{thread}/messages/{op}` is a
@@ -345,7 +404,7 @@ def test_discord_push_repush_edits_op_via_parent_channel(in_tmp, monkeypatch):
         thread_messages=[{'id': 'r1', 'content': 'reply one', 'type': 0}],
         op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
     )
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    _install_curl(monkeypatch, rec)
 
     result = CliRunner().invoke(cli, ['discord', 'push'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -364,7 +423,7 @@ def test_discord_push_repush_posts_new_reply_into_thread(in_tmp, monkeypatch):
         thread_messages=[{'id': 'r1', 'content': 'reply one', 'type': 0}],
         op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
     )
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    _install_curl(monkeypatch, rec)
 
     result = CliRunner().invoke(cli, ['discord', 'push'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -387,7 +446,7 @@ def test_discord_push_repush_deletes_removed_reply_from_thread(in_tmp, monkeypat
         ],
         op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
     )
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    _install_curl(monkeypatch, rec)
 
     result = CliRunner().invoke(cli, ['discord', 'push'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -406,7 +465,7 @@ def test_discord_push_repush_noop_writes_nothing(in_tmp, monkeypatch):
         thread_messages=[{'id': 'r1', 'content': 'reply one', 'type': 0}],
         op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
     )
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    _install_curl(monkeypatch, rec)
 
     result = CliRunner().invoke(cli, ['discord', 'push'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -425,7 +484,7 @@ def test_discord_push_repush_dry_run_reads_but_writes_nothing(in_tmp, monkeypatc
         thread_messages=[{'id': 'r1', 'content': 'reply one', 'type': 0}],
         op_message={'id': 'op1', 'content': 'OP body', 'type': 0},
     )
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    _install_curl(monkeypatch, rec)
 
     result = CliRunner().invoke(cli, ['discord', 'push', '-n'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -465,7 +524,7 @@ def test_discord_push_repush_lone_op_edits_in_place(in_tmp, monkeypatch):
         {'id': 'other', 'content': 'unrelated', 'type': 0},
         {'id': 'op1', 'content': 'OP body', 'type': 0},
     ])
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    _install_curl(monkeypatch, rec)
 
     result = CliRunner().invoke(cli, ['discord', 'push'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -527,7 +586,7 @@ def test_discord_push_per_sender_routes_replies_through_webhook(in_tmp, monkeypa
     monkeypatch.setenv(DISCORD_WEBHOOK_ENV, _WEBHOOK)
     bot_rec = _CurlRecorder()
     hook_rec = _WebhookRecorder()
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: bot_rec(m, p, data))
+    _install_curl(monkeypatch, bot_rec)
     monkeypatch.setattr(
         DiscordWebhookClient, '_curl_raw',
         lambda self, method, url, data=None, *, headers=None, label=None: hook_rec(
@@ -602,7 +661,7 @@ def test_discord_thread_dumps_messages(in_tmp, monkeypatch):
         ],
         op_message={'id': 'thread-1', 'content': 'the OP', 'type': 0},
     )
-    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: rec(m, p, data))
+    _install_curl(monkeypatch, rec)
 
     result = CliRunner().invoke(cli, ['discord', 'thread'])
     assert result.exit_code == 0, (result.output, result.stderr)
@@ -611,3 +670,36 @@ def test_discord_thread_dumps_messages(in_tmp, monkeypatch):
         ('GET', '/channels/CHAN/messages/thread-1', None),
     ]
     assert result.stdout == 'thread-1\tthe OP\nr1\tfirst\nr2\tsecond\n'
+
+
+def test_list_messages_editability_uses_real_bot_identity(monkeypatch):
+    # The real `bot_user_id` path (`GET /users/@me`) — no identity pin here.
+    # Ours (the OP + a bot-authored reply) are editable; a human reply and a
+    # webhook post are not, and the id is resolved once and cached.
+    calls: list[tuple[str, str]] = []
+
+    def curl(self, method, path, data=None):
+        calls.append((method, path))
+        if path == '/users/@me':
+            return {'id': BOT_ID}
+        if path == '/channels/op1/messages?limit=100':
+            return [  # newest-first; `_list_raw` reverses to chronological
+                {'id': 'wh1', 'content': 'via webhook', 'type': 0, 'webhook_id': '55'},
+                {'id': 'h1', 'content': 'a human', 'type': 0, 'author': {'id': 'someone-else'}},
+                {'id': 'r1', 'content': 'our reply', 'type': 0, 'author': {'id': BOT_ID}},
+            ]
+        if path == '/channels/CHAN/messages/op1':
+            return {'id': 'op1', 'content': 'OP', 'type': 0, 'author': {'id': BOT_ID}}
+        return None
+
+    monkeypatch.setattr(DiscordClient, '_curl', curl)
+    client = DiscordClient('bot-tok', 'CHAN', 'GUILD')
+    msgs = client.list_messages('op1')
+
+    assert [(m.id, m.editable) for m in msgs] == [
+        ('op1', True),
+        ('r1', True),
+        ('h1', False),
+        ('wh1', False),
+    ]
+    assert calls.count(('GET', '/users/@me')) == 1

@@ -101,12 +101,12 @@ Part 1 landed in two commits (`e48eeed` seam + raise; `d3daff8` CLI):
 **Still open (this spec stays out of `specs/done/`):**
 
 1. ~~**Re-push / edit.**~~ **Done (2026-09-13)** — see "Implemented" below. `push` now reconciles a session that already has a recorded OP.
-2. **`list_messages` foreign-author gap** (logged above): every type-0 message is marked `editable=True`, so mixed-author Discord threads aren't safe to reconcile yet.
+2. ~~**`list_messages` foreign-author gap**~~ **Done (2026-09-14)** — see "Implemented: foreign-author editability" below. `list_messages` now marks each message `editable` by authorship, so a human (or other-app) reply in a thrds thread is preserved rather than reconciled.
 3. ~~**Part 2** (webhook transport).~~ **Done (2026-09-13)** — `DiscordWebhookClient` built + verified live; see "Implemented: DiscordWebhookClient" below.
-4. **discord-agent inversion** — decided (invert), unstarted; a separate PR in that repo now that re-push/edit has landed (the digest edits its OP in place, so it needed #1).
+4. **discord-agent inversion** — decided (invert), spec written (2026-09-14) at `discord-agent/specs/thrds-transport-inversion.md` for that repo's own session to implement; a separate PR in that repo now that re-push/edit has landed (the digest edits its OP in place, so it needed #1).
 5. **Hybrid orchestration + transport policy.** **Decided policy: always require a bot; the webhook is a pure additive per-sender layer on top of it — no webhook-only state.** The bot is needed for `list`/reconcile regardless (the premise of declarative sync), and custom sender is the only thing the webhook adds, so making it optional-on-top keeps two states, not three, and sidesteps an id-tracked webhook-only reconcile model entirely. Custom sender without a webhook raises descriptively (already true at the primitive level: `DiscordClient.post` raises on a sender override and points at the webhook).
    - **Library composite: done (2026-09-13)** — see "Implemented: DiscordHybridClient" below. This is the whole per-sender path at parity with Slack: per-message sender is a **programmatic `Msg` API on every platform**, driven from app code, not markdown. The motivating Slack case (the GCS-usage digest, `specs/per-message-sender.md`) is built in `marin-gcs-usage` as `Thread([Msg(...), …])` and `sync`'d; a Discord per-sender digest now builds the same `Thread` and hands it to `DiscordHybridClient` — no CLI or doc work needed for that path.
-   - **CLI (Discord): done (2026-09-14)** via the doc per-sender syntax — see `specs/doc-sender-syntax.md`. `discord push` of a doc with `+++ as <name>` replies routes them through `DiscordHybridClient`, requiring `THRDS_DISCORD_WEBHOOK`; a custom OP sender is rejected. (Slack's CLI push per-sender is the remaining piece there, deferred; Slack per-sender is already available programmatically.)
+   - **CLI (Discord): done (2026-09-14)** via the doc per-sender syntax — see `specs/done/doc-sender-syntax.md`. `discord push` of a doc with `+++ as <name>` replies routes them through `DiscordHybridClient`, requiring `THRDS_DISCORD_WEBHOOK`; a custom OP sender is rejected. **Slack's CLI push per-sender is also done now (2026-09-14)** — parity across both platforms; see `specs/done/doc-sender-syntax.md`.
 
 ## Live findings (2026-09-13): thread-hybrid + reconcile semantics
 
@@ -141,7 +141,7 @@ Verified against a dedicated dev bot (`thrds-dev`) in a private server (`rbw dev
 - CLI: re-push points `sync` at `discord_thread_id` (thread case) or, for a lone OP, at the base channel scoped by `only_ids={op_id}` (in-place OP edit; growing a lone OP into a thread mid-life is refused with a clear message). A re-push dry-run reads the live thread to build the plan, so it requires a token (a fresh dry-run still doesn't).
 - Verified live end-to-end against `#bot-test` (`tmp/discord_reconcile_probe.py`): fresh → edit-OP-via-parent + edit-reply + skip → add → delete, each read back exactly. 8 new CLI tests assert exact `_curl` call sequences (OP edit → parent, reply edit/post/delete → thread); full suite 1416 passed.
 
-Remaining: #2 (foreign-author gap), #4 (discord-agent inversion, now unblocked).
+Remaining: #4 (discord-agent inversion, now unblocked). (#2 foreign-author gap now done — see below.)
 
 ## Implemented (2026-09-13): `DiscordWebhookClient` (open item #3)
 
@@ -164,7 +164,16 @@ The composite that makes a threaded per-contributor digest a single declarative 
 - Known edge, documented: a reply bot-authored on an earlier push can't be re-attributed to a sender on re-push (sender is fixed at post time everywhere) — only its content edits.
 - Verified live against `#bot-test` (`tmp/discord_hybrid_probe.py`): fresh push (bot OP+thread, webhook Alice/Bob) then a re-push (`[skip, edit, skip, post]`) that webhook-edits Alice and webhook-adds Carol — read back exact. 8 new unit tests assert the exact bot-vs-webhook call split across fresh/edit/add/delete/OP-edit; README library example + capability notes updated. Full suite green.
 
-Remaining: #2 (foreign-author gap), #4 (discord-agent inversion, now unblocked), #5's **CLI half** (blocked on doc per-sender syntax — see the open-item note above).
+Remaining: #4 (discord-agent inversion, now unblocked — spec handed to that repo). #5's CLI half is done (both platforms). #2 (foreign-author gap) is done — see below.
+
+## Implemented (2026-09-14): foreign-author editability (open item #2)
+
+`DiscordClient.list_messages` marked every message `editable=True`, so a reconcile against a thread real people post in would edit or delete a human's reply. Now it classifies by authorship, the Discord counterpart to Slack's `editable=(m.user == us or m.bot_id == us)`:
+
+- `DiscordClient.bot_user_id` — lazy `GET /users/@me`, cached (mirrors `SlackClient.bot_ids`).
+- `_authored_by_us(raw)` — ours iff no `webhook_id` and `author.id == bot_user_id`. A human, another app/bot, or a webhook post (not editable via the bot token) → not ours. `list_messages` sets `editable` from it.
+- `DiscordHybridClient._is_ours` widens "ours" to include its own webhook's replies (`webhook_id` present → routed to the webhook on edit/delete); a foreign human reply (no `webhook_id`, foreign author) stays non-editable and is preserved by `core.sync`.
+- Tests: a bot-only re-push preserves a human reply (no edit/delete); the hybrid preserves a human reply between the OP and a webhook reply; a unit test drives the real `bot_user_id` resolution + caching and asserts the editable split (OP/bot-reply editable; human/webhook not). Recorders stamp canned messages bot-authored unless marked, and pin the identity so classification doesn't perturb the exact call-sequence assertions.
 
 [discord.py]: ../thrds/discord.py
 [discord-agent]: https://github.com/Open-Athena/discord-agent

@@ -141,6 +141,34 @@ class DiscordClient(_DiscordHTTP):
         self.guild_id = guild_id
         self._active_thread_id: str | None = None
         self._suppress_embeds: bool = False
+        self._bot_user_id: str | None = None
+
+    @property
+    def bot_user_id(self) -> str:
+        """This bot's own user id (`GET /users/@me`), lazily resolved and cached.
+
+        Used to tell our messages (editable) apart from foreign ones (humans,
+        other apps) when listing a thread — the Discord counterpart to
+        `SlackClient.bot_ids`. Resolved once per client and memoized.
+        """
+        if self._bot_user_id is None:
+            me = self._curl("GET", "/users/@me")
+            self._bot_user_id = str(me["id"])
+        return self._bot_user_id
+
+    def _authored_by_us(self, raw: dict) -> bool:
+        """Whether a raw message dict is ours to edit/delete (vs. preserved).
+
+        Ours = posted by this bot. Foreign — a human, another app/bot, or a
+        webhook post (a webhook message can't be edited via the bot token) —
+        returns False, so `core.sync` preserves it in place rather than
+        reconciling it, exactly as `SlackClient` does with `editable=False`.
+        `DiscordHybridClient` widens "ours" to include its own webhook's
+        replies (which it routes to the webhook transport)."""
+        if raw.get("webhook_id") is not None:
+            return False
+        author = raw.get("author") or {}
+        return str(author.get("id")) == self.bot_user_id
 
     def _curl(
         self,
@@ -203,7 +231,7 @@ class DiscordClient(_DiscordHTTP):
 
     def list_messages(self, thread_id: str) -> list[Message]:
         return [
-            Message(id=m["id"], content=m.get("content", ""))
+            Message(id=m["id"], content=m.get("content", ""), editable=self._authored_by_us(m))
             for m in self._list_raw(thread_id)
         ]
 
@@ -544,10 +572,19 @@ class DiscordHybridClient:
     def guild_id(self) -> str | None:
         return self.bot.guild_id
 
+    def _is_ours(self, raw: dict) -> bool:
+        """Ours to reconcile: a webhook reply (routed to the webhook on edit/
+        delete) or a bot-authored message. Foreign (human/other-app) → False,
+        so `core.sync` preserves it in place."""
+        return raw.get("webhook_id") is not None or self.bot._authored_by_us(raw)
+
     def list_messages(self, thread_id: str) -> list[Message]:
         raw = self.bot._list_raw(thread_id)
         self._webhook_ids = {m["id"] for m in raw if m.get("webhook_id")}
-        return [Message(id=m["id"], content=m.get("content", "")) for m in raw]
+        return [
+            Message(id=m["id"], content=m.get("content", ""), editable=self._is_ours(m))
+            for m in raw
+        ]
 
     def open_thread(self, op_id: str, name: str | None) -> str:
         tid = self.bot.open_thread(op_id, name)
