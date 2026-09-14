@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
@@ -29,8 +30,11 @@ from .imageblock import (
     bust_token,
     from_block as image_from_block,
     image_line,
+    is_upload_ref,
+    slack_file_block,
     split_trailing_images,
     to_block as image_to_block,
+    upload_sha,
 )
 from .linked import (
     LinkedSyncResult,
@@ -77,29 +81,12 @@ SLACK_MESSAGE_LIMIT = 4000
 SLACK_SECTION_LIMIT = 3000
 
 
-def _fold_images_into_content(content: str, images: 'Sequence[Image]') -> str:
-    """Append unified `Image`s to ``content`` as trailing ``![alt](url){bust?}``
-    lines — Slack's canonical, idempotent image form.
+_UPLOAD_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif'}
 
-    Slack carries images in message content (lifted to image blocks, and
-    reconstructed there on read-back), so folding `Msg.images` into content
-    routes them through that one proven path: a converge stays a no-op because
-    the desired content matches the read-back. URL-first — an `Image` with only
-    a local ``path`` **raises** (host it and pass a `url`, or await the deferred
-    lazy-upload bridge; see `specs/unified-image-attachments.md`)."""
-    if not images:
-        return content
-    lines = []
-    for im in images:
-        if im.url is None:
-            raise NotImplementedError(
-                "Slack posts images by URL, not by uploading bytes: give the "
-                "`Image` a hosted `url` (a local `path` alone can't be posted to "
-                "Slack). See specs/unified-image-attachments.md."
-            )
-        lines.append(image_line(ImageRef(alt=im.alt, url=im.url, bust=im.bust)))
-    extra = "\n".join(lines)
-    return f"{content}\n{extra}" if content else extra
+
+def _image_sha(data: bytes) -> str:
+    """16-hex-char content hash — the identity of an uploaded image."""
+    return hashlib.sha256(data).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -217,6 +204,11 @@ class SlackClient:
         self._bot_ids: tuple[str, str | None] | None = None
         self._user_name_cache: dict[str, str] = {}
         self._channels_by_name_cache: dict[str, str] | None = None
+        # Lazy-upload bookkeeping (`specs/slack-lazy-image-upload.md`), reset per
+        # `sync`: `sha → local path` staged by the image fold for `post`/`edit`
+        # to upload; `sha → file_id` de-dups uploads within one push.
+        self._pending_uploads: dict[str, Path] = {}
+        self._uploaded_file_ids: dict[str, str] = {}
 
     @property
     def bot_ids(self) -> tuple[str, str | None]:
@@ -452,7 +444,7 @@ class SlackClient:
         ``text`` (no ``to_slack()`` md→mrkdwn conversion) — for consumers
         already emitting Slack mrkdwn. See `specs/done/raw-mrkdwn-passthrough.md`.
         """
-        content = _fold_images_into_content(content, images)
+        content = self._fold_images_into_content(content, images)
         if len(content) > SLACK_MESSAGE_LIMIT:
             raise ValueError(
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
@@ -529,7 +521,7 @@ class SlackClient:
         is sent as wire ``text`` verbatim (no ``to_slack()`` conversion).
         See `specs/done/raw-mrkdwn-passthrough.md`.
         """
-        content = _fold_images_into_content(content, images)
+        content = self._fold_images_into_content(content, images)
         if len(content) > SLACK_MESSAGE_LIMIT:
             raise ValueError(
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
@@ -597,6 +589,61 @@ class SlackClient:
             return
         data["text"] = f"{wire}\n\n{footer}"
 
+    def _fold_images_into_content(self, content: str, images: 'Sequence[Image]') -> str:
+        """Append `Image`s to ``content`` as trailing image lines — Slack's
+        canonical, idempotent form (image blocks that round-trip on read-back).
+
+        A ``url`` image folds to ``![alt](url){bust?}``. A local-``path`` image
+        (no url) is content-addressed: its bytes are hashed, staged for upload
+        (`_pending_uploads`), and folded as ``![alt](slackfile:<sha>)`` — so a
+        bytes change is a content diff (re-upload iff changed) and an unchanged
+        image is a no-op converge. ``url`` wins when an image carries both."""
+        if not images:
+            return content
+        lines = []
+        for im in images:
+            if im.url is not None:
+                lines.append(image_line(ImageRef(alt=im.alt, url=im.url, bust=im.bust)))
+                continue
+            path = Path(im.path)
+            if path.suffix.lower() not in _UPLOAD_SUFFIXES:
+                raise ValueError(
+                    f"Slack image upload supports {sorted(_UPLOAD_SUFFIXES)} only; "
+                    f"got {path.name!r}"
+                )
+            sha = _image_sha(path.read_bytes())
+            self._pending_uploads[sha] = path
+            lines.append(image_line(ImageRef(alt=im.alt, url=f"slackfile:{sha}")))
+        # `\n\n` between body and each image line — matches `_message_markdown`'s
+        # read-back reconstruction, so a converge is a no-op.
+        extra = "\n\n".join(lines)
+        return f"{content}\n\n{extra}" if content else extra
+
+    def _upload_file(self, path: Path) -> str:
+        """Upload ``path`` to Slack and return its ``file_id`` (three-step
+        external-upload flow). The file is created workspace-side owned by the
+        bot, not posted to any channel — an image block surfaces it by id."""
+        data = path.read_bytes()
+        up = self._request(
+            "files.getUploadURLExternal",
+            {"filename": path.name, "length": str(len(data))},
+            method="GET",
+        )
+        req = urllib.request.Request(up["upload_url"], data=data, method="POST")
+        with urllib.request.urlopen(req) as resp:
+            resp.read()
+        self._request(
+            "files.completeUploadExternal",
+            {"files": [{"id": up["file_id"]}]},
+        )
+        return up["file_id"]
+
+    def _upload_cached(self, sha: str) -> str:
+        """`file_id` for the staged image ``sha``, uploading once per push."""
+        if sha not in self._uploaded_file_ids:
+            self._uploaded_file_ids[sha] = self._upload_file(self._pending_uploads[sha])
+        return self._uploaded_file_ids[sha]
+
     def _lift_image_blocks(self, data: dict, images: list[ImageRef]) -> None:
         """Render trailing `![alt](url)` doc lines as Block Kit `image` blocks.
 
@@ -627,7 +674,11 @@ class SlackClient:
                 f"shorten the body or drop the image lines"
             )
         token = bust_token()
-        img_blocks = [image_to_block(ref, token) for ref in images]
+        img_blocks = [
+            slack_file_block(ref, self._upload_cached(upload_sha(ref)))
+            if is_upload_ref(ref) else image_to_block(ref, token)
+            for ref in images
+        ]
         existing = data.get("blocks")
         if existing:
             head = [b for b in existing if b.get("type") != "context"]
@@ -693,13 +744,16 @@ class SlackClient:
         """
         self._suppress_unfurls = suppress_unfurls
         self._metadata_by_content = metadata
+        # Fresh per-push upload bookkeeping (staged paths + upload de-dup cache).
+        self._pending_uploads = {}
+        self._uploaded_file_ids = {}
         # Slack carries images in content (image blocks that round-trip on
         # read-back), so fold any `Msg.images` into content up front: the
         # reconcile then diffs content that matches the read-back and stays
         # idempotent. Bare-str and image-free messages are untouched.
         if any(isinstance(m, Msg) and m.images for m in thread.messages):
             thread = replace(thread, messages=[
-                replace(m, content=_fold_images_into_content(m.content, m.images), images=())
+                replace(m, content=self._fold_images_into_content(m.content, m.images), images=())
                 if isinstance(m, Msg) and m.images else m
                 for m in thread.messages
             ])

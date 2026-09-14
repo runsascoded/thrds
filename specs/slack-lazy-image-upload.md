@@ -43,6 +43,16 @@ A URL image round-trips through content (`![alt](url)` ⇄ `image_url` ⇄ recon
 2. **`Image` with both `url` and `path` on Slack** — prefer `url` (no upload; keeps the plain content round-trip). `path` is the fallback for when you have no URL.
 3. **Format guard** — raise on a non-png/jpg/gif `path` (Slack rejects others) with a clear message.
 
-## Not in scope
+## Implemented (2026-09-14)
 
-`files.sharedPublicURL` / public files (unneeded thanks to `slack_file`); animated/large-file tiers beyond Slack's defaults.
+Stateless content-hash convention (no `thrds.yml` store needed):
+
+- **`imageblock`**: an uploaded image is the marker `![alt](slackfile:<sha16>)` (sha = first 16 hex of the file's sha256). `slack_file_block(ref, file_id)` builds `{type: image, slack_file: {id}, alt_text: "<alt>⁣slackfile:<sha>"}`; `from_block` keys off the `alt_text` sha tag (robust to whether Slack hands back `slack_file` or a resolved `image_url`) to rebuild the same marker with a clean alt. `is_upload_ref` / `upload_sha` helpers.
+- **`SlackClient`**: `_fold_images_into_content` hashes a `path` image, stages `sha → path` (`_pending_uploads`), folds the marker (`\n\n`-joined to match read-back); `_upload_file` runs `getUploadURLExternal` → raw PUT → `completeUploadExternal`; `_upload_cached` de-dups per push (`_uploaded_file_ids`); `_lift_image_blocks` builds a `slack_file` block for an upload ref, a URL block otherwise. A non-png/jpg/jpeg/gif `path` raises. Both stashes reset per `sync`.
+- **Idempotency**: bytes unchanged → same sha → marker matches read-back → SKIP (no upload). Bytes changed → new sha → EDIT → upload. Tests in `test_slack_upload.py` (upload flow + block shape + round-trip, per-push de-dup, unchanged re-push is a SKIP with no upload, non-image suffix guard).
+- **Gap (accepted)**: a **text-only** edit (image bytes unchanged) still re-uploads, since it re-enters `post`/`edit` and this build is stateless. The `sha → file_id` store (below) is the fix — unneeded for the daily-refresh consumer (text and plot both change), and a caller needing zero redundant uploads can host a `url` + `{bust}` instead.
+
+## Not in scope / deferred
+
+- **`sha → file_id` store in `thrds.yml`** — the optional optimization that would also skip re-upload on a *text-only* edit (see the accepted gap). Deferred; not needed by any current consumer.
+- `files.sharedPublicURL` / public files (unneeded thanks to `slack_file`); animated/large-file tiers beyond Slack's defaults.

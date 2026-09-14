@@ -75,14 +75,6 @@ def test_post_images_kwarg_bust_folds_with_marker():
     assert block_a.keys() == block_b.keys()
 
 
-def test_post_images_path_only_raises():
-    from thrds.core import Image
-
-    client = _FakeSlackClient()
-    with pytest.raises(NotImplementedError, match="a hosted `url`"):
-        client.post('body', images=[Image(path='/x/p.png')])
-
-
 def test_post_body_still_converted_to_mrkdwn():
     client = _FakeSlackClient()
     client.post(f'**August** usage\n\n![card]({CARD})')

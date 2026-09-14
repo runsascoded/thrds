@@ -32,6 +32,36 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 BUST_PARAM = 'thrds_bust'
 
+# An uploaded (local-bytes) image is marked in content as `![alt](slackfile:<sha>)`
+# — the sha is the file's content hash, so a bytes change shows as a content diff
+# (re-upload iff changed; `specs/slack-lazy-image-upload.md`). The live block
+# stores that sha in `alt_text` after an invisible U+2063 separator, so read-back
+# reconstructs the same marker without any persisted state.
+UPLOAD_SCHEME = 'slackfile:'
+_ALT_SHA_SEP = '⁣' + UPLOAD_SCHEME
+
+
+def is_upload_ref(ref: 'ImageRef') -> bool:
+    """Whether ``ref`` is an uploaded-file image (`slackfile:<sha>`) vs a URL."""
+    return ref.url.startswith(UPLOAD_SCHEME)
+
+
+def upload_sha(ref: 'ImageRef') -> str:
+    """The content sha of an uploaded-file `ImageRef` (its `slackfile:<sha>` url)."""
+    return ref.url[len(UPLOAD_SCHEME):]
+
+
+def slack_file_block(ref: 'ImageRef', file_id: str) -> dict:
+    """`ImageRef` (an uploaded image) + its Slack ``file_id`` → an ``image`` block
+    that references the file by id (no public URL). The content sha rides in
+    ``alt_text`` after an invisible separator so `from_block` can rebuild the
+    `![alt](slackfile:<sha>)` marker on read-back."""
+    return {
+        'type': 'image',
+        'slack_file': {'id': file_id},
+        'alt_text': f'{ref.alt}{_ALT_SHA_SEP}{upload_sha(ref)}',
+    }
+
 # `![alt](url)` alone on its line, optional `{bust}` suffix. Alt may be empty
 # (warned at block-build time); the url can't contain whitespace or `)`.
 _IMAGE_LINE_RE = re.compile(
@@ -142,10 +172,18 @@ def to_block(ref: ImageRef, token: str | None = None) -> dict:
 def from_block(block: dict) -> ImageRef | None:
     """Block Kit ``image`` block → `ImageRef`; None for any other block type.
 
-    A ``thrds_bust`` param on the wire URL is stripped and recorded as
-    ``bust=True``, so ``![alt](url){bust}`` round-trips through Slack.
+    An **uploaded** image is recognized by the sha tag in ``alt_text`` (Slack
+    may hand back either the `slack_file` we sent or a resolved private
+    `image_url`, so keying off `alt_text` is robust to both) and rebuilds the
+    ``slackfile:<sha>`` marker with the clean alt. A URL image's ``thrds_bust``
+    param is stripped and recorded as ``bust=True``, so ``![alt](url){bust}``
+    round-trips through Slack.
     """
     if block.get('type') != 'image':
         return None
+    alt = block.get('alt_text', '')
+    if _ALT_SHA_SEP in alt:
+        clean, _, sha = alt.partition(_ALT_SHA_SEP)
+        return ImageRef(alt=clean, url=f'{UPLOAD_SCHEME}{sha}')
     url, bust = strip_bust(block.get('image_url', ''))
-    return ImageRef(alt=block.get('alt_text', ''), url=url, bust=bust)
+    return ImageRef(alt=alt, url=url, bust=bust)
