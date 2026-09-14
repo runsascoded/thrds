@@ -2996,13 +2996,9 @@ def discord_push(
     messages = resolve_messages(parsed.thread.messages, parsed.frontmatter)
     name = thread_name or state.discord_thread_name or Path(state.doc_path).stem
 
-    # Per-message sender (name/avatar) is webhook-only on Discord. The OP anchors
-    # the thread as the bot's single identity, so a custom OP sender is unsupported.
-    if parsed.frontmatter.op_sender is not None:
-        raise click.UsageError(
-            "Discord's OP anchors the thread as the bot's single identity, so `op_sender` "
-            "isn't supported; put per-sender content in the replies (`+++ as <name>`)."
-        )
+    # Per-message sender (name/avatar) is webhook-only on Discord — including on
+    # the OP: `op_sender` posts the OP through the webhook (parent channel) and
+    # the bot opens the thread off it (see specs/done/discord-webhook-attachments.md §3).
     per_sender = any(isinstance(m, Msg) for m in messages)
 
     repush = state.discord_op_id is not None

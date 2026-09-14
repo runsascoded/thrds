@@ -50,7 +50,7 @@ class _Client:
     def list_messages(self, thread_id):
         return list(self.threads.get(thread_id, []))
 
-    def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None):
+    def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None, files=()):
         self.post_calls.append({
             'content': content, 'thread_id': thread_id,
             'username': username, 'icon_url': icon_url, 'icon_emoji': icon_emoji,
@@ -59,7 +59,7 @@ class _Client:
         self.threads.setdefault(thread_id or msg.id, []).append(msg)
         return msg
 
-    def edit(self, message_id, content):
+    def edit(self, message_id, content, *, files=()):
         for msgs in self.threads.values():
             for i, m in enumerate(msgs):
                 if m.id == message_id:

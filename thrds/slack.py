@@ -5,7 +5,7 @@ import random
 import re
 import time
 import urllib.request
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.error import HTTPError
@@ -406,6 +406,7 @@ class SlackClient:
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
+        files: Sequence[Path | str] = (),
         raw: bool | None = None,
     ) -> Message:
         """
@@ -424,6 +425,11 @@ class SlackClient:
         if len(content) > SLACK_MESSAGE_LIMIT:
             raise ValueError(
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
+            )
+        if files:
+            raise NotImplementedError(
+                "Slack posts images by URL, not by uploading bytes: put a trailing "
+                "`![alt](url)` in the content (lifted to an image block), not `files=`."
             )
         resolved_raw = raw if raw is not None else self.raw
         # Raw consumers send wire mrkdwn verbatim — no image lifting either.
@@ -484,6 +490,7 @@ class SlackClient:
         message_id: str,
         content: str,
         *,
+        files: Sequence[Path | str] = (),
         raw: bool | None = None,
     ) -> Message:
         """Edit ``message_id``'s text to ``content``.
@@ -496,6 +503,11 @@ class SlackClient:
         if len(content) > SLACK_MESSAGE_LIMIT:
             raise ValueError(
                 f"Message exceeds Slack's {SLACK_MESSAGE_LIMIT} char limit ({len(content)} chars)"
+            )
+        if files:
+            raise NotImplementedError(
+                "Slack edits images by URL, not by uploading bytes: put a trailing "
+                "`![alt](url)` in the content (lifted to an image block), not `files=`."
             )
         resolved_raw = raw if raw is not None else self.raw
         body, images = (content, []) if resolved_raw else split_trailing_images(content)

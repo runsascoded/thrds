@@ -218,12 +218,12 @@ def test_linked_thread_end_to_end():
         def list_messages(self, thread_id: str) -> list[Message]:
             return []
 
-        def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None):
+        def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None, files=()):
             msg_id = self._new_id()
             self.messages[msg_id] = content
             return Message(id=msg_id, content=content)
 
-        def edit(self, message_id: str, content: str) -> Message:
+        def edit(self, message_id: str, content: str, *, files=()) -> Message:
             self.messages[message_id] = content
             self.edits.append((message_id, content))
             return Message(id=message_id, content=content)

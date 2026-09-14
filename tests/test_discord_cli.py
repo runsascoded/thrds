@@ -624,16 +624,49 @@ def test_discord_push_per_sender_without_webhook_raises(in_tmp, monkeypatch):
     )
 
 
-def test_discord_push_op_sender_raises(in_tmp, monkeypatch):
-    doc = "---\nop_sender: gcs\nsender.gcs.name: GCS\n---\nOP body\n"
-    _init_discord(in_tmp, monkeypatch, doc_text=doc)
-    _set_discord_env(monkeypatch)
-    result = CliRunner().invoke(cli, ['discord', 'push'])
-    assert result.exit_code == 2
-    assert result.stderr.splitlines()[-1] == (
-        "Error: Discord's OP anchors the thread as the bot's single identity, so `op_sender` "
-        "isn't supported; put per-sender content in the replies (`+++ as <name>`)."
+def test_discord_push_op_sender_routes_op_through_webhook(in_tmp, monkeypatch):
+    # `op_sender` (Part 3): the OP is posted through the webhook (parent channel,
+    # no thread_id), the bot opens the thread off it, then a per-sender reply
+    # fans in via the webhook.
+    doc = (
+        "---\n"
+        "op_sender: gcs\n"
+        "sender.gcs.name: GCS\n"
+        "sender.gcs.avatar: https://x/g.png\n"
+        "sender.alice.name: Alice\n"
+        "sender.alice.avatar: https://x/a.png\n"
+        "---\n"
+        "OP body\n\n+++ as alice\nreply A\n"
     )
+    session = _init_discord(in_tmp, monkeypatch, doc_text=doc)
+    _set_discord_env(monkeypatch)
+    monkeypatch.setenv(DISCORD_WEBHOOK_ENV, _WEBHOOK)
+    bot_rec = _CurlRecorder()
+    hook_rec = _WebhookRecorder()
+    _install_curl(monkeypatch, bot_rec)
+    monkeypatch.setattr(
+        DiscordWebhookClient, '_curl_raw',
+        lambda self, method, url, data=None, *, headers=None, label=None: hook_rec(
+            method, url, data, headers=headers, label=label,
+        ),
+    )
+
+    result = CliRunner().invoke(cli, ['discord', 'push', '-N', 'Digest'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # Webhook: OP with no thread_id, then the per-sender reply into the thread.
+    assert hook_rec.calls == [
+        ('POST', f'{_WEBHOOK}?wait=true',
+         {'content': 'OP body', 'username': 'GCS', 'avatar_url': 'https://x/g.png'}),
+        ('POST', f'{_WEBHOOK}?wait=true&thread_id=thread-1',
+         {'content': 'reply A', 'username': 'Alice', 'avatar_url': 'https://x/a.png'}),
+    ]
+    # Bot opens the thread off the webhook OP (id w1); it posts nothing itself.
+    assert bot_rec.calls == [
+        ('POST', '/channels/CHAN/messages/w1/threads', {'name': 'Digest'}),
+    ]
+    assert result.stdout == 'https://discord.com/channels/GUILD/CHAN/w1\n'
+    state = SessionState.load(session)
+    assert (state.discord_op_id, state.discord_thread_id) == ('w1', 'thread-1')
 
 
 def test_discord_push_requires_token(in_tmp, monkeypatch):

@@ -292,6 +292,7 @@ class DiscordClient(_DiscordHTTP):
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
+        files: Sequence[Path | str] = (),
     ) -> Message:
         """Post a message as the bot.
 
@@ -301,12 +302,22 @@ class DiscordClient(_DiscordHTTP):
         rather than being silently dropped. Per-message identity on Discord
         requires the webhook transport (a webhook-backed client; see
         ``specs/discord-push.md``); route such threads there.
+
+        ``files`` likewise route through the webhook transport — this bot
+        `post` doesn't build the multipart attachment upload — so non-empty
+        ``files`` **raises**. The `DiscordHybridClient` sends any attachment-
+        bearing message via its webhook.
         """
         if username is not None or icon_url is not None or icon_emoji is not None:
             raise NotImplementedError(
                 "Discord's bot API cannot set a per-message sender "
                 "(username/icon_url/icon_emoji); post via a webhook-backed "
                 "client for per-message identity. See specs/discord-push.md."
+            )
+        if files:
+            raise NotImplementedError(
+                "This bot `post` doesn't upload attachments; send `files=` via the "
+                "webhook transport (`DiscordWebhookClient` / `DiscordHybridClient`)."
             )
         if len(content) > MESSAGE_LIMIT:
             raise ValueError(f"Message exceeds Discord's {MESSAGE_LIMIT} char limit ({len(content)} chars)")
@@ -342,9 +353,14 @@ class DiscordClient(_DiscordHTTP):
             )
         return self.create_thread(op_id, name)
 
-    def edit(self, message_id: str, content: str) -> Message:
+    def edit(self, message_id: str, content: str, *, files: Sequence[Path | str] = ()) -> Message:
         if len(content) > MESSAGE_LIMIT:
             raise ValueError(f"Message exceeds Discord's {MESSAGE_LIMIT} char limit ({len(content)} chars)")
+        if files:
+            raise NotImplementedError(
+                "This bot `edit` doesn't upload attachments; edit `files=` via the "
+                "webhook transport (`DiscordWebhookClient` / `DiscordHybridClient`)."
+            )
         data: dict = {"content": content}
         if self._suppress_embeds:
             data["flags"] = 4
@@ -634,12 +650,17 @@ class DiscordHybridClient:
       open a thread). Listing records which live ids are webhook-authored (via
       ``webhook_id``), so a re-push routes edits/deletes correctly.
     - ``post`` → **webhook** when the desired message carries a per-sender
-      override, else **bot**. The thread OP (posted with no ``thread_id``) is
-      always the bot's single identity and may not carry an override — it
-      anchors the thread — so an override there raises.
+      override **or an attachment**, else **bot**. This holds for the OP too:
+      a plain OP is the bot's single identity, but an OP with a sender or a
+      file is posted through the webhook (into the parent channel, no
+      ``thread_id``) and the bot then opens the thread off it — a bot can
+      ``create_thread`` off *any* channel message, webhook-authored included
+      (probe-confirmed, `specs/done/discord-webhook-attachments.md` §3).
     - ``edit`` / ``delete`` → the transport that **authored** the target (a
       webhook message can only be edited via the webhook; each transport
-      deletes its own).
+      deletes its own). A webhook-authored OP lives in the **parent channel**,
+      not the thread, so its edit must route to the webhook with no
+      ``?thread_id`` — tracked as ``_webhook_op_id`` and handled specially.
 
     A message that was bot-authored on a prior push can't be *re-attributed* to
     a sender on re-push — sender is fixed at post time on every Discord
@@ -651,6 +672,10 @@ class DiscordHybridClient:
         self.bot = bot
         self.webhook = webhook
         self._webhook_ids: set[str] = set()
+        # A webhook-authored OP (sender/attachment on the OP): it lives in the
+        # parent channel, so its edit must drop the thread override. None until
+        # a sender/file OP is posted or a listing finds one at the thread head.
+        self._webhook_op_id: str | None = None
 
     @property
     def channel_id(self) -> str:
@@ -669,6 +694,16 @@ class DiscordHybridClient:
     def list_messages(self, thread_id: str) -> list[Message]:
         raw = self.bot._list_raw(thread_id)
         self._webhook_ids = {m["id"] for m in raw if m.get("webhook_id")}
+        # When listing a real thread, `_list_raw` prepends the parent-channel
+        # OP at raw[0]; a webhook_id there means the OP is webhook-authored and
+        # its edits must skip `?thread_id`. (For a lone OP reconciled in the
+        # base channel, `thread_id == channel_id` and no OP is prepended, so
+        # don't infer one — the webhook has no thread override there anyway.)
+        self._webhook_op_id = (
+            raw[0]["id"]
+            if thread_id != self.bot.channel_id and raw and raw[0].get("webhook_id")
+            else None
+        )
         return [
             Message(id=m["id"], content=m.get("content", ""), editable=self._is_ours(m))
             for m in raw
@@ -688,30 +723,51 @@ class DiscordHybridClient:
         username: str | None = None,
         icon_url: str | None = None,
         icon_emoji: str | None = None,
+        files: Sequence[Path | str] = (),
     ) -> Message:
-        has_sender = username is not None or icon_url is not None or icon_emoji is not None
+        via_webhook = username is not None or icon_url is not None or icon_emoji is not None or bool(files)
         if thread_id is None:
-            # The OP anchors the thread and is the bot's single identity.
-            if has_sender:
-                raise NotImplementedError(
-                    "The thread OP can't carry a per-sender override — it anchors the "
-                    "thread as the bot's single identity. Put per-sender content in the "
-                    "replies."
+            # OP. A plain OP is the bot's single identity; one carrying a sender
+            # or an attachment goes through the webhook, into the PARENT channel
+            # (no thread_id). `open_thread` then creates the thread off it — the
+            # bot can thread off a webhook-authored message all the same.
+            if not via_webhook:
+                return self.bot.post(content)
+            prev = self.webhook.thread_id
+            self.webhook.thread_id = None
+            try:
+                msg = self.webhook.post(
+                    content, thread_id=None,
+                    username=username, icon_url=icon_url, icon_emoji=icon_emoji, files=files,
                 )
-            return self.bot.post(content)
-        if has_sender:
+            finally:
+                self.webhook.thread_id = prev
+            self._webhook_ids.add(msg.id)
+            self._webhook_op_id = msg.id
+            return msg
+        if via_webhook:
             msg = self.webhook.post(
                 content, thread_id=thread_id,
-                username=username, icon_url=icon_url, icon_emoji=icon_emoji,
+                username=username, icon_url=icon_url, icon_emoji=icon_emoji, files=files,
             )
             self._webhook_ids.add(msg.id)
             return msg
         return self.bot.post(content, thread_id=thread_id)
 
-    def edit(self, message_id: str, content: str) -> Message:
+    def edit(self, message_id: str, content: str, *, files: Sequence[Path | str] = ()) -> Message:
+        if message_id == self._webhook_op_id:
+            # The webhook-authored OP lives in the parent channel — its edit must
+            # not carry `?thread_id`. Clear the webhook's thread override around
+            # this one call (the sync wrapper set it to the child thread).
+            prev = self.webhook.thread_id
+            self.webhook.thread_id = None
+            try:
+                return self.webhook.edit(message_id, content, files=files)
+            finally:
+                self.webhook.thread_id = prev
         if message_id in self._webhook_ids:
-            return self.webhook.edit(message_id, content)
-        return self.bot.edit(message_id, content)
+            return self.webhook.edit(message_id, content, files=files)
+        return self.bot.edit(message_id, content, files=files)
 
     def delete(self, message_id: str) -> None:
         if message_id in self._webhook_ids:

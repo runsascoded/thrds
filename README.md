@@ -52,7 +52,7 @@ slck replay [-n]                       # rewrite a pre-migrate session's *git hi
 
 **Destination is a property of the thread, not the session.** Each thread records its own `{channel, thread_ts?}` target in `thrds.yml` (session-level `prod_channel` is just the default). No `thread_ts` → post a new top-level message; with one → the thread's messages go in as replies — so "draft a reply to someone else's post" and "batch six messages into one channel" are the same mechanism.
 
-**Per-message sender in the doc.** A message can post under a custom display name + avatar — the [`+++ as <name>` / `op_sender` syntax](#platform-capabilities) shared with Discord. Name each profile once in frontmatter (`sender.<name>.name` / `.avatar`), reference it from the OP via `op_sender:` and from a reply on its `+++ as <name>` delimiter; `push` and `promote` post each message under its profile (Slack does this natively via `chat.postMessage`, so unlike Discord even the OP can carry one). Needs an `xoxb-` bot token — Slack ignores sender customization on user tokens. This is the versioned counterpart to the programmatic `Msg(content, username=, icon_url=)` API; a sender-free doc pushes exactly as before.
+**Per-message sender in the doc.** A message can post under a custom display name + avatar — the [`+++ as <name>` / `op_sender` syntax](#platform-capabilities) shared with Discord. Name each profile once in frontmatter (`sender.<name>.name` / `.avatar`), reference it from the OP via `op_sender:` and from a reply on its `+++ as <name>` delimiter; `push` and `promote` post each message under its profile (Slack does this natively via `chat.postMessage` under one token, including the OP; Discord can carry an OP sender too, but only via its webhook transport — the OP is webhook-posted and the bot threads off it). Needs an `xoxb-` bot token — Slack ignores sender customization on user tokens. This is the versioned counterpart to the programmatic `Msg(content, username=, icon_url=)` API; a sender-free doc pushes exactly as before.
 
 **Staging-only chrome.** Staged messages carry one extra line — where the draft is aimed, what it became once posted, and which gist file it is:
 
@@ -225,16 +225,19 @@ What each transport can do. The columns are the four sync clients — Slack (`Sl
 | **Edit an existing message's sender** | ❌ | ❌ | ❌ | ❌ |
 | Attach an image / file | ✅² | ❌ | ✅² (`files=`) | ❌ |
 | Refresh that image in place (on edit) | ✅² | ❌ | ✅² | ❌ |
+| Custom emoji inline in text | ✅³ | ✅³ | ✅³ | ❌ |
 | Per-message char limit | 4000 | 2000 | 2000 | 300 / paragraph |
 
 ¹ Slack and Bluesky thread *implicitly*: a reply addresses the OP's own id (Slack's `thread_ts`, Bluesky's reply refs), so any message is already a thread root — there is no separate "create thread" call. Discord's thread is a distinct channel that must be `create_thread`'d off the OP (a message id isn't a channel), which is why `sync` has the `open_thread` seam that only `DiscordClient` implements.
 
-² Two different mechanisms, same outcome — a picture in the message that updates in place, keeping the same message id (no repost). **Slack** attaches a hosted-URL Block Kit *image block* and refreshes it by editing the block's URL; a `{bust}` suffix forces a refetch when the bytes change under a stable URL (`specs/done/editable-image-blocks.md`). The **Discord webhook** uploads the file as a real multipart *attachment* (`post(files=[…])`) and refreshes it by re-uploading on edit (`edit(files=[…])`). The Discord **bot** API can attach files too, but thrds hasn't wired it — only the webhook transport, which is what the per-sender digests use. Bluesky's image embeds aren't wired.
+² Two different mechanisms, same outcome — a picture in the message that updates in place, keeping the same message id (no repost). **Slack** attaches a hosted-URL Block Kit *image block* and refreshes it by editing the block's URL; a `{bust}` suffix forces a refetch when the bytes change under a stable URL (`specs/done/editable-image-blocks.md`). The **Discord webhook** uploads the file as a real multipart *attachment* (`post(files=[…])`) and refreshes it by re-uploading on edit (`edit(files=[…])`). Programmatically this is a `Msg(content, files=[…])` field that flows through `sync`; the Discord **bot** API can attach files too, but thrds hasn't wired it — only the webhook transport, which is what the per-sender digests use. Bluesky's image embeds aren't wired.
+
+³ Custom emoji live *inline in the message text*, a different slot from the sender avatar (which is a hosted image URL, not an emoji). The syntax differs: **Slack** references workspace emoji by name — `:my_emoji:`; **Discord** references them by `<:name:id>` (static) / `<a:name:id>` (animated), which resolve either to a **guild** emoji (uploaded to a server) or an **application** emoji (owned by the bot app, usable anywhere it posts — the reusable, Slack-workspace-like option). Both Discord transports render them because it's just content text. Bluesky has no custom emoji.
 
 Reading the table:
 
 - **Editing a sender is impossible everywhere.** The sender (display name + avatar) is fixed when a message is posted. Slack's `chat.update` and Discord's webhook edit both silently ignore `username`/`avatar` on edit; the Discord bot API and Bluesky have no per-message sender at all. So a per-sender mosaic can be *built* incrementally but never *re-attributed*.
-- **Custom senders:** Slack does it under one bot token (`chat:write.customize`). Discord's bot token is a *single* identity — per-message name/avatar needs the **webhook** transport. For a threaded per-contributor digest, pair the two: a `DiscordClient` opens the thread and owns the OP + reconcile, and a `DiscordWebhookClient` fans the per-sender replies into it via `?thread_id=` (`DiscordClient.post` *raises* on a sender override rather than silently dropping it, pointing you here). Bluesky posts only as the logged-in account.
+- **Custom senders:** Slack does it under one bot token (`chat:write.customize`). Discord's bot token is a *single* identity — per-message name/avatar needs the **webhook** transport. For a threaded per-contributor digest, pair the two: a `DiscordClient` opens the thread and owns reconcile, and a `DiscordWebhookClient` fans the per-sender replies into it via `?thread_id=` (`DiscordClient.post` *raises* on a sender override rather than silently dropping it, pointing you here). The **OP** can carry a sender too — `DiscordHybridClient` webhook-posts it to the parent channel and the bot opens the thread off it (a bot can `create_thread` off any channel message, webhook-authored included); its edits route back to the webhook with no `?thread_id`. Bluesky posts only as the logged-in account.
 - **Reconcile (declarative edit-in-place) needs read + edit.** Slack and Discord converge a live thread to the doc (edit changed messages, add/delete the rest). Bluesky has no edit API, so any content change degrades to delete+repost — losing reactions, permalinks, and position — and it can't reconcile a mixed-author thread.
 
 **GitHub** (`thrds github` / `ghpr`) is deliberately not in the table: it edits issue/PR **bodies and comments** as the authenticated user — no bots, no per-message senders, no thread creation. Its "thread" is the issue or PR and its comment list, and its verbs are clone → edit locally → push, not a live declarative sync.
@@ -261,7 +264,7 @@ bsky = BskyClient(handle="you.bsky.social", password="app-password")
 result = bsky.sync(thread)   # no edit API: falls back to delete+repost on change
 ```
 
-Per-message senders on Discord need the webhook transport — the bot opens the thread and owns the OP, the webhook fans per-sender replies into it (`DiscordClient.post` *raises* on a sender override rather than silently dropping it). `DiscordHybridClient` wraps the pair so one declarative `sync` does the whole threaded per-contributor digest — the bot posts + reconciles the OP, each `Msg` with a sender override posts (and re-push-edits) through the webhook, and bare replies stay on the bot:
+Per-message senders on Discord need the webhook transport — a bot token is a single identity, so the webhook fans per-sender replies into a bot-opened thread (`DiscordClient.post` *raises* on a sender override rather than silently dropping it). `DiscordHybridClient` wraps the pair so one declarative `sync` does the whole threaded per-contributor digest. Each message is routed by whether it needs the webhook: a `Msg` carrying a sender **or an attachment** posts (and re-push-edits) through the webhook, bare replies stay on the bot. This applies to the OP too — a plain OP is the bot's identity, but an OP with a sender or a file is webhook-posted to the parent channel and the bot opens the thread off it:
 
 ```python
 from thrds import DiscordClient, DiscordHybridClient, DiscordWebhookClient, Msg, Thread
@@ -271,17 +274,19 @@ hook = DiscordWebhookClient("https://discord.com/api/webhooks/…")
 digest = DiscordHybridClient(bot, hook)
 
 result = digest.sync(Thread(messages=[
-    "Weekly digest",                                             # OP → bot
-    Msg("Alice shipped X", username="Alice", icon_url="https://…/alice.png"),
-    Msg("Bob shipped Y",   username="Bob",   icon_url="https://…/bob.png"),
-]), thread_name="Weekly digest")
+    # OP with a custom sender + an attached plot → webhook; bot threads off it.
+    Msg("GCS usage — August", username="GCS usage", icon_url="https://…/cal.png", files=["plot.png"]),
+    Msg("8/1 — 3,253 TB", username="8/1 — 3,253 TB", icon_url="https://…/up.png"),
+    Msg("8/2 — 3,252 TB", username="8/2 — 3,252 TB", icon_url="https://…/down.png"),
+]), thread_name="GCS usage — August")
 
 # Re-push reconciles: edits go back to the transport that authored each message
-# (a webhook reply edits via the webhook), new sender-replies post via the webhook.
+# (the webhook OP edits via the webhook, with no ?thread_id). A `Msg.files` change
+# re-uploads the attachment whenever that message's text also changed.
 digest.sync(updated_thread, thread_id=result.thread_id)
 ```
 
-The OP anchors the thread as the bot's single identity, so it can't carry a sender override (raises if it does). And because sender is fixed at post time everywhere (see the matrix above), a reply that was bot-authored on an earlier push keeps that identity on re-push — only its content edits. The primitives are still usable directly if you want to drive the two transports yourself.
+Because sender is fixed at post time everywhere (see the matrix above), a reply that was bot-authored on an earlier push keeps that identity on re-push — only its content edits. The primitives are still usable directly if you want to drive the two transports yourself.
 
 ### Sync algorithm
 

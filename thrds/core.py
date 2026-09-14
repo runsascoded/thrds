@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import random
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -104,11 +106,22 @@ class Msg:
     Discord's bot API cannot override per-message sender at all;
     `DiscordClient` warns once and ignores. Bluesky has no sender
     concept; ignored silently.
+
+    ``files`` are binary attachments to upload with the message (e.g. a
+    rendered PNG). They map to Discord's multipart attachment upload
+    (`DiscordWebhookClient`, hence the `DiscordHybridClient`), and carry
+    through POST and — when an edit fires — EDIT, so a re-push whose text
+    changed also refreshes the attachment. Platforms that reference hosted
+    media by URL rather than uploading bytes (Slack via a trailing
+    ``![alt](url)`` image block, Bluesky) **raise** on non-empty ``files``
+    rather than silently drop them — use their content-level image syntax
+    there. Empty ``files`` (the default) is a no-op everywhere.
     """
     content: str
     username: str | None = None
     icon_url: str | None = None
     icon_emoji: str | None = None
+    files: Sequence[Path | str] = ()
 
 
 def _content(entry: str | Msg) -> str:
@@ -128,8 +141,14 @@ def _post_kwargs(entry: str | Msg) -> dict:
             'username': entry.username,
             'icon_url': entry.icon_url,
             'icon_emoji': entry.icon_emoji,
+            'files': entry.files,
         }
     return {}
+
+
+def _files(entry: str | Msg) -> Sequence[Path | str]:
+    """The attachments an EDIT should re-upload (empty for a bare `str`)."""
+    return entry.files if isinstance(entry, Msg) else ()
 
 
 def _reply_target(client: 'ThreadClient', op_id: str, thread_name: str | None) -> str:
@@ -464,7 +483,10 @@ def sync(
             else:
                 try:
                     _pace()
-                    result_msg = client.edit(existing[i].id, desired_contents[i])
+                    result_msg = client.edit(
+                        existing[i].id, desired_contents[i],
+                        files=_files(desired.messages[i]),
+                    )
                 except EditRateLimited:
                     # Fall back to delete+repost for this and all remaining messages
                     repost_from = i

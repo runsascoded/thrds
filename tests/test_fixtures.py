@@ -55,7 +55,7 @@ class FixtureClient:
             self.threads.setdefault(thread_id, []).append(msg)
         return msg
 
-    def edit(self, message_id: str, content: str) -> Message:
+    def edit(self, message_id: str, content: str, *, files=()) -> Message:
         for msgs in self.threads.values():
             for i, m in enumerate(msgs):
                 if m.id == message_id:

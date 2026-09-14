@@ -31,7 +31,7 @@ class NoEditMockClient:
             self.threads.setdefault(thread_id, []).append(msg)
         return msg
 
-    def edit(self, message_id: str, content: str) -> Message:
+    def edit(self, message_id: str, content: str, *, files=()) -> Message:
         raise EditRateLimited("Bluesky does not support editing posts")
 
     def delete(self, message_id: str) -> None:

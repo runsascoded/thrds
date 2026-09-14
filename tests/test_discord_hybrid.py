@@ -63,13 +63,19 @@ class _BotRecorder:
 
 class _WebhookRecorder:
     """Stub for `DiscordWebhookClient._curl_raw`: records `(method, url, data)`;
-    POSTs return ids `w1`, `w2`, …."""
+    POSTs return ids `w1`, `w2`, …. A multipart call (``form`` set — an
+    attachment upload) lands in ``form_calls`` as ``(method, url, form)``, kept
+    apart from JSON ``calls`` so plain-request assertions stay exact."""
     def __init__(self):
         self.calls: list[tuple[str, str, dict | None]] = []
+        self.form_calls: list[tuple[str, str, list]] = []
         self._n = 0
 
-    def __call__(self, method, url, data=None, *, headers=None, label=None):
-        self.calls.append((method, url, data))
+    def __call__(self, method, url, data=None, *, form=None, headers=None, label=None):
+        if form is not None:
+            self.form_calls.append((method, url, form))
+        else:
+            self.calls.append((method, url, data))
         if method == "POST":
             self._n += 1
             return {"id": f"w{self._n}"}
@@ -83,8 +89,8 @@ def _hybrid(monkeypatch, bot_rec, hook_rec):
     monkeypatch.setattr(DiscordClient, "bot_user_id", property(lambda self: BOT_ID))
     monkeypatch.setattr(
         DiscordWebhookClient, "_curl_raw",
-        lambda self, method, url, data=None, *, headers=None, label=None: hook_rec(
-            method, url, data, headers=headers, label=label,
+        lambda self, method, url, data=None, *, form=None, headers=None, label=None: hook_rec(
+            method, url, data, form=form, headers=headers, label=label,
         ),
     )
     bot = DiscordClient("bot-tok", "CHAN", "GUILD")
@@ -141,18 +147,65 @@ def test_fresh_bare_reply_routes_to_bot(monkeypatch):
     assert result.message_ids == ["m1", "m2", "w1"]
 
 
-def test_op_with_sender_override_raises(monkeypatch):
+def test_op_with_sender_routes_to_webhook_then_bot_opens_thread(monkeypatch):
+    # Part 3: an OP carrying a sender is posted through the webhook (into the
+    # PARENT channel — no thread_id), then the bot opens the thread off it.
     bot_rec, hook_rec = _BotRecorder(), _WebhookRecorder()
     hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
 
-    with pytest.raises(NotImplementedError, match="OP can't carry a per-sender override"):
-        hybrid.sync(Thread(messages=[
-            Msg("OP body", username="Alice", icon_url=AV),
-            Msg("reply B", username="Bob"),
-        ]), thread_name="Digest")
-    # Nothing posted (the OP post is the first write and it raises).
-    assert bot_rec.calls == []
-    assert hook_rec.calls == []
+    result = hybrid.sync(Thread(messages=[
+        Msg("OP body", username="Digest", icon_url=AV),
+        Msg("reply A", username="Alice", icon_url=AV),
+    ]), thread_name="Digest")
+
+    # Webhook: OP with no thread_id, then the reply into the opened thread.
+    assert hook_rec.calls == [
+        ("POST", f"{WEBHOOK}?wait=true",
+         {"content": "OP body", "username": "Digest", "avatar_url": AV}),
+        ("POST", f"{WEBHOOK}?wait=true&thread_id=thread-1",
+         {"content": "reply A", "username": "Alice", "avatar_url": AV}),
+    ]
+    # Bot posts nothing — it only opens the thread off the webhook OP (id w1).
+    assert bot_rec.calls == [
+        ("POST", "/channels/CHAN/messages/w1/threads", {"name": "Digest"}),
+    ]
+    assert result.thread_id == "thread-1"
+    assert result.message_ids == ["w1", "w2"]
+
+
+def test_op_with_attachment_routes_to_webhook(monkeypatch, tmp_path):
+    # An OP carrying a file (no sender) also goes through the webhook — the bot
+    # `post` can't upload attachments — as a multipart request, then the bot
+    # opens the thread off it.
+    png = tmp_path / "plot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    bot_rec, hook_rec = _BotRecorder(), _WebhookRecorder()
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    result = hybrid.sync(Thread(messages=[
+        Msg("OP body", files=[png]),
+        "bare reply",
+    ]), thread_name="Digest")
+
+    # OP is the one multipart call: payload_json (with the attachments manifest)
+    # + one file part; no thread_id on the OP.
+    import json
+    assert hook_rec.form_calls == [
+        ("POST", f"{WEBHOOK}?wait=true", [
+            ("payload_json", json.dumps({
+                "content": "OP body",
+                "attachments": [{"id": 0, "filename": "plot.png"}],
+            })),
+            ("files[0]", f"@{png}"),
+        ]),
+    ]
+    assert hook_rec.calls == []  # no plain-JSON webhook calls
+    # Bot opens the thread off the webhook OP, then posts the bare reply into it.
+    assert bot_rec.calls == [
+        ("POST", "/channels/CHAN/messages/w1/threads", {"name": "Digest"}),
+        ("POST", "/channels/thread-1/messages", {"content": "bare reply"}),
+    ]
+    assert result.message_ids == ["w1", "m1"]
 
 
 def _repush_recorders(thread_messages):
@@ -296,3 +349,66 @@ def test_repush_preserves_a_foreign_human_reply(monkeypatch):
         ("GET", "/channels/CHAN/messages/thread-1", None),
     ]
     assert hook_rec.calls == []
+
+
+def _webhook_op_repush_recorders(thread_messages):
+    """Re-push recorders where the OP itself is webhook-authored (Part 3):
+    the prepended parent OP carries a `webhook_id`, so its edit must route to
+    the webhook with no `?thread_id`."""
+    return _BotRecorder(
+        thread_messages=thread_messages,
+        op_message={"id": "thread-1", "content": "OP body", "type": 0, "webhook_id": "wh"},
+    ), _WebhookRecorder()
+
+
+def test_repush_edits_webhook_op_via_webhook_without_thread_id(monkeypatch):
+    # The OP is webhook-authored and lives in the parent channel; changing its
+    # text edits it through the webhook, and the URL must NOT carry ?thread_id
+    # (that would 404 — the OP isn't in the thread channel).
+    bot_rec, hook_rec = _webhook_op_repush_recorders([
+        {"id": "w2", "content": "reply A", "type": 0, "webhook_id": "wh"},
+    ])
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    hybrid.sync(Thread(messages=[
+        Msg("OP CHANGED", username="Digest", icon_url=AV),
+        Msg("reply A", username="Alice", icon_url=AV),
+    ]), thread_id="thread-1")
+
+    # Bot only reads; the webhook OP edit has a bare /messages/thread-1 URL.
+    assert bot_rec.calls == [
+        ("GET", "/channels/thread-1/messages?limit=100", None),
+        ("GET", "/channels/CHAN/messages/thread-1", None),
+    ]
+    assert hook_rec.calls == [
+        ("PATCH", f"{WEBHOOK}/messages/thread-1", {"content": "OP CHANGED"}),
+    ]
+
+
+def test_repush_refreshes_webhook_op_attachment_on_edit(monkeypatch, tmp_path):
+    # The daily gcs-style refresh: the OP text changes AND a new plot is
+    # attached, so the edit re-uploads the file (multipart) to the webhook OP —
+    # still with no ?thread_id.
+    png = tmp_path / "plot2.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    bot_rec, hook_rec = _webhook_op_repush_recorders([
+        {"id": "w2", "content": "reply A", "type": 0, "webhook_id": "wh"},
+    ])
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    hybrid.sync(Thread(messages=[
+        Msg("OP CHANGED", username="Digest", icon_url=AV, files=[png]),
+        Msg("reply A", username="Alice", icon_url=AV),
+    ]), thread_id="thread-1")
+
+    import json
+    assert hook_rec.calls == []
+    assert hook_rec.form_calls == [
+        ("PATCH", f"{WEBHOOK}/messages/thread-1", [
+            ("payload_json", json.dumps({
+                "content": "OP CHANGED",
+                "attachments": [{"id": 0, "filename": "plot2.png"}],
+            })),
+            ("files[0]", f"@{png}"),
+        ]),
+    ]
