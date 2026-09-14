@@ -73,6 +73,7 @@ metadata to your app); no extra scope required for ``slack recover``.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -2962,6 +2963,31 @@ def _discord_client(
     return DiscordClient(token=token, channel_id=channel_id, guild_id=guild_id)
 
 
+# `:name:` shortcode — an app-emoji name is `[A-Za-z0-9_]{2,32}`.
+_EMOJI_SHORTCODE_RE = re.compile(r':([A-Za-z0-9_]{2,32}):')
+
+
+def _rewrite_app_emoji(messages: 'list', emoji_map: dict) -> 'list':
+    """Rewrite ``:name:`` → ``<:name:id>`` for names in ``emoji_map`` (Discord's
+    custom-emoji ref). Unknown ``:name:`` (standard emoji, non-emoji colons) pass
+    through unchanged, so this only touches the app's own custom emoji."""
+    from dataclasses import replace as _replace
+
+    from .core import Msg
+
+    def sub(text: str) -> str:
+        return _EMOJI_SHORTCODE_RE.sub(
+            lambda m: f'<:{m.group(1)}:{emoji_map[m.group(1)]}>'
+            if m.group(1) in emoji_map else m.group(0),
+            text,
+        )
+
+    return [
+        _replace(m, content=sub(m.content)) if isinstance(m, Msg) else sub(m)
+        for m in messages
+    ]
+
+
 @discord_cli.command("push")
 @click.option('-c', '--channel', help=f'Discord channel id (overrides {DISCORD_CHANNEL_ENV} / session).')
 @click.option('-g', '--guild', help=f'Discord guild id, for permalinks (overrides {DISCORD_GUILD_ENV} / session).')
@@ -3017,6 +3043,7 @@ def discord_push(
     # reads nothing).
     require_creds = repush or not dry_run
     bot = _discord_client(state, channel, guild, require_token=require_creds)
+    webhook_auto_created = False
     if needs_webhook:
         # Per-sender / attachment messages go through a webhook, into the
         # bot-opened thread.
@@ -3031,6 +3058,7 @@ def discord_push(
                 # `MANAGE_WEBHOOKS`; the explicit env still overrides.
                 try:
                     webhook_url = bot.create_webhook(HYBRID_WEBHOOK_NAME)
+                    webhook_auto_created = True
                 except RuntimeError as e:
                     raise click.UsageError(
                         f'Doc needs a webhook (per-sender replies or image attachments); '
@@ -3042,6 +3070,19 @@ def discord_push(
         client = DiscordHybridClient(bot, DiscordWebhookClient(webhook_url))
     else:
         client = bot
+
+    # Rewrite `:name:` → `<:name:id>` for the app's custom emoji, but only where
+    # it round-trips: the **bot** always renders/echoes the ref, and an
+    # **app-owned** webhook does too — but a user-supplied (env) webhook strips
+    # it back to `:name:` on ingest, which would re-edit every push. So gate on
+    # transport safety: a bot-only push, or a webhook we auto-created (app-owned).
+    emoji_safe = not needs_webhook or webhook_auto_created
+    if require_creds and emoji_safe:
+        combined = "\n".join(m.content if isinstance(m, Msg) else m for m in messages)
+        if _EMOJI_SHORTCODE_RE.search(combined):
+            emoji_map = bot.app_emojis()
+            if emoji_map:
+                messages = _rewrite_app_emoji(messages, emoji_map)
 
     # Reconcile target: fresh push creates the thread; a re-push points `sync`
     # at where the OP/replies already live so its positional diff aligns.

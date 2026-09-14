@@ -227,11 +227,13 @@ class _CurlRecorder:
         self,
         thread_messages: list[dict] | None = None,
         op_message: dict | None = None,
+        emojis: list[dict] | None = None,
     ):
         self.calls: list[tuple[str, str, dict | None]] = []
         self._n = 0
         self._thread_messages = [_own(m) for m in (thread_messages or [])]
         self._op_message = _own(op_message) if op_message is not None else None
+        self._emojis = emojis or []
 
     def __call__(self, method: str, path: str, data: dict | None = None):
         self.calls.append((method, path, data))
@@ -240,6 +242,8 @@ class _CurlRecorder:
                 return {'id': BOT_ID}
             if path == '/applications/@me':
                 return {'id': 'app-1'}
+            if path.endswith('/emojis'):
+                return {'items': self._emojis}
             if path.endswith('/webhooks'):
                 return []  # no existing webhook → auto-create makes one
             # `/…/messages/{id}` (single fetch) vs `/…/messages?limit=…` (list).
@@ -777,6 +781,43 @@ def test_discord_push_doc_image_op_routes_through_webhook(in_tmp, monkeypatch):
     ]
     state = SessionState.load(session)
     assert (state.discord_op_id, state.discord_thread_id) == ('w1', 'thread-1')
+
+
+def test_discord_push_rewrites_app_emoji_bot_only(in_tmp, monkeypatch):
+    # A bot-only push rewrites `:name:` → `<:name:id>` for the app's emoji;
+    # unknown shortcodes pass through untouched.
+    _init_discord(in_tmp, monkeypatch, doc_text="OP with :up: and :unknown: arrows\n")
+    _set_discord_env(monkeypatch)
+    rec = _CurlRecorder(emojis=[{'name': 'up', 'id': 111}])
+    _install_curl(monkeypatch, rec)
+    result = CliRunner().invoke(cli, ['discord', 'push'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    post = next(d for m, p, d in rec.calls if m == 'POST' and p.endswith('/messages'))
+    assert post == {'content': 'OP with <:up:111> and :unknown: arrows'}
+
+
+def test_discord_push_no_emoji_rewrite_through_env_webhook(in_tmp, monkeypatch):
+    # A user-supplied (env) webhook strips `<:name:id>`, so the rewrite is unsafe
+    # (would re-edit every push) — it's skipped, and no app_emojis lookup happens.
+    doc = "---\nsender.a.name: A\nsender.a.avatar: https://x/a.png\n---\nOP :up:\n\n+++ as a\nreply :up:\n"
+    _init_discord(in_tmp, monkeypatch, doc_text=doc)
+    _set_discord_env(monkeypatch)
+    monkeypatch.setenv(DISCORD_WEBHOOK_ENV, _WEBHOOK)
+    rec = _CurlRecorder(emojis=[{'name': 'up', 'id': 111}])
+    hook_rec = _WebhookRecorder()
+    _install_curl(monkeypatch, rec)
+    monkeypatch.setattr(
+        DiscordWebhookClient, '_curl_raw',
+        lambda self, method, url, data=None, *, form=None, headers=None, label=None: hook_rec(
+            method, url, data, form=form, headers=headers, label=label,
+        ),
+    )
+    result = CliRunner().invoke(cli, ['discord', 'push', '-N', 'Digest'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert not any(p.endswith('/emojis') for _, p, _ in rec.calls)
+    op_post = next(d for m, p, d in rec.calls if m == 'POST' and p.endswith('/messages'))
+    assert op_post == {'content': 'OP :up:'}
+    assert hook_rec.calls[-1][2]['content'] == 'reply :up:'
 
 
 def test_discord_push_requires_token(in_tmp, monkeypatch):
