@@ -242,19 +242,27 @@ bsky = BskyClient(handle="you.bsky.social", password="app-password")
 result = bsky.sync(thread)   # no edit API: falls back to delete+repost on change
 ```
 
-Per-message senders on Discord need the webhook transport — the bot opens the thread and owns the OP, the webhook fans per-sender replies into it (`DiscordClient.post` *raises* on a sender override rather than silently dropping it):
+Per-message senders on Discord need the webhook transport — the bot opens the thread and owns the OP, the webhook fans per-sender replies into it (`DiscordClient.post` *raises* on a sender override rather than silently dropping it). `DiscordHybridClient` wraps the pair so one declarative `sync` does the whole threaded per-contributor digest — the bot posts + reconciles the OP, each `Msg` with a sender override posts (and re-push-edits) through the webhook, and bare replies stay on the bot:
 
 ```python
-from thrds import DiscordClient, DiscordWebhookClient
+from thrds import DiscordClient, DiscordHybridClient, DiscordWebhookClient, Msg, Thread
 
-bot = DiscordClient(token="bot-token", channel_id="1489279547689140505")
-op = bot.post("Weekly digest")
-tid = bot.create_thread(op.id, "Weekly digest")
+bot = DiscordClient(token="bot-token", channel_id="1489279547689140505", guild_id="…")
+hook = DiscordWebhookClient("https://discord.com/api/webhooks/…")
+digest = DiscordHybridClient(bot, hook)
 
-hook = DiscordWebhookClient("https://discord.com/api/webhooks/…", thread_id=tid)
-hook.post("Alice shipped X", username="Alice", icon_url="https://…/alice.png")
-hook.post("Bob shipped Y", username="Bob", icon_url="https://…/bob.png")
+result = digest.sync(Thread(messages=[
+    "Weekly digest",                                             # OP → bot
+    Msg("Alice shipped X", username="Alice", icon_url="https://…/alice.png"),
+    Msg("Bob shipped Y",   username="Bob",   icon_url="https://…/bob.png"),
+]), thread_name="Weekly digest")
+
+# Re-push reconciles: edits go back to the transport that authored each message
+# (a webhook reply edits via the webhook), new sender-replies post via the webhook.
+digest.sync(updated_thread, thread_id=result.thread_id)
 ```
+
+The OP anchors the thread as the bot's single identity, so it can't carry a sender override (raises if it does). And because sender is fixed at post time everywhere (see the matrix above), a reply that was bot-authored on an earlier push keeps that identity on re-push — only its content edits. The primitives are still usable directly if you want to drive the two transports yourself.
 
 ### Sync algorithm
 

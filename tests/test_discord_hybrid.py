@@ -1,0 +1,252 @@
+"""Tests for `DiscordHybridClient` — bot owns the thread, webhook owns replies.
+
+The composite routes each `core.sync` op: listing/threading via the bot, a
+per-sender reply via the webhook, an edit/delete back to whichever transport
+authored the target. Both transports' HTTP is stubbed (`DiscordClient._curl`
+and `DiscordWebhookClient._curl_raw`) onto shared recorders, so each test
+asserts the exact bot-vs-webhook call split. See specs/discord-push.md.
+"""
+from __future__ import annotations
+
+import pytest
+
+from thrds import DiscordClient, DiscordHybridClient, DiscordWebhookClient, Msg, Thread
+
+WEBHOOK = "https://discord.com/api/webhooks/123/faketoken"
+AV = "https://cdn.discordapp.com/embed/avatars/0.png"
+
+
+class _BotRecorder:
+    """Stub for `DiscordClient._curl`: records `(method, path, data)`.
+
+    POSTs get ids `m1`, `m2`, …; a thread-create returns `thread-1`; a list GET
+    returns ``thread_messages`` (raw dicts, newest-first — `_list_raw` reverses);
+    a single-message GET returns ``op_message``.
+    """
+    def __init__(self, thread_messages=None, op_message=None):
+        self.calls: list[tuple[str, str, dict | None]] = []
+        self._n = 0
+        self._thread_messages = thread_messages or []
+        self._op_message = op_message
+
+    def __call__(self, method, path, data=None):
+        self.calls.append((method, path, data))
+        if method == "GET":
+            if "/messages/" in path:
+                return self._op_message
+            return self._thread_messages
+        if method == "POST" and path.endswith("/threads"):
+            return {"id": "thread-1"}
+        if method == "POST" and path.endswith("/messages"):
+            self._n += 1
+            return {"id": f"m{self._n}"}
+        return None
+
+
+class _WebhookRecorder:
+    """Stub for `DiscordWebhookClient._curl_raw`: records `(method, url, data)`;
+    POSTs return ids `w1`, `w2`, …."""
+    def __init__(self):
+        self.calls: list[tuple[str, str, dict | None]] = []
+        self._n = 0
+
+    def __call__(self, method, url, data=None, *, headers=None, label=None):
+        self.calls.append((method, url, data))
+        if method == "POST":
+            self._n += 1
+            return {"id": f"w{self._n}"}
+        return None
+
+
+def _hybrid(monkeypatch, bot_rec, hook_rec):
+    monkeypatch.setattr(DiscordClient, "_curl", lambda self, m, p, data=None: bot_rec(m, p, data))
+    monkeypatch.setattr(
+        DiscordWebhookClient, "_curl_raw",
+        lambda self, method, url, data=None, *, headers=None, label=None: hook_rec(
+            method, url, data, headers=headers, label=label,
+        ),
+    )
+    bot = DiscordClient("bot-tok", "CHAN", "GUILD")
+    webhook = DiscordWebhookClient(WEBHOOK)
+    return DiscordHybridClient(bot, webhook)
+
+
+def test_fresh_bot_op_thread_then_webhook_per_sender_replies(monkeypatch):
+    bot_rec, hook_rec = _BotRecorder(), _WebhookRecorder()
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    result = hybrid.sync(Thread(messages=[
+        "OP body",
+        Msg("reply A", username="Alice", icon_url=AV),
+        Msg("reply B", username="Bob", icon_url=AV),
+    ]), thread_name="Digest")
+
+    # Bot: OP → channel, open thread off it. No bot reply posts.
+    assert bot_rec.calls == [
+        ("POST", "/channels/CHAN/messages", {"content": "OP body"}),
+        ("POST", "/channels/CHAN/messages/m1/threads", {"name": "Digest"}),
+    ]
+    # Webhook: two per-sender replies into the opened thread.
+    assert hook_rec.calls == [
+        ("POST", f"{WEBHOOK}?wait=true&thread_id=thread-1",
+         {"content": "reply A", "username": "Alice", "avatar_url": AV}),
+        ("POST", f"{WEBHOOK}?wait=true&thread_id=thread-1",
+         {"content": "reply B", "username": "Bob", "avatar_url": AV}),
+    ]
+    assert result.thread_id == "thread-1"
+    assert result.message_ids == ["m1", "w1", "w2"]
+
+
+def test_fresh_bare_reply_routes_to_bot(monkeypatch):
+    bot_rec, hook_rec = _BotRecorder(), _WebhookRecorder()
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    result = hybrid.sync(Thread(messages=[
+        "OP body",
+        "bare reply",
+        Msg("reply B", username="Bob", icon_url=AV),
+    ]), thread_name="Digest")
+
+    # OP + thread + the bare reply are all bot; only the sender reply is webhook.
+    assert bot_rec.calls == [
+        ("POST", "/channels/CHAN/messages", {"content": "OP body"}),
+        ("POST", "/channels/CHAN/messages/m1/threads", {"name": "Digest"}),
+        ("POST", "/channels/thread-1/messages", {"content": "bare reply"}),
+    ]
+    assert hook_rec.calls == [
+        ("POST", f"{WEBHOOK}?wait=true&thread_id=thread-1",
+         {"content": "reply B", "username": "Bob", "avatar_url": AV}),
+    ]
+    assert result.message_ids == ["m1", "m2", "w1"]
+
+
+def test_op_with_sender_override_raises(monkeypatch):
+    bot_rec, hook_rec = _BotRecorder(), _WebhookRecorder()
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    with pytest.raises(NotImplementedError, match="OP can't carry a per-sender override"):
+        hybrid.sync(Thread(messages=[
+            Msg("OP body", username="Alice", icon_url=AV),
+            Msg("reply B", username="Bob"),
+        ]), thread_name="Digest")
+    # Nothing posted (the OP post is the first write and it raises).
+    assert bot_rec.calls == []
+    assert hook_rec.calls == []
+
+
+def _repush_recorders(thread_messages):
+    """Bot recorder seeded for a re-push: live thread listing + parent OP."""
+    return _BotRecorder(
+        thread_messages=thread_messages,
+        op_message={"id": "thread-1", "content": "OP body", "type": 0},
+    ), _WebhookRecorder()
+
+
+def test_repush_edits_webhook_reply_via_webhook(monkeypatch):
+    bot_rec, hook_rec = _repush_recorders([
+        {"id": "w1", "content": "reply OLD", "type": 0, "webhook_id": "wh"},
+    ])
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    result = hybrid.sync(Thread(messages=[
+        "OP body",
+        Msg("reply NEW", username="Alice", icon_url=AV),
+    ]), thread_id="thread-1")
+
+    # Bot only reads (list + parent OP); the changed reply is webhook-authored,
+    # so its edit goes through the webhook with ?thread_id=.
+    assert bot_rec.calls == [
+        ("GET", "/channels/thread-1/messages?limit=100", None),
+        ("GET", "/channels/CHAN/messages/thread-1", None),
+    ]
+    assert hook_rec.calls == [
+        ("PATCH", f"{WEBHOOK}/messages/w1?thread_id=thread-1", {"content": "reply NEW"}),
+    ]
+    assert result.message_ids == ["thread-1", "w1"]
+
+
+def test_repush_edits_op_via_bot_parent_channel(monkeypatch):
+    bot_rec, hook_rec = _repush_recorders([
+        {"id": "w1", "content": "reply A", "type": 0, "webhook_id": "wh"},
+    ])
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    hybrid.sync(Thread(messages=[
+        "OP CHANGED",
+        Msg("reply A", username="Alice", icon_url=AV),
+    ]), thread_id="thread-1")
+
+    # The OP isn't webhook-authored → bot edit, addressed to the PARENT channel
+    # (id == thread id). The reply is unchanged (SKIP), so no webhook write.
+    assert bot_rec.calls == [
+        ("GET", "/channels/thread-1/messages?limit=100", None),
+        ("GET", "/channels/CHAN/messages/thread-1", None),
+        ("PATCH", "/channels/CHAN/messages/thread-1", {"content": "OP CHANGED"}),
+    ]
+    assert hook_rec.calls == []
+
+
+def test_repush_edits_bot_authored_reply_via_bot(monkeypatch):
+    # A reply with no webhook_id was bot-authored; its edit routes to the bot
+    # (thread channel), even though the desired entry now names a sender —
+    # sender is fixed at post time, so only the content changes.
+    bot_rec, hook_rec = _repush_recorders([
+        {"id": "r1", "content": "reply OLD", "type": 0},
+    ])
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    hybrid.sync(Thread(messages=[
+        "OP body",
+        Msg("reply NEW", username="Alice", icon_url=AV),
+    ]), thread_id="thread-1")
+
+    assert bot_rec.calls == [
+        ("GET", "/channels/thread-1/messages?limit=100", None),
+        ("GET", "/channels/CHAN/messages/thread-1", None),
+        ("PATCH", "/channels/thread-1/messages/r1", {"content": "reply NEW"}),
+    ]
+    assert hook_rec.calls == []
+
+
+def test_repush_posts_new_webhook_reply(monkeypatch):
+    bot_rec, hook_rec = _repush_recorders([
+        {"id": "w1", "content": "reply A", "type": 0, "webhook_id": "wh"},
+    ])
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    hybrid.sync(Thread(messages=[
+        "OP body",
+        Msg("reply A", username="Alice", icon_url=AV),
+        Msg("reply B", username="Bob", icon_url=AV),
+    ]), thread_id="thread-1")
+
+    assert bot_rec.calls == [
+        ("GET", "/channels/thread-1/messages?limit=100", None),
+        ("GET", "/channels/CHAN/messages/thread-1", None),
+    ]
+    assert hook_rec.calls == [
+        ("POST", f"{WEBHOOK}?wait=true&thread_id=thread-1",
+         {"content": "reply B", "username": "Bob", "avatar_url": AV}),
+    ]
+
+
+def test_repush_deletes_each_reply_via_its_author(monkeypatch):
+    # Live: a webhook reply then a bot reply; desired drops both. Each delete
+    # routes to the transport that authored it.
+    bot_rec, hook_rec = _repush_recorders([
+        {"id": "r2", "content": "bot reply", "type": 0},
+        {"id": "w1", "content": "hook reply", "type": 0, "webhook_id": "wh"},
+    ])
+    hybrid = _hybrid(monkeypatch, bot_rec, hook_rec)
+
+    hybrid.sync(Thread(messages=["OP body"]), thread_id="thread-1")
+
+    # Deletes run end-first: r2 (bot) then w1 (webhook).
+    assert bot_rec.calls == [
+        ("GET", "/channels/thread-1/messages?limit=100", None),
+        ("GET", "/channels/CHAN/messages/thread-1", None),
+        ("DELETE", "/channels/thread-1/messages/r2", None),
+    ]
+    assert hook_rec.calls == [
+        ("DELETE", f"{WEBHOOK}/messages/w1?thread_id=thread-1", None),
+    ]

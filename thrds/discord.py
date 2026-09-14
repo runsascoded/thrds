@@ -175,27 +175,37 @@ class DiscordClient(_DiscordHTTP):
             return self.channel_id
         return self._channel
 
-    def list_messages(self, thread_id: str) -> list[Message]:
-        # Discord returns messages newest-first; reverse to get chronological order
+    def _list_raw(self, thread_id: str) -> list[dict]:
+        """Chronological type-0 message dicts for a thread, OP prepended.
+
+        Discord returns messages newest-first (reversed here). A thread created
+        off a message shares that message's id, and the OP itself lives in the
+        PARENT channel — `GET /channels/{thread}/messages` returns only the
+        replies (plus an empty type-21 starter placeholder, dropped by the
+        type-0 filter), never the OP. Prepend it so `sync`'s positional diff
+        aligns (existing[0] is the OP); its id is the thread id. Listing the
+        base channel itself (thread_id == channel_id, e.g. a lone-OP reconcile
+        scoped by `only_ids`) has no such separate OP, so the prepend only fires
+        for an actual child thread.
+
+        Returns raw dicts (not `Message`s) so a caller can read fields the
+        positional diff doesn't need — e.g. `webhook_id`, which
+        `DiscordHybridClient` uses to route an edit/delete to the transport that
+        authored the message.
+        """
         resp = self._curl("GET", f"/channels/{thread_id}/messages?limit=100")
-        messages = [
-            Message(id=m["id"], content=m.get("content", ""))
-            for m in reversed(resp or [])
-            if m.get("type", 0) == 0
-        ]
-        # A thread created off a message shares that message's id, and the OP
-        # itself lives in the PARENT channel — `GET /channels/{thread}/messages`
-        # returns only the replies (plus an empty type-21 starter placeholder,
-        # already dropped by the type-0 filter above), never the OP. Prepend it
-        # so `sync`'s positional diff aligns (existing[0] is the OP). The OP's
-        # id is the thread id. Listing the base channel itself (thread_id ==
-        # channel_id, e.g. a lone-OP reconcile scoped by `only_ids`) has no such
-        # separate OP, so this only fires for an actual child thread.
+        messages = [m for m in reversed(resp or []) if m.get("type", 0) == 0]
         if thread_id != self.channel_id:
             op = self._curl("GET", f"/channels/{self.channel_id}/messages/{thread_id}")
             if isinstance(op, dict) and op.get("type", 0) == 0:
-                messages.insert(0, Message(id=op["id"], content=op.get("content", "")))
+                messages.insert(0, op)
         return messages
+
+    def list_messages(self, thread_id: str) -> list[Message]:
+        return [
+            Message(id=m["id"], content=m.get("content", ""))
+            for m in self._list_raw(thread_id)
+        ]
 
     def post(
         self,
@@ -495,3 +505,130 @@ class DiscordWebhookClient(_DiscordHTTP):
             "DELETE", self._message_url(message_id),
             headers=self._HEADERS, label=f"DELETE webhook message {message_id}",
         )
+
+
+class DiscordHybridClient:
+    """Threaded per-sender digest: a bot owns the thread, a webhook the replies.
+
+    The composite that pairs the two transports so a single `sync` can post
+    per-contributor replies (name + avatar) into a thread the bot opens and
+    reconciles. It is itself a `ThreadClient`, routing each `core.sync` call:
+
+    - ``list_messages`` / ``open_thread`` → **bot** (a webhook can't read or
+      open a thread). Listing records which live ids are webhook-authored (via
+      ``webhook_id``), so a re-push routes edits/deletes correctly.
+    - ``post`` → **webhook** when the desired message carries a per-sender
+      override, else **bot**. The thread OP (posted with no ``thread_id``) is
+      always the bot's single identity and may not carry an override — it
+      anchors the thread — so an override there raises.
+    - ``edit`` / ``delete`` → the transport that **authored** the target (a
+      webhook message can only be edited via the webhook; each transport
+      deletes its own).
+
+    A message that was bot-authored on a prior push can't be *re-attributed* to
+    a sender on re-push — sender is fixed at post time on every Discord
+    transport (see the README capability matrix). Its content still edits, as
+    the bot.
+    """
+
+    def __init__(self, bot: DiscordClient, webhook: DiscordWebhookClient):
+        self.bot = bot
+        self.webhook = webhook
+        self._webhook_ids: set[str] = set()
+
+    @property
+    def channel_id(self) -> str:
+        return self.bot.channel_id
+
+    @property
+    def guild_id(self) -> str | None:
+        return self.bot.guild_id
+
+    def list_messages(self, thread_id: str) -> list[Message]:
+        raw = self.bot._list_raw(thread_id)
+        self._webhook_ids = {m["id"] for m in raw if m.get("webhook_id")}
+        return [Message(id=m["id"], content=m.get("content", "")) for m in raw]
+
+    def open_thread(self, op_id: str, name: str | None) -> str:
+        tid = self.bot.open_thread(op_id, name)
+        self.webhook.thread_id = tid
+        self.bot._active_thread_id = tid
+        return tid
+
+    def post(
+        self,
+        content: str,
+        thread_id: str | None = None,
+        *,
+        username: str | None = None,
+        icon_url: str | None = None,
+        icon_emoji: str | None = None,
+    ) -> Message:
+        has_sender = username is not None or icon_url is not None or icon_emoji is not None
+        if thread_id is None:
+            # The OP anchors the thread and is the bot's single identity.
+            if has_sender:
+                raise NotImplementedError(
+                    "The thread OP can't carry a per-sender override — it anchors the "
+                    "thread as the bot's single identity. Put per-sender content in the "
+                    "replies."
+                )
+            return self.bot.post(content)
+        if has_sender:
+            msg = self.webhook.post(
+                content, thread_id=thread_id,
+                username=username, icon_url=icon_url, icon_emoji=icon_emoji,
+            )
+            self._webhook_ids.add(msg.id)
+            return msg
+        return self.bot.post(content, thread_id=thread_id)
+
+    def edit(self, message_id: str, content: str) -> Message:
+        if message_id in self._webhook_ids:
+            return self.webhook.edit(message_id, content)
+        return self.bot.edit(message_id, content)
+
+    def delete(self, message_id: str) -> None:
+        if message_id in self._webhook_ids:
+            self.webhook.delete(message_id)
+            self._webhook_ids.discard(message_id)
+        else:
+            self.bot.delete(message_id)
+
+    def sync(
+        self,
+        thread: Thread,
+        thread_id: str | None = None,
+        dry_run: bool = False,
+        pace: float = 0.0,
+        jitter: float = 0.0,
+        suppress_embeds: bool = False,
+        thread_name: str | None = None,
+        only_ids: set[str] | None = None,
+    ) -> SyncResult:
+        prev_webhook_thread = self.webhook.thread_id
+        prev_webhook_suppress = self.webhook.suppress_embeds
+        if thread_id is not None:
+            self.webhook.thread_id = thread_id
+        self.bot._active_thread_id = thread_id
+        self.bot._suppress_embeds = suppress_embeds
+        self.webhook.suppress_embeds = suppress_embeds
+        try:
+            return sync(
+                client=self,
+                desired=thread,
+                thread_id=thread_id,
+                options=SyncOptions(
+                    dry_run=dry_run,
+                    pace=pace,
+                    jitter=jitter,
+                    suppress_embeds=suppress_embeds,
+                    thread_name=thread_name,
+                    only_ids=only_ids,
+                ),
+            )
+        finally:
+            self.bot._active_thread_id = None
+            self.bot._suppress_embeds = False
+            self.webhook.thread_id = prev_webhook_thread
+            self.webhook.suppress_embeds = prev_webhook_suppress
