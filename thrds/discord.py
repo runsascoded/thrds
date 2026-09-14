@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
@@ -226,6 +228,7 @@ class DiscordClient(_DiscordHTTP):
         self._active_thread_id: str | None = None
         self._suppress_embeds: bool = False
         self._bot_user_id: str | None = None
+        self._application_id: str | None = None
 
     @property
     def bot_user_id(self) -> str:
@@ -239,6 +242,18 @@ class DiscordClient(_DiscordHTTP):
             me = self._curl("GET", "/users/@me")
             self._bot_user_id = str(me["id"])
         return self._bot_user_id
+
+    @property
+    def application_id(self) -> str:
+        """This bot's application id (`GET /applications/@me`), lazy + cached.
+
+        Distinct from `bot_user_id` — it addresses the *app* (which owns
+        application emoji and app-created webhooks), not the bot user.
+        """
+        if self._application_id is None:
+            app = self._curl("GET", "/applications/@me")
+            self._application_id = str(app["id"])
+        return self._application_id
 
     def _authored_by_us(self, raw: dict) -> bool:
         """Whether a raw message dict is ours to edit/delete (vs. preserved).
@@ -387,6 +402,52 @@ class DiscordClient(_DiscordHTTP):
                 "`thread_name` (e.g. `--thread-name`, or `SyncOptions.thread_name`)."
             )
         return self.create_thread(op_id, name)
+
+    def create_webhook(self, name: str, *, avatar: str | None = None) -> str:
+        """Ensure an **app-owned** webhook named ``name`` on this channel; return
+        its URL. Reuses an existing one by name (`GET /channels/{id}/webhooks`),
+        else creates it (`POST`, needs `MANAGE_WEBHOOKS`).
+
+        The point of app-ownership: only the bot or a webhook whose
+        ``application_id`` is this app's can post **application emoji**
+        (`<:name:id>`); a user-created webhook silently strips them to bare
+        `:name:` (see `specs/discord-app-emoji.md`). So bootstrapping the hybrid
+        pair through here — rather than a hand-pasted "Integrations → Webhooks"
+        URL — guarantees the emoji actually render. ``avatar`` is a data URI
+        (`data:image/png;base64,…`) if given.
+        """
+        existing = self._curl("GET", f"/channels/{self.channel_id}/webhooks") or []
+        for wh in existing:
+            if wh.get("name") == name and str(wh.get("application_id") or "") == self.application_id:
+                return f"https://discord.com/api/webhooks/{wh['id']}/{wh['token']}"
+        body: dict = {"name": name}
+        if avatar is not None:
+            body["avatar"] = avatar
+        wh = self._curl("POST", f"/channels/{self.channel_id}/webhooks", body)
+        return f"https://discord.com/api/webhooks/{wh['id']}/{wh['token']}"
+
+    def app_emojis(self) -> dict[str, str]:
+        """This app's application emoji as ``{name: id}`` (`GET
+        /applications/{app}/emojis`). Use the ids to build `<:name:id>` refs the
+        bot or an app-owned webhook can post. Names are `[A-Za-z0-9_]{2,32}`."""
+        resp = self._curl("GET", f"/applications/{self.application_id}/emojis")
+        items = resp.get("items", resp) if isinstance(resp, dict) else resp
+        return {e["name"]: str(e["id"]) for e in (items or [])}
+
+    def upload_app_emoji(self, name: str, png: Path | str) -> str:
+        """Upload ``png`` as application emoji ``name``; return its id (`POST
+        /applications/{app}/emojis`). ``name`` must match `[A-Za-z0-9_]{2,32}`
+        (no ``-`` — map e.g. Slack's ``arrow_deg-30`` to ``arrow_degm30``)."""
+        if not re.fullmatch(r"[A-Za-z0-9_]{2,32}", name):
+            raise ValueError(
+                f"Discord emoji name must be [A-Za-z0-9_]{{2,32}} (no '-'); got {name!r}"
+            )
+        data = Path(png).read_bytes()
+        image = "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+        resp = self._curl("POST", f"/applications/{self.application_id}/emojis", {
+            "name": name, "image": image,
+        })
+        return str(resp["id"])
 
     def edit(self, message_id: str, content: str, *, images: Sequence[Image] = ()) -> Message:
         if len(content) > MESSAGE_LIMIT:
