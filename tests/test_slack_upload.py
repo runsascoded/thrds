@@ -87,14 +87,15 @@ def test_path_image_uploads_and_builds_slack_file_block(fake, tmp_path):
     assert fake.calls[0][1] == {"filename": "plot.png", "length": str(len(PNG))}
     assert fake.calls[1][1] == {"files": [{"id": "F1"}]}
     assert fake.uploaded_bytes == [PNG]
-    # The message carries a slack_file image block with the sha in alt_text.
+    # The message carries a slack_file block whose alt_text holds the renderable
+    # marker (real path + sha fragment).
     data = _last_post(fake)
     assert data["blocks"][-1] == {
         "type": "image", "slack_file": {"id": "F1"},
-        "alt_text": f"usage⁣slackfile:{SHA}",
+        "alt_text": f"usage⁣{png}#thrds_sha={SHA}",
     }
-    # And the block round-trips back to the content marker.
-    assert image_line(from_block(data["blocks"][-1])) == f"![usage](slackfile:{SHA})"
+    # And the block round-trips back to the human-readable content marker.
+    assert image_line(from_block(data["blocks"][-1])) == f"![usage]({png}#thrds_sha={SHA})"
 
 
 def test_non_image_suffix_raises(fake, tmp_path):
@@ -122,7 +123,7 @@ def test_repush_unchanged_image_is_skip_no_reupload(fake, tmp_path):
     png.write_bytes(PNG)
     # Live thread already holds our OP whose block reconstructs the same marker.
     live_block = {"type": "image", "slack_file": {"id": "F0"},
-                  "alt_text": f"cap⁣slackfile:{SHA}"}
+                  "alt_text": f"cap⁣{png}#thrds_sha={SHA}"}
     fake._history = [{
         "ts": "100.000", "bot_id": "B1",
         "blocks": [

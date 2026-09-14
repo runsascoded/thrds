@@ -34,6 +34,8 @@ from .imageblock import (
     slack_file_block,
     split_trailing_images,
     to_block as image_to_block,
+    upload_marker,
+    upload_path,
     upload_sha,
 )
 from .linked import (
@@ -204,10 +206,9 @@ class SlackClient:
         self._bot_ids: tuple[str, str | None] | None = None
         self._user_name_cache: dict[str, str] = {}
         self._channels_by_name_cache: dict[str, str] | None = None
-        # Lazy-upload bookkeeping (`specs/slack-lazy-image-upload.md`), reset per
-        # `sync`: `sha → local path` staged by the image fold for `post`/`edit`
-        # to upload; `sha → file_id` de-dups uploads within one push.
-        self._pending_uploads: dict[str, Path] = {}
+        # Lazy-upload de-dup (`specs/slack-lazy-image-upload.md`), reset per
+        # `sync`: `sha → file_id`, so one image uploads once per push. The path
+        # rides in the content marker itself, so no separate staging map.
         self._uploaded_file_ids: dict[str, str] = {}
 
     @property
@@ -594,10 +595,11 @@ class SlackClient:
         canonical, idempotent form (image blocks that round-trip on read-back).
 
         A ``url`` image folds to ``![alt](url){bust?}``. A local-``path`` image
-        (no url) is content-addressed: its bytes are hashed, staged for upload
-        (`_pending_uploads`), and folded as ``![alt](slackfile:<sha>)`` — so a
-        bytes change is a content diff (re-upload iff changed) and an unchanged
-        image is a no-op converge. ``url`` wins when an image carries both."""
+        (no url) is content-addressed but stays **renderable and readable**: it
+        folds to ``![alt](<path>#thrds_sha=<sha>)`` — the URL is the real file
+        path (so a viewer shows it; the ``#…`` fragment is client-only and
+        stripped before fetch), and the sha makes a bytes change a content diff
+        (re-upload iff changed). ``url`` wins when an image carries both."""
         if not images:
             return content
         lines = []
@@ -612,8 +614,7 @@ class SlackClient:
                     f"got {path.name!r}"
                 )
             sha = _image_sha(path.read_bytes())
-            self._pending_uploads[sha] = path
-            lines.append(image_line(ImageRef(alt=im.alt, url=f"slackfile:{sha}")))
+            lines.append(image_line(ImageRef(alt=im.alt, url=upload_marker(str(im.path), sha))))
         # `\n\n` between body and each image line — matches `_message_markdown`'s
         # read-back reconstruction, so a converge is a no-op.
         extra = "\n\n".join(lines)
@@ -638,10 +639,10 @@ class SlackClient:
         )
         return up["file_id"]
 
-    def _upload_cached(self, sha: str) -> str:
-        """`file_id` for the staged image ``sha``, uploading once per push."""
+    def _upload_cached(self, sha: str, path: str) -> str:
+        """`file_id` for image ``sha`` at ``path``, uploading once per push."""
         if sha not in self._uploaded_file_ids:
-            self._uploaded_file_ids[sha] = self._upload_file(self._pending_uploads[sha])
+            self._uploaded_file_ids[sha] = self._upload_file(Path(path))
         return self._uploaded_file_ids[sha]
 
     def _lift_image_blocks(self, data: dict, images: list[ImageRef]) -> None:
@@ -675,7 +676,7 @@ class SlackClient:
             )
         token = bust_token()
         img_blocks = [
-            slack_file_block(ref, self._upload_cached(upload_sha(ref)))
+            slack_file_block(ref, self._upload_cached(upload_sha(ref), upload_path(ref)))
             if is_upload_ref(ref) else image_to_block(ref, token)
             for ref in images
         ]
@@ -744,8 +745,7 @@ class SlackClient:
         """
         self._suppress_unfurls = suppress_unfurls
         self._metadata_by_content = metadata
-        # Fresh per-push upload bookkeeping (staged paths + upload de-dup cache).
-        self._pending_uploads = {}
+        # Fresh per-push upload de-dup cache.
         self._uploaded_file_ids = {}
         # Slack carries images in content (image blocks that round-trip on
         # read-back), so fold any `Msg.images` into content up front: the

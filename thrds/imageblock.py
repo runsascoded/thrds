@@ -32,34 +32,48 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 BUST_PARAM = 'thrds_bust'
 
-# An uploaded (local-bytes) image is marked in content as `![alt](slackfile:<sha>)`
-# — the sha is the file's content hash, so a bytes change shows as a content diff
-# (re-upload iff changed; `specs/slack-lazy-image-upload.md`). The live block
-# stores that sha in `alt_text` after an invisible U+2063 separator, so read-back
-# reconstructs the same marker without any persisted state.
-UPLOAD_SCHEME = 'slackfile:'
-_ALT_SHA_SEP = '⁣' + UPLOAD_SCHEME
+# An uploaded (local-bytes) image keeps the author's real reference visible and
+# renderable: the marker is `![alt](<path>#thrds_sha=<sha>)`. The URL is the
+# actual file path, so a Markdown viewer renders it (the `#…` fragment is
+# client-only — stripped before the file is fetched — and never reaches a
+# server); the sha is the file's content hash, so a bytes change shows up as a
+# content diff (re-upload iff changed; `specs/slack-lazy-image-upload.md`). The
+# live block stores the whole marker URL in `alt_text` after an invisible U+2063
+# separator, so read-back rebuilds the same marker with no persisted state.
+UPLOAD_FRAG = 'thrds_sha'
+_UPLOAD_TAG = f'#{UPLOAD_FRAG}='
+_ALT_SEP = '⁣'
+
+
+def upload_marker(path: str, sha: str) -> str:
+    """The renderable upload URL for a local image: ``<path>#thrds_sha=<sha>``."""
+    return f'{path}{_UPLOAD_TAG}{sha}'
 
 
 def is_upload_ref(ref: 'ImageRef') -> bool:
-    """Whether ``ref`` is an uploaded-file image (`slackfile:<sha>`) vs a URL."""
-    return ref.url.startswith(UPLOAD_SCHEME)
+    """Whether ``ref`` is an uploaded-file image (carries the sha fragment)."""
+    return _UPLOAD_TAG in ref.url
+
+
+def upload_path(ref: 'ImageRef') -> str:
+    """The local path of an uploaded-file `ImageRef` (marker URL minus the sha)."""
+    return ref.url.split(_UPLOAD_TAG, 1)[0]
 
 
 def upload_sha(ref: 'ImageRef') -> str:
-    """The content sha of an uploaded-file `ImageRef` (its `slackfile:<sha>` url)."""
-    return ref.url[len(UPLOAD_SCHEME):]
+    """The content sha of an uploaded-file `ImageRef` (its ``thrds_sha`` fragment)."""
+    return ref.url.split(_UPLOAD_TAG, 1)[1]
 
 
 def slack_file_block(ref: 'ImageRef', file_id: str) -> dict:
     """`ImageRef` (an uploaded image) + its Slack ``file_id`` → an ``image`` block
-    that references the file by id (no public URL). The content sha rides in
-    ``alt_text`` after an invisible separator so `from_block` can rebuild the
-    `![alt](slackfile:<sha>)` marker on read-back."""
+    that references the file by id (no public URL). The full marker URL
+    (``<path>#thrds_sha=<sha>``) rides in ``alt_text`` after an invisible
+    separator so `from_block` can rebuild the exact ``![alt](path#sha)`` line."""
     return {
         'type': 'image',
         'slack_file': {'id': file_id},
-        'alt_text': f'{ref.alt}{_ALT_SHA_SEP}{upload_sha(ref)}',
+        'alt_text': f'{ref.alt}{_ALT_SEP}{ref.url}',
     }
 
 # `![alt](url)` alone on its line, optional `{bust}` suffix. Alt may be empty
@@ -182,8 +196,8 @@ def from_block(block: dict) -> ImageRef | None:
     if block.get('type') != 'image':
         return None
     alt = block.get('alt_text', '')
-    if _ALT_SHA_SEP in alt:
-        clean, _, sha = alt.partition(_ALT_SHA_SEP)
-        return ImageRef(alt=clean, url=f'{UPLOAD_SCHEME}{sha}')
+    if _ALT_SEP in alt:
+        clean, _, marker_url = alt.partition(_ALT_SEP)
+        return ImageRef(alt=clean, url=marker_url)
     url, bust = strip_bust(block.get('image_url', ''))
     return ImageRef(alt=alt, url=url, bust=bust)
