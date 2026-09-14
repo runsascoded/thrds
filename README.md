@@ -156,7 +156,20 @@ thrds discord thread             # dump the pushed thread's messages (id + conte
 
 `preview` serves the doc at `localhost:3077`, rendered through Discord's real markdown semantics (a vendored, prebuilt bundle of the `discord-agent` parser/renderer — no node needed at install time; `scripts/sync-preview-bundle` refreshes it, `thrds/preview/BUNDLE_PROVENANCE` records the source commit). Edits in the page save back to the `.md` (mtime-guarded, conflict banner on races); `-c` commits each save, so UI iterations land in the gist trajectory like any other edit.
 
-`push` posts the doc as a bot: the OP (before the first `+++`) goes to the channel and each reply into a thread opened off it (`thread` dumps that thread back). Re-pushing a session reconciles the live thread to the doc (edit changed messages, add new replies, delete removed ones); the one unsupported transition is growing a lone OP into a thread on re-push (re-init for that). Config comes from `THRDS_DISCORD_BOT_TOKEN` (never a flag) plus `--channel`/`THRDS_DISCORD_CHANNEL` and `--guild`/`THRDS_DISCORD_GUILD`; `-n` previews the plan with no token. A bot posts under one identity — per-message sender (avatars/names, like the Slack digest's mosaic) needs the webhook transport (`DiscordWebhookClient`; see [Platform capabilities](#platform-capabilities) and [`specs/discord-push.md`](specs/discord-push.md)).
+`push` posts the doc as a bot: the OP (before the first `+++`) goes to the channel and each reply into a thread opened off it (`thread` dumps that thread back). Re-pushing a session reconciles the live thread to the doc (edit changed messages, add new replies, delete removed ones); the one unsupported transition is growing a lone OP into a thread on re-push (re-init for that). Config comes from `THRDS_DISCORD_BOT_TOKEN` (never a flag) plus `--channel`/`THRDS_DISCORD_CHANNEL` and `--guild`/`THRDS_DISCORD_GUILD`; `-n` previews the plan with no token. A bot posts under one identity — for **per-message sender** (avatars/names, like the Slack digest's mosaic), give a reply a custom sender in the doc and `push` routes it through a webhook:
+
+```markdown
+---
+sender.alice.name: Alice
+sender.alice.avatar: https://example.com/alice.png
+---
+Weekly digest.
+
++++ as alice
+Alice shipped X.
+```
+
+The bot posts the OP + opens the thread; each `+++ as <name>` reply posts through the webhook (`DiscordWebhookClient`) with that profile's name/avatar (`sender.<name>.avatar` takes a URL or a `:emoji:`). This needs `THRDS_DISCORD_WEBHOOK` (a secret — never a flag); the OP itself can't carry a custom sender (it anchors the thread as the bot). Programmatic callers build `Thread([Msg(...)])` and hand it to `DiscordHybridClient` directly. See [Platform capabilities](#platform-capabilities), [`specs/doc-sender-syntax.md`](specs/doc-sender-syntax.md), and [`specs/discord-push.md`](specs/discord-push.md).
 
 ### Bluesky — `thrds bsky`
 

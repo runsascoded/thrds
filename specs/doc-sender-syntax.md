@@ -63,8 +63,8 @@ A new `resolve_messages(thread: DocThread, fm: Frontmatter) -> list[str | Msg]`:
 
 ## CLI wiring (`thrds/cli.py`)
 
-- **`slack push`**: `SlackClient` already honors `Msg` per-message sender natively — just feed the resolved list. No new config.
-- **`discord push`**:
+- **`slack push`**: **deferred** (bigger than it looked). `SlackClient` honors `Msg` per-message sender at the *client* level, but the CLI push path is the staging/prod terraform machinery — `read_threads` drops per-file frontmatter, and `Thread`s are built deep inside `sync_threads_staging` / `_sync_owned_thread`. Wiring it means plumbing frontmatter through `read_threads` → the staging sync, a separable chunk; Slack per-sender is meanwhile fully available programmatically via `Msg`. **Interim guard**: `_sync_owned_thread` (the single per-thread choke point for staging/promote/prod) raises if any message carries a sender ref, so `slack push` of a `+++ as` doc errors clearly instead of silently posting as the default identity.
+- **`discord push`** (done):
   - No senders in the doc → unchanged (bot-only, as today).
   - Any reply carries a sender → **require `THRDS_DISCORD_WEBHOOK`** (new env, the URL is a secret — never a flag, never echoed), build `DiscordHybridClient(DiscordClient(...), DiscordWebhookClient(webhook))`, and `sync` through it. Missing webhook → raise naming it (this is the config-resolver deferred in `discord-push.md` #5).
   - **`op_sender` on Discord → error**: the OP anchors the thread as the bot's single identity (a webhook can't open a thread), so a custom OP sender is unsupported — matches `DiscordHybridClient`'s existing OP-override raise. (Slack allows it.)
@@ -83,3 +83,15 @@ A new `resolve_messages(thread: DocThread, fm: Frontmatter) -> list[str | Msg]`:
 ## Out of scope
 
 Sender syntax in the legacy multi-thread `parse_doc` layout; auto-reposting on sender drift (already deferred in `per-message-sender.md`); closing Discord's `list_messages` foreign/sender gap (#2).
+
+## Implemented (2026-09-14)
+
+Shared doc/md layer + Discord push wired; Slack CLI push deferred (guarded).
+
+- **`doc.py`**: `SenderProfile` (name/icon_url/icon_emoji); `DocMessage.sender`; `Frontmatter.op_sender` + `senders: dict[str, SenderProfile]`.
+- **`md.py`**: `+++ as <name>` in the reply grammar (a `+++ …` line that isn't a valid delimiter now raises rather than being swallowed as content, so `+++ @a as b` is a clear error); `sender.<name>.{name,avatar}` + `op_sender` frontmatter (flat keys, string-safe; `:emoji:` → `icon_emoji`, else `icon_url`); parse-time ref validation; canonical serialize (round-trip preserved); `op_sender` rejected in multi-thread `parse_doc`. New `resolve_messages(messages, frontmatter) -> list[str | Msg]` — the doc→`sync` bridge; a sender-free doc yields the identical `list[str]` as before.
+- **`cli.py` `discord push`**: resolves messages; any reply with a sender routes through `DiscordHybridClient` and **requires `THRDS_DISCORD_WEBHOOK`** (secret, never a flag; a fresh dry-run needs neither token nor webhook); a custom `op_sender` on Discord raises (the OP anchors the thread as the bot). This is the config-resolver deferred in `discord-push.md` #5.
+- **`slack.py`**: interim guard in `_sync_owned_thread` (see above).
+- Tests: `test_doc_sender.py` (11 — parse/serialize/round-trip/validation/`resolve_messages`); `test_discord_cli.py` +3 (webhook-routed per-sender push, missing-webhook raise, `op_sender` raise). Two existing OP-author error-message assertions updated (message widened to name `sender`).
+
+Remaining: **`slack push` per-sender** (plumb frontmatter through `read_threads` → staging/prod sync) — separable follow-up. Doc→push is lossless; a Discord `pull`→doc won't reconstruct `as` refs until `discord-push.md` #2 (foreign/sender gap) lands.

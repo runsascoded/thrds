@@ -18,10 +18,11 @@ from thrds.cli import (
     DISCORD_BOT_TOKEN_ENV,
     DISCORD_CHANNEL_ENV,
     DISCORD_GUILD_ENV,
+    DISCORD_WEBHOOK_ENV,
     SLACK_TOKEN_ENV,
     cli,
 )
-from thrds.discord import DiscordClient
+from thrds.discord import DiscordClient, DiscordWebhookClient
 from thrds.state import STATE_PATH
 
 
@@ -488,6 +489,91 @@ def test_discord_push_repush_lone_op_grow_refused(in_tmp, monkeypatch):
         'Error: Session has a lone OP (op1) and the doc now has 2 messages; '
         'growing a lone OP into a thread on re-push is not supported. '
         'Re-init the session to push a fresh thread.'
+    )
+
+
+class _WebhookRecorder:
+    """Stub for `DiscordWebhookClient._curl_raw`: records `(method, url, data)`;
+    POSTs return ids `w1`, `w2`, …."""
+    def __init__(self):
+        self.calls: list[tuple[str, str, dict | None]] = []
+        self._n = 0
+
+    def __call__(self, method, url, data=None, *, headers=None, label=None):
+        self.calls.append((method, url, data))
+        if method == 'POST':
+            self._n += 1
+            return {'id': f'w{self._n}'}
+        return None
+
+
+_WEBHOOK = 'https://discord.com/api/webhooks/1/tok'
+
+
+def test_discord_push_per_sender_routes_replies_through_webhook(in_tmp, monkeypatch):
+    # A doc with `+++ as <name>` replies + a webhook env pushes the OP + thread
+    # via the bot and each per-sender reply via the webhook (DiscordHybridClient).
+    doc = (
+        "---\n"
+        "sender.alice.name: Alice\n"
+        "sender.alice.avatar: https://x/a.png\n"
+        "sender.bob.name: Bob\n"
+        "sender.bob.avatar: https://x/b.png\n"
+        "---\n"
+        "OP body\n\n+++ as alice\nreply A\n\n+++ as bob\nreply B\n"
+    )
+    session = _init_discord(in_tmp, monkeypatch, doc_text=doc)
+    _set_discord_env(monkeypatch)
+    monkeypatch.setenv(DISCORD_WEBHOOK_ENV, _WEBHOOK)
+    bot_rec = _CurlRecorder()
+    hook_rec = _WebhookRecorder()
+    monkeypatch.setattr(DiscordClient, '_curl', lambda self, m, p, data=None: bot_rec(m, p, data))
+    monkeypatch.setattr(
+        DiscordWebhookClient, '_curl_raw',
+        lambda self, method, url, data=None, *, headers=None, label=None: hook_rec(
+            method, url, data, headers=headers, label=label,
+        ),
+    )
+
+    result = CliRunner().invoke(cli, ['discord', 'push', '-N', 'Digest'])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert bot_rec.calls == [
+        ('POST', '/channels/CHAN/messages', {'content': 'OP body'}),
+        ('POST', '/channels/CHAN/messages/m1/threads', {'name': 'Digest'}),
+    ]
+    assert hook_rec.calls == [
+        ('POST', f'{_WEBHOOK}?wait=true&thread_id=thread-1',
+         {'content': 'reply A', 'username': 'Alice', 'avatar_url': 'https://x/a.png'}),
+        ('POST', f'{_WEBHOOK}?wait=true&thread_id=thread-1',
+         {'content': 'reply B', 'username': 'Bob', 'avatar_url': 'https://x/b.png'}),
+    ]
+    assert result.stdout == 'https://discord.com/channels/GUILD/CHAN/m1\n'
+    state = SessionState.load(session)
+    assert (state.discord_op_id, state.discord_thread_id) == ('m1', 'thread-1')
+
+
+def test_discord_push_per_sender_without_webhook_raises(in_tmp, monkeypatch):
+    doc = "---\nsender.alice.name: Alice\n---\nOP body\n\n+++ as alice\nreply A\n"
+    _init_discord(in_tmp, monkeypatch, doc_text=doc)
+    _set_discord_env(monkeypatch)
+    monkeypatch.delenv(DISCORD_WEBHOOK_ENV, raising=False)
+    result = CliRunner().invoke(cli, ['discord', 'push'])
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        'Error: Doc has per-sender replies (`+++ as <name>`); set THRDS_DISCORD_WEBHOOK '
+        'to a Discord webhook URL to post them.'
+    )
+
+
+def test_discord_push_op_sender_raises(in_tmp, monkeypatch):
+    doc = "---\nop_sender: gcs\nsender.gcs.name: GCS\n---\nOP body\n"
+    _init_discord(in_tmp, monkeypatch, doc_text=doc)
+    _set_discord_env(monkeypatch)
+    result = CliRunner().invoke(cli, ['discord', 'push'])
+    assert result.exit_code == 2
+    assert result.stderr.splitlines()[-1] == (
+        "Error: Discord's OP anchors the thread as the bot's single identity, so `op_sender` "
+        "isn't supported; put per-sender content in the replies (`+++ as <name>`)."
     )
 
 

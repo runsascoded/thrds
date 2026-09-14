@@ -166,7 +166,7 @@ def test_foreign_reply_round_trips():
 def test_foreign_op_raises_on_serialize():
     """Top-level = ours by definition. A DocMessage(author=X) as OP is a data-model bug."""
     bad = Doc(threads=[DocThread(slug="a", messages=[DocMessage("OP.", author="alice")])])
-    with pytest.raises(ValueError, match="OP author must be None"):
+    with pytest.raises(ValueError, match="OP author/sender must be None"):
         serialize_doc(bad)
 
 

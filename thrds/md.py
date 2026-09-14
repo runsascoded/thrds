@@ -40,15 +40,24 @@ import difflib
 import re
 from dataclasses import dataclass
 
-from .doc import Doc, DocMessage, DocThread, Frontmatter
+from .core import Msg
+from .doc import Doc, DocMessage, DocThread, Frontmatter, SenderProfile
 
 
 _HEADER_RE = re.compile(r'^===(?:[ \t]+([a-zA-Z0-9_-]+))?[ \t]*$')
-# `+++`               → reply from us (author=None)
+# `+++`               → reply from us (author=None), default identity
 # `+++ @alice`        → reply from `alice`; foreign, sync leaves it alone
-_REPLY_RE = re.compile(r'^\+\+\+(?:[ \t]+@([a-zA-Z0-9._-]+))?[ \t]*$')
+# `+++ as gcs`        → our reply posted as the `gcs` sender profile (frontmatter)
+_REPLY_RE = re.compile(
+    r'^\+\+\+(?:[ \t]+(?:@(?P<author>[a-zA-Z0-9._-]+)|as[ \t]+(?P<sender>[a-zA-Z0-9_-]+)))?[ \t]*$'
+)
+# Any line that *intends* to be a reply delimiter (`+++` then whitespace or EOL);
+# one matching this but not `_REPLY_RE` is a malformed delimiter, not content.
+_REPLY_DELIM_RE = re.compile(r'^\+\+\+([ \t].*)?$')
+_SENDER_KEY_RE = re.compile(r'^sender\.(?P<name>[a-zA-Z0-9_-]+)\.(?P<field>name|avatar)$')
+_EMOJI_RE = re.compile(r'^:[a-zA-Z0-9_+-]+:$')
 _FRONTMATTER_DELIM = '---'
-_KNOWN_FRONTMATTER_KEYS = ('channel', 'thread_ts', 'session_id')
+_KNOWN_FRONTMATTER_KEYS = ('channel', 'thread_ts', 'session_id', 'op_sender')
 
 
 @dataclass
@@ -84,7 +93,8 @@ def _parse_frontmatter_body(body: str) -> Frontmatter:
     Deliberately minimal — no nested structures, no list values, no quoting.
     Bump to PyYAML if we ever need more shape than string scalars.
     """
-    data: dict[str, str] = {}
+    scalars: dict[str, str] = {}
+    sender_fields: dict[str, dict[str, str]] = {}
     for i, line in enumerate(body.split('\n')):
         stripped = line.strip()
         if not stripped or stripped.startswith('#'):
@@ -92,11 +102,71 @@ def _parse_frontmatter_body(body: str) -> Frontmatter:
         if ':' not in stripped:
             raise ValueError(f"Malformed frontmatter line {i}: {line!r}")
         k, _, v = stripped.partition(':')
-        data[k.strip()] = v.strip()
-    unknown = set(data) - set(_KNOWN_FRONTMATTER_KEYS)
+        k, v = k.strip(), v.strip()
+        sender_m = _SENDER_KEY_RE.match(k)
+        if sender_m:
+            sender_fields.setdefault(sender_m.group('name'), {})[sender_m.group('field')] = v
+        else:
+            scalars[k] = v
+    unknown = set(scalars) - set(_KNOWN_FRONTMATTER_KEYS)
     if unknown:
         raise ValueError(f"Unknown frontmatter keys: {sorted(unknown)}")
-    return Frontmatter(**data)
+    senders = {name: _build_profile(fields) for name, fields in sender_fields.items()}
+    return Frontmatter(senders=senders, **scalars)
+
+
+def _build_profile(fields: dict[str, str]) -> SenderProfile:
+    """Build a `SenderProfile` from its ``{name, avatar}`` frontmatter fields.
+
+    ``avatar`` resolves to ``icon_emoji`` when it's a ``:emoji:``, else to
+    ``icon_url`` (icon-as-a-unit, matching `Msg`).
+    """
+    name = fields.get('name')
+    avatar = fields.get('avatar')
+    icon_url = icon_emoji = None
+    if avatar is not None:
+        if _EMOJI_RE.match(avatar):
+            icon_emoji = avatar
+        else:
+            icon_url = avatar
+    return SenderProfile(name=name, icon_url=icon_url, icon_emoji=icon_emoji)
+
+
+def resolve_messages(messages: list[DocMessage], frontmatter: Frontmatter) -> list[str | Msg]:
+    """Resolve parsed messages to `sync`'s desired input (bare ``str`` or `Msg`).
+
+    ``messages`` is the OP-first list of *our* messages (foreign ones filtered by
+    the caller, as before). A message with a sender ref — the OP via
+    ``frontmatter.op_sender``, a reply via its own ``sender`` — becomes a `Msg`
+    carrying that profile's name/avatar; a message with none stays a bare content
+    ``str``, so a sender-free doc yields the exact ``list[str]`` it did before this
+    feature (zero behavior change). Refs are already validated at parse time.
+    """
+    out: list[str | Msg] = []
+    for i, m in enumerate(messages):
+        ref = frontmatter.op_sender if i == 0 else m.sender
+        if ref is None:
+            out.append(m.content)
+        else:
+            p = frontmatter.senders[ref]
+            out.append(Msg(m.content, username=p.name, icon_url=p.icon_url, icon_emoji=p.icon_emoji))
+    return out
+
+
+def _validate_sender_refs(threads: list[DocThread], frontmatter: Frontmatter, *, op_sender: bool) -> None:
+    """Raise if any `op_sender` / `+++ as <name>` ref isn't a declared profile."""
+    defined = set(frontmatter.senders)
+    refs: list[str] = []
+    if op_sender and frontmatter.op_sender is not None:
+        refs.append(frontmatter.op_sender)
+    for thread in threads:
+        refs += [m.sender for m in thread.messages if m.sender is not None]
+    undefined = sorted({r for r in refs if r not in defined})
+    if undefined:
+        raise ValueError(
+            f"Undefined sender ref(s): {undefined}; declare via `sender.<name>.name` / "
+            f"`sender.<name>.avatar` frontmatter keys"
+        )
 
 
 def parse_doc(text: str) -> ParsedDoc:
@@ -144,6 +214,12 @@ def parse_doc(text: str) -> ParsedDoc:
             i += 1
         threads.append(DocThread(messages=_split_messages(lines[start:i], slug), slug=slug))
 
+    if frontmatter.op_sender is not None:
+        raise ValueError(
+            "`op_sender` is only supported in per-thread files, not multi-thread docs "
+            "(which OP would it name?); annotate replies with `+++ as <sender>` instead"
+        )
+    _validate_sender_refs(threads, frontmatter, op_sender=False)
     return ParsedDoc(doc=Doc(threads=threads, preamble=preamble), frontmatter=frontmatter)
 
 
@@ -155,16 +231,27 @@ def _split_messages(lines: list[str], label: str | None) -> list[DocMessage]:
     """
     current: list[str] = []
     current_author: str | None = None  # OP is always ours
+    current_sender: str | None = None  # OP sender is frontmatter `op_sender`, not here
     messages: list[DocMessage] = []
     for line in lines:
-        reply_m = _REPLY_RE.match(line)
-        if reply_m:
-            messages.append(DocMessage(content='\n'.join(current).strip(), author=current_author))
+        if _REPLY_DELIM_RE.match(line):
+            reply_m = _REPLY_RE.match(line)
+            if reply_m is None:
+                raise ValueError(
+                    f"Thread {label!r}: malformed reply delimiter {line!r} — use `+++`, "
+                    f"`+++ @author` (foreign), or `+++ as <sender>` (custom sender)"
+                )
+            messages.append(DocMessage(
+                content='\n'.join(current).strip(), author=current_author, sender=current_sender,
+            ))
             current = []
-            current_author = reply_m.group(1)
+            current_author = reply_m.group('author')
+            current_sender = reply_m.group('sender')
             continue
         current.append(line)
-    messages.append(DocMessage(content='\n'.join(current).strip(), author=current_author))
+    messages.append(DocMessage(
+        content='\n'.join(current).strip(), author=current_author, sender=current_sender,
+    ))
     if not messages[0].content:
         raise ValueError(f"Thread {label!r}: OP (first message) is empty")
     for j, m in enumerate(messages[1:], start=1):
@@ -208,25 +295,40 @@ def parse_thread(text: str, slug: str | None = None) -> ParsedThread:
                 f"via `thrds slack migrate`"
             )
 
-    return ParsedThread(
-        thread=DocThread(messages=_split_messages(body, slug), slug=slug),
-        frontmatter=frontmatter,
-    )
+    thread = DocThread(messages=_split_messages(body, slug), slug=slug)
+    _validate_sender_refs([thread], frontmatter, op_sender=True)
+    return ParsedThread(thread=thread, frontmatter=frontmatter)
 
 
 def _render_frontmatter(frontmatter: Frontmatter | None) -> list[str]:
     """Frontmatter block as serialized parts (empty when absent or all-None)."""
     if frontmatter is None:
         return []
-    fm_items = [
-        (k, getattr(frontmatter, k))
+    fm_lines = [
+        f'{k}: {getattr(frontmatter, k)}'
         for k in _KNOWN_FRONTMATTER_KEYS
         if getattr(frontmatter, k) is not None
     ]
-    if not fm_items:
+    for name in sorted(frontmatter.senders):
+        profile = frontmatter.senders[name]
+        if profile.name is not None:
+            fm_lines.append(f'sender.{name}.name: {profile.name}')
+        avatar = profile.icon_url if profile.icon_url is not None else profile.icon_emoji
+        if avatar is not None:
+            fm_lines.append(f'sender.{name}.avatar: {avatar}')
+    if not fm_lines:
         return []
-    fm_body = '\n'.join(f'{k}: {v}' for k, v in fm_items)
+    fm_body = '\n'.join(fm_lines)
     return [f'{_FRONTMATTER_DELIM}\n{fm_body}\n{_FRONTMATTER_DELIM}']
+
+
+def _reply_delim(msg: DocMessage) -> str:
+    """The `+++` line for a reply: foreign (`@author`), custom sender (`as`), or bare."""
+    if msg.author:
+        return f'+++ @{msg.author}'
+    if msg.sender:
+        return f'+++ as {msg.sender}'
+    return '+++'
 
 
 def serialize_thread(thread: DocThread, frontmatter: Frontmatter | None = None) -> str:
@@ -240,11 +342,12 @@ def serialize_thread(thread: DocThread, frontmatter: Frontmatter | None = None) 
 
     for i, msg in enumerate(thread.messages):
         if i > 0:
-            parts.append(f'+++ @{msg.author}' if msg.author else '+++')
-        if i == 0 and msg.author is not None:
+            parts.append(_reply_delim(msg))
+        elif msg.author is not None or msg.sender is not None:
             raise ValueError(
-                f"Thread {thread.slug!r}: OP author must be None (top-level = ours), "
-                f"got {msg.author!r}"
+                f"Thread {thread.slug!r}: OP author/sender must be None (top-level = ours; "
+                f"OP sender lives in frontmatter `op_sender`), got author={msg.author!r} "
+                f"sender={msg.sender!r}"
             )
         parts.append(msg.content.strip())
 
@@ -314,9 +417,12 @@ def serialize_doc(doc: Doc, frontmatter: Frontmatter | None = None) -> str:
         parts.append(header)
         for i, msg in enumerate(thread.messages):
             if i > 0:
-                parts.append(f'+++ @{msg.author}' if msg.author else '+++')
-            if i == 0 and msg.author is not None:
-                raise ValueError(f"Thread {thread.slug!r}: OP author must be None (top-level = ours), got {msg.author!r}")
+                parts.append(_reply_delim(msg))
+            elif msg.author is not None or msg.sender is not None:
+                raise ValueError(
+                    f"Thread {thread.slug!r}: OP author/sender must be None (top-level = ours), "
+                    f"got author={msg.author!r} sender={msg.sender!r}"
+                )
             parts.append(msg.content.strip())
 
     return '\n\n'.join(parts) + '\n'

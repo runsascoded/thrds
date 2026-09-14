@@ -979,6 +979,18 @@ class SlackClient:
                 "message has an author, which shouldn't be possible (OP must "
                 "be ours). Data-model bug."
             )
+        if any(m.sender is not None for m in ours):
+            # Per-message sender (`+++ as <name>`) isn't wired through the Slack
+            # staging/prod push yet (it drops frontmatter in `read_threads`).
+            # Raise rather than silently posting as the default identity —
+            # Slack per-sender is available programmatically via `Msg`, and doc-
+            # authored per-sender is live for `discord push`. See
+            # specs/doc-sender-syntax.md.
+            raise ValueError(
+                f"Thread {thread.slug!r}: per-message sender (`+++ as <name>`) isn't wired "
+                "for `slack push` yet — use the programmatic `Msg` API, or `thrds discord "
+                "push`. See specs/doc-sender-syntax.md."
+            )
         core_thread = Thread(messages=[m.content for m in ours])
         metadata: dict[str, dict] = {}
         for i, m in enumerate(ours):

@@ -2919,6 +2919,7 @@ def discord_preview(commit: bool, port: int | None, no_open: bool):
 DISCORD_BOT_TOKEN_ENV = 'THRDS_DISCORD_BOT_TOKEN'
 DISCORD_CHANNEL_ENV = 'THRDS_DISCORD_CHANNEL'
 DISCORD_GUILD_ENV = 'THRDS_DISCORD_GUILD'
+DISCORD_WEBHOOK_ENV = 'THRDS_DISCORD_WEBHOOK'
 
 
 def _discord_client(
@@ -2981,20 +2982,46 @@ def discord_push(
     transition is growing a *lone* OP (no thread) into a thread on re-push —
     re-init the session for that (see ``specs/discord-push.md``).
     """
-    from .core import Thread
-    from .md import parse_thread
+    from .core import Msg, Thread
+    from .md import parse_thread, resolve_messages
 
     state = _load_state(expected_platform='discord')
     path = _resolve_doc_path(state, doc_path)
     text = Path(path).read_text()
-    messages = [m.content for m in parse_thread(text).thread.messages]
+    parsed = parse_thread(text)
+    messages = resolve_messages(parsed.thread.messages, parsed.frontmatter)
     name = thread_name or state.discord_thread_name or Path(state.doc_path).stem
+
+    # Per-message sender (name/avatar) is webhook-only on Discord. The OP anchors
+    # the thread as the bot's single identity, so a custom OP sender is unsupported.
+    if parsed.frontmatter.op_sender is not None:
+        raise click.UsageError(
+            "Discord's OP anchors the thread as the bot's single identity, so `op_sender` "
+            "isn't supported; put per-sender content in the replies (`+++ as <name>`)."
+        )
+    per_sender = any(isinstance(m, Msg) for m in messages)
 
     repush = state.discord_op_id is not None
     # A re-push always reads the live thread to compute the diff, so it needs a
     # real token even under --dry-run (unlike a fresh dry-run, which posts and
     # reads nothing).
-    client = _discord_client(state, channel, guild, require_token=repush or not dry_run)
+    require_creds = repush or not dry_run
+    bot = _discord_client(state, channel, guild, require_token=require_creds)
+    if per_sender:
+        # Per-sender replies go through a webhook, into the bot-opened thread.
+        from .discord import DiscordHybridClient, DiscordWebhookClient
+
+        webhook_url = os.environ.get(DISCORD_WEBHOOK_ENV)
+        if not webhook_url:
+            if require_creds:
+                raise click.UsageError(
+                    f'Doc has per-sender replies (`+++ as <name>`); set {DISCORD_WEBHOOK_ENV} '
+                    'to a Discord webhook URL to post them.'
+                )
+            webhook_url = 'dry-run'  # never used — a dry run posts nothing
+        client = DiscordHybridClient(bot, DiscordWebhookClient(webhook_url))
+    else:
+        client = bot
 
     # Reconcile target: fresh push creates the thread; a re-push points `sync`
     # at where the OP/replies already live so its positional diff aligns.

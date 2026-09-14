@@ -135,7 +135,8 @@ def test_serialize_thread_rejects_authored_op():
     with pytest.raises(ValueError) as e:
         serialize_thread(t)
     assert str(e.value) == (
-        "Thread 'a': OP author must be None (top-level = ours), got 'rafal'"
+        "Thread 'a': OP author/sender must be None (top-level = ours; OP sender lives "
+        "in frontmatter `op_sender`), got author='rafal' sender=None"
     )
 
 

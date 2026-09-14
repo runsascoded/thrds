@@ -29,15 +29,35 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class SenderProfile:
+    """A named per-message sender (display name + avatar) declared in frontmatter.
+
+    ``name`` → the message's ``username``; ``icon_url`` / ``icon_emoji`` → its
+    avatar (a ``:emoji:`` avatar value resolves to ``icon_emoji``, anything else
+    to ``icon_url`` — icon-as-a-unit, matching `Msg`). At least one field is set.
+    """
+    name: str | None = None
+    icon_url: str | None = None
+    icon_emoji: str | None = None
+
+
+@dataclass
 class DocMessage:
     """One message in a `DocThread` (OP or reply).
 
     ``author=None`` — belongs to us, syncable. A username (str) marks a
     foreign message (someone else's reply in our thread); preserved by
     sync, never edited.
+
+    ``sender`` is the ref-name of a `SenderProfile` (from frontmatter) to post
+    this *reply* as — ``+++ as <sender>`` in the doc; ``None`` = default
+    identity. Mutually exclusive with ``author`` (a foreign message isn't ours
+    to re-sender). The OP's sender is carried by `Frontmatter.op_sender`, not
+    here (the OP has no ``+++`` delimiter to annotate).
     """
     content: str
     author: str | None = None
+    sender: str | None = None
 
 
 @dataclass
@@ -92,7 +112,14 @@ class Frontmatter:
 
     All fields are optional at the doc level — session state
     (`thrds.yml`) supplies defaults; frontmatter overrides them per-doc.
+
+    ``senders`` maps a ref-name → `SenderProfile` (declared via ``sender.<name>.name``
+    / ``sender.<name>.avatar`` keys); ``op_sender`` names the profile the OP posts
+    as (the OP has no ``+++`` delimiter). Replies reference profiles inline via
+    ``+++ as <name>`` (`DocMessage.sender`).
     """
     channel: str | None = None
     thread_ts: str | None = None
     session_id: str | None = None
+    op_sender: str | None = None
+    senders: dict[str, SenderProfile] = field(default_factory=dict)
